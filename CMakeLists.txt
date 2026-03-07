@@ -33,6 +33,10 @@ add_library(kairos_core STATIC
     src/config/config_store.cpp
     src/config/validation.cpp
     src/core/id_generator.cpp
+    src/kel/value.cpp
+    src/kel/lexer.cpp
+    src/kel/parser.cpp
+    src/kel/evaluator.cpp
     src/persist/migration.cpp
     src/persist/database.cpp
     src/observability/logging.cpp

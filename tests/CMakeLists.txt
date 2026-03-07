@@ -59,3 +59,26 @@ add_executable(test_json_formatter
 )
 target_link_libraries(test_json_formatter PRIVATE kairos_test_helpers)
 gtest_discover_tests(test_json_formatter)
+
+# ── KEL (Kairos Expression Language) tests ────────────────────────────────
+
+# KEL lexer tests
+add_executable(test_kel_lexer
+    unit/kel/lexer_test.cpp
+)
+target_link_libraries(test_kel_lexer PRIVATE kairos_test_helpers)
+gtest_discover_tests(test_kel_lexer)
+
+# KEL parser tests
+add_executable(test_kel_parser
+    unit/kel/parser_test.cpp
+)
+target_link_libraries(test_kel_parser PRIVATE kairos_test_helpers)
+gtest_discover_tests(test_kel_parser)
+
+# KEL evaluator tests
+add_executable(test_kel_evaluator
+    unit/kel/evaluator_test.cpp
+)
+target_link_libraries(test_kel_evaluator PRIVATE kairos_test_helpers)
+gtest_discover_tests(test_kel_evaluator)
