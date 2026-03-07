@@ -5,6 +5,7 @@ bin/
 lib/
 dist/
 .cache/
+.builddir_cache
 third_party/
 !third_party/udpipe
 
