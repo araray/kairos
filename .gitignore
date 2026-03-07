@@ -1,0 +1,100 @@
+# Build directories
+build/
+out/
+bin/
+lib/
+dist/
+.cache/
+third_party/
+!third_party/udpipe
+
+# Skip some
+.auto
+config/dicts/*.json
+sandbox/
+
+# CMake files
+CMakeFiles/
+CMakeCache.txt
+cmake-build-*/
+CTestTestfile.cmake
+Testing/
+install_manifest.txt
+compile_commands.json
+Makefile
+!udpipe-intentpilot_builds/Makefile
+cmake_install.cmake
+
+# IDE/editor cruft
+.idea/
+.vscode/
+.vs/
+*.code-workspace
+*.suo
+*.user
+*.sln
+*.vcxproj*
+*.swp
+*~
+*.zip
+*.tar.xz
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Prerequisites
+*.d
+
+# Compiled Object files
+*.slo
+*.lo
+*.o
+*.obj
+
+# Precompiled Headers
+*.gch
+*.pch
+
+# Compiled Dynamic libraries
+*.so
+*.dylib
+*.dll
+
+# Fortran module files
+*.mod
+*.smod
+
+# Compiled Static libraries
+*.lai
+*.la
+*.a
+*.lib
+
+# Executables
+*.exe
+*.out
+*.app
+
+# Ignore Visual Studio temporary files, build results, and other cache
+.vs/
+*.user
+*.suo
+*.userosscache
+*.sln.docstates
+
+# Ignore build output directories at any level
+**/x64/
+**/arm64/
+**/build/
+**/[Bb]uild*/
+packages/
+CoverageReport/
+
+# Misc
+.auto
+.av.version
+.env
+.python-version
+.ropeproject
+venv/
