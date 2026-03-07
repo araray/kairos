@@ -37,10 +37,15 @@ add_library(kairos_core STATIC
     src/kel/lexer.cpp
     src/kel/parser.cpp
     src/kel/evaluator.cpp
+    src/exec/env_builder.cpp
+    src/exec/runner_pool.cpp
     src/persist/migration.cpp
     src/persist/database.cpp
+    src/persist/db_writer.cpp
+    src/persist/query_reader.cpp
     src/observability/logging.cpp
     src/observability/json_formatter.cpp
+    src/observability/metrics.cpp
 )
 
 target_include_directories(kairos_core PUBLIC
@@ -83,6 +88,7 @@ else()
         src/platform/signals_posix.cpp
         src/platform/threading_posix.cpp
         src/platform/instance_lock_posix.cpp
+        src/exec/process_handle_posix.cpp
     )
     target_link_libraries(kairos_platform PRIVATE pthread)
 endif()

@@ -82,3 +82,44 @@ add_executable(test_kel_evaluator
 )
 target_link_libraries(test_kel_evaluator PRIVATE kairos_test_helpers)
 gtest_discover_tests(test_kel_evaluator)
+
+# ── Phase 2: Execution tests ─────────────────────────────────────────────
+
+# ProcessHandle + BoundedQueue tests
+add_executable(test_process_handle
+    unit/exec/process_handle_test.cpp
+)
+target_link_libraries(test_process_handle PRIVATE kairos_test_helpers)
+gtest_discover_tests(test_process_handle)
+
+# EnvBuilder tests
+add_executable(test_env_builder
+    unit/exec/env_builder_test.cpp
+)
+target_link_libraries(test_env_builder PRIVATE kairos_test_helpers)
+gtest_discover_tests(test_env_builder)
+
+# RunnerPool tests
+add_executable(test_runner_pool
+    unit/exec/runner_pool_test.cpp
+)
+target_link_libraries(test_runner_pool PRIVATE kairos_test_helpers)
+gtest_discover_tests(test_runner_pool)
+
+# ── Phase 2: Persistence tests ───────────────────────────────────────────
+
+# DBWriter + QueryReader tests
+add_executable(test_db_writer
+    unit/persist/db_writer_test.cpp
+)
+target_link_libraries(test_db_writer PRIVATE kairos_test_helpers)
+gtest_discover_tests(test_db_writer)
+
+# ── Phase 2: Observability tests ─────────────────────────────────────────
+
+# Metrics registry tests
+add_executable(test_metrics
+    unit/observability/metrics_test.cpp
+)
+target_link_libraries(test_metrics PRIVATE kairos_test_helpers)
+gtest_discover_tests(test_metrics)
