@@ -1,3 +1,4 @@
+/// include/kairos/persist/migration.hpp
 // ╔════════════════════════════════════════════════════════════════════════════╗
 // ║  kairos/persist/migration.hpp — Forward-only schema migration system      ║
 // ║                                                                           ║

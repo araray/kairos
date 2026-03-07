@@ -1,3 +1,4 @@
+/// include/kairos/platform/platform.hpp
 // ╔════════════════════════════════════════════════════════════════════════════╗
 // ║  kairos/platform/platform.hpp — Unified platform abstraction header       ║
 // ╚════════════════════════════════════════════════════════════════════════════╝

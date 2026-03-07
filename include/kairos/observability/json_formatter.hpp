@@ -1,3 +1,4 @@
+/// include/kairos/observability/json_formatter.hpp
 // ╔════════════════════════════════════════════════════════════════════════════╗
 // ║  kairos/observability/json_formatter.hpp — JSON log formatter             ║
 // ║                                                                           ║

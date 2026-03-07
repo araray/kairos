@@ -1,3 +1,4 @@
+/// src/platform/instance_lock_posix.cpp
 // ╔════════════════════════════════════════════════════════════════════════════╗
 // ║  instance_lock_posix.cpp — Single-instance enforcement via flock()        ║
 // ╚════════════════════════════════════════════════════════════════════════════╝

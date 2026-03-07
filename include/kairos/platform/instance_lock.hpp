@@ -1,3 +1,4 @@
+/// include/kairos/platform/instance_lock.hpp
 // ╔════════════════════════════════════════════════════════════════════════════╗
 // ║  kairos/platform/instance_lock.hpp — Single-instance enforcement          ║
 // ║  Spec reference: §25.7                                                    ║

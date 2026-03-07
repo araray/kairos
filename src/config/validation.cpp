@@ -1,3 +1,4 @@
+/// src/config/validation.cpp
 // ╔════════════════════════════════════════════════════════════════════════════╗
 // ║  validation.cpp — Kairos-specific semantic config validation               ║
 // ║                                                                           ║

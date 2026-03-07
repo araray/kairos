@@ -1,3 +1,4 @@
+/// include/kairos/cli/cli_app.hpp
 // ╔════════════════════════════════════════════════════════════════════════════╗
 // ║  kairos/cli/cli_app.hpp — CLI application skeleton                        ║
 // ║  Spec reference: §23                                                      ║

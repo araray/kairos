@@ -1,3 +1,4 @@
+/// src/config/defaults.cpp
 // ╔════════════════════════════════════════════════════════════════════════════╗
 // ║  defaults.cpp — Kairos configuration default values                       ║
 // ║                                                                           ║

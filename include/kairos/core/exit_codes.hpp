@@ -1,3 +1,4 @@
+/// include/kairos/core/exit_codes.hpp
 // ╔════════════════════════════════════════════════════════════════════════════╗
 // ║  kairos/core/exit_codes.hpp — Process and daemon exit code semantics      ║
 // ║                                                                           ║

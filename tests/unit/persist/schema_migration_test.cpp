@@ -1,3 +1,4 @@
+/// tests/unit/persist/schema_migration_test.cpp
 // ╔════════════════════════════════════════════════════════════════════════════╗
 // ║  schema_migration_test.cpp — SQLite schema migration tests                ║
 // ╚════════════════════════════════════════════════════════════════════════════╝

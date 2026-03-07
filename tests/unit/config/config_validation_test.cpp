@@ -1,3 +1,4 @@
+/// tests/unit/config/config_validation_test.cpp
 // ╔════════════════════════════════════════════════════════════════════════════╗
 // ║  config_validation_test.cpp — Semantic validation tests                   ║
 // ╚════════════════════════════════════════════════════════════════════════════╝

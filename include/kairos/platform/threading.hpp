@@ -1,3 +1,4 @@
+/// include/kairos/platform/threading.hpp
 // ╔════════════════════════════════════════════════════════════════════════════╗
 // ║  kairos/platform/threading.hpp — Thread naming utility                    ║
 // ║  Spec reference: §25.5                                                    ║

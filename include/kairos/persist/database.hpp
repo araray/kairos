@@ -1,3 +1,4 @@
+/// include/kairos/persist/database.hpp
 // ╔════════════════════════════════════════════════════════════════════════════╗
 // ║  kairos/persist/database.hpp — SQLite database initialization             ║
 // ║                                                                           ║

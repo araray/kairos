@@ -1,3 +1,4 @@
+/// tests/unit/observability/json_formatter_test.cpp
 // ╔════════════════════════════════════════════════════════════════════════════╗
 // ║  json_formatter_test.cpp — JSON log formatter tests                       ║
 // ╚════════════════════════════════════════════════════════════════════════════╝

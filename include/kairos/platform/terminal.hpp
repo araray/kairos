@@ -1,3 +1,4 @@
+/// include/kairos/platform/terminal.hpp
 // ╔════════════════════════════════════════════════════════════════════════════╗
 // ║  kairos/platform/terminal.hpp — TTY detection and terminal helpers        ║
 // ║  Spec reference: §25.4                                                    ║

@@ -1,3 +1,4 @@
+/// tests/unit/core/id_generator_test.cpp
 // ╔════════════════════════════════════════════════════════════════════════════╗
 // ║  id_generator_test.cpp — Content-hash ID and UUID generation tests        ║
 // ╚════════════════════════════════════════════════════════════════════════════╝

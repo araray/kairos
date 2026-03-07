@@ -1,3 +1,4 @@
+/// include/kairos/platform/paths.hpp
 // ╔════════════════════════════════════════════════════════════════════════════╗
 // ║  kairos/platform/paths.hpp — Cross-platform path normalization            ║
 // ║                                                                           ║

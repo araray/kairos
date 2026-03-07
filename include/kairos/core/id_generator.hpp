@@ -1,3 +1,4 @@
+/// include/kairos/core/id_generator.hpp
 // ╔════════════════════════════════════════════════════════════════════════════╗
 // ║  kairos/core/id_generator.hpp — Content-addressable ID generation         ║
 // ║                                                                           ║

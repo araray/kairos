@@ -1,3 +1,4 @@
+/// include/kairos/observability/logging.hpp
 // ╔════════════════════════════════════════════════════════════════════════════╗
 // ║  kairos/observability/logging.hpp — Structured logging initialization     ║
 // ║                                                                           ║

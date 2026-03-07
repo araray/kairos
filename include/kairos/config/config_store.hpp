@@ -1,3 +1,4 @@
+/// include/kairos/config/config_store.hpp
 // ╔════════════════════════════════════════════════════════════════════════════╗
 // ║  kairos/config/config_store.hpp — Configuration loading and validation    ║
 // ║                                                                           ║

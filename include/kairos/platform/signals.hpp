@@ -1,3 +1,4 @@
+/// include/kairos/platform/signals.hpp
 // ╔════════════════════════════════════════════════════════════════════════════╗
 // ║  kairos/platform/signals.hpp — Cross-platform signal/console handling     ║
 // ║  Spec reference: §25.6                                                    ║

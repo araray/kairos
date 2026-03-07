@@ -1,3 +1,4 @@
+/// include/kairos/daemon/daemon.hpp
 // ╔════════════════════════════════════════════════════════════════════════════╗
 // ║  kairos/daemon/daemon.hpp — Daemon lifecycle management                   ║
 // ║  Spec reference: §27.2–27.3                                               ║
