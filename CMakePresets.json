@@ -1,0 +1,73 @@
+{
+    "version": 6,
+    "cmakeMinimumRequired": { "major": 3, "minor": 22, "patch": 0 },
+
+    "configurePresets": [
+        {
+            "name": "base",
+            "hidden": true,
+            "binaryDir": "${sourceDir}/build/${presetName}",
+            "cacheVariables": {
+                "CMAKE_EXPORT_COMPILE_COMMANDS": "ON",
+                "KAIROS_BUILD_TESTS": "ON"
+            }
+        },
+        {
+            "name": "debug-gcc",
+            "displayName": "Debug (GCC)",
+            "inherits": "base",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "Debug",
+                "CMAKE_CXX_COMPILER": "g++"
+            }
+        },
+        {
+            "name": "release-gcc",
+            "displayName": "Release (GCC)",
+            "inherits": "base",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "Release",
+                "CMAKE_CXX_COMPILER": "g++"
+            }
+        },
+        {
+            "name": "debug-clang",
+            "displayName": "Debug (Clang)",
+            "inherits": "base",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "Debug",
+                "CMAKE_CXX_COMPILER": "clang++"
+            }
+        },
+        {
+            "name": "release-clang",
+            "displayName": "Release (Clang)",
+            "inherits": "base",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "Release",
+                "CMAKE_CXX_COMPILER": "clang++"
+            }
+        }
+    ],
+
+    "buildPresets": [
+        {
+            "name": "debug-gcc",
+            "configurePreset": "debug-gcc",
+            "configuration": "Debug"
+        },
+        {
+            "name": "release-gcc",
+            "configurePreset": "release-gcc",
+            "configuration": "Release"
+        }
+    ],
+
+    "testPresets": [
+        {
+            "name": "default",
+            "configurePreset": "debug-gcc",
+            "output": { "outputOnFailure": true }
+        }
+    ]
+}

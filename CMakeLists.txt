@@ -1,0 +1,124 @@
+# ╔════════════════════════════════════════════════════════════════════════════╗
+# ║  Kairos — Unified Orchestration Daemon                                     ║
+# ║  Top-level CMake build file                                                ║
+# ╚════════════════════════════════════════════════════════════════════════════╝
+
+cmake_minimum_required(VERSION 3.22)
+
+project(kairos
+    VERSION 0.1.0
+    DESCRIPTION "Unified orchestration daemon — scheduling, workflows, and filesystem monitoring"
+    HOMEPAGE_URL "https://github.com/araray/kairos"
+    LANGUAGES CXX
+)
+
+# ── C++20 Standard ─────────────────────────────────────────────────────────
+set(CMAKE_CXX_STANDARD 20)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_CXX_EXTENSIONS OFF)
+
+# Export compile_commands.json for IDE/clangd support.
+set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
+
+# ── Options ────────────────────────────────────────────────────────────────
+include(cmake/KairosOptions.cmake)
+
+# ── Dependencies ───────────────────────────────────────────────────────────
+include(cmake/KairosDependencies.cmake)
+
+# ── Core library (always built) ────────────────────────────────────────────
+add_library(kairos_core STATIC
+    src/config/defaults.cpp
+    src/config/config_store.cpp
+    src/config/validation.cpp
+    src/core/id_generator.cpp
+    src/persist/migration.cpp
+    src/persist/database.cpp
+    src/observability/logging.cpp
+    src/observability/json_formatter.cpp
+)
+
+target_include_directories(kairos_core PUBLIC
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+    $<INSTALL_INTERFACE:include>
+)
+
+target_link_libraries(kairos_core PUBLIC
+    confy
+    SQLiteCpp
+    spdlog::spdlog
+    nlohmann_json::nlohmann_json
+    yaml-cpp::yaml-cpp
+)
+
+# Embed version info.
+target_compile_definitions(kairos_core PUBLIC
+    KAIROS_VERSION="${PROJECT_VERSION}"
+    KAIROS_VERSION_MAJOR=${PROJECT_VERSION_MAJOR}
+    KAIROS_VERSION_MINOR=${PROJECT_VERSION_MINOR}
+    KAIROS_VERSION_PATCH=${PROJECT_VERSION_PATCH}
+)
+
+# ── Platform abstraction layer ─────────────────────────────────────────────
+add_library(kairos_platform STATIC)
+
+if(WIN32)
+    target_sources(kairos_platform PRIVATE
+        src/platform/paths_win32.cpp
+        src/platform/terminal_win32.cpp
+        src/platform/signals_win32.cpp
+        src/platform/threading_win32.cpp
+        src/platform/instance_lock_win32.cpp
+    )
+    target_link_libraries(kairos_platform PRIVATE Shell32 Ole32)
+else()
+    target_sources(kairos_platform PRIVATE
+        src/platform/paths_posix.cpp
+        src/platform/terminal_posix.cpp
+        src/platform/signals_posix.cpp
+        src/platform/threading_posix.cpp
+        src/platform/instance_lock_posix.cpp
+    )
+    target_link_libraries(kairos_platform PRIVATE pthread)
+endif()
+
+target_include_directories(kairos_platform PUBLIC
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+    $<INSTALL_INTERFACE:include>
+)
+target_link_libraries(kairos_platform PUBLIC kairos_core)
+
+# ── Main executable ────────────────────────────────────────────────────────
+add_executable(kairos
+    src/main.cpp
+    src/cli/cli_app.cpp
+    src/daemon/daemon.cpp
+)
+
+target_link_libraries(kairos PRIVATE
+    kairos_core
+    kairos_platform
+    CLI11::CLI11
+)
+
+# ── Tests ──────────────────────────────────────────────────────────────────
+if(KAIROS_BUILD_TESTS)
+    enable_testing()
+    add_subdirectory(tests)
+endif()
+
+# ── Install ────────────────────────────────────────────────────────────────
+include(GNUInstallDirs)
+
+install(TARGETS kairos
+    RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
+)
+
+install(DIRECTORY include/kairos
+    DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
+    FILES_MATCHING PATTERN "*.hpp"
+)
+
+install(FILES deploy/kairos.toml.example
+    DESTINATION ${CMAKE_INSTALL_DATADIR}/kairos
+)

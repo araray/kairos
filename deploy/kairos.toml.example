@@ -1,0 +1,71 @@
+# ╔════════════════════════════════════════════════════════════════════════════╗
+# ║  kairos.toml — Example Kairos Configuration                               ║
+# ║                                                                           ║
+# ║  Copy this file to ~/.config/kairos/kairos.toml (Linux)                   # ║  or ~/Library/Application Support/kairos/kairos.toml (macOS)              ║
+# ║  or %APPDATA%\kairos\kairos.toml (Windows)                               ║
+# ║                                                                           ║
+# ║  All keys are namespaced under [kairos].                                  ║
+# ║  Environment variables override with KAIROS_ prefix                       ║
+# ║  (e.g., KAIROS_LOGGING_LEVEL=debug).                                     ║
+# ╚════════════════════════════════════════════════════════════════════════════╝
+
+[kairos]
+# Core paths (mandatory — must be set via config, env, or CLI).
+data_dir = "~/.local/share/kairos"
+db_path  = "~/.local/share/kairos/kairos.db"
+
+# Directories for workflow and watch-group YAML definitions.
+workflows_dir    = "workflows"
+watch_groups_dir = "watch_groups"
+
+[kairos.logging]
+level              = "info"        # trace|debug|info|warn|error|critical
+format             = "auto"        # auto|json|text (auto = json if not TTY)
+# file             = "/var/log/kairos/kairos.log"  # uncomment to enable file logging
+max_file_size_mb   = 100
+max_files          = 5
+async_queue_size   = 8192
+
+[kairos.runners]
+worker_pool_size   = 4
+default_timeout_s  = 3600
+kill_timeout_s     = 10
+# default_shell    = "/bin/bash"   # empty = platform default
+
+[kairos.scheduler]
+tick_resolution_ms = 100
+misfire_grace_s    = 300
+
+[kairos.watch]
+default_mode       = "hybrid"      # native|sample|hybrid
+sample_interval_s  = 30
+max_depth          = 10
+hash_policy        = "mtime+size"  # mtime+size|sha256
+follow_symlinks    = false
+exclude_patterns   = [".git", "node_modules", "__pycache__", ".DS_Store"]
+
+[kairos.persistence]
+retention_days     = 90
+batch_size         = 100
+flush_interval_ms  = 1000
+wal_mode           = true
+
+[kairos.mcp]
+enabled            = false
+transport          = "stdio"
+log_chunk_size     = 4096
+
+[kairos.platform]
+# pid_file         = ""            # auto-detected
+# default_shell    = ""            # platform default
+color              = "auto"        # auto|always|never
+
+[kairos.http]
+enabled            = false
+listen_addr        = "127.0.0.1"
+listen_port        = 8420
+# api_token        = ""            # set for API authentication
+
+[kairos.daemon]
+shutdown_timeout_s = 90
+pipeline_drain_s   = 30
