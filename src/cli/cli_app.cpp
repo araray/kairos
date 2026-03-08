@@ -8,12 +8,19 @@
 #include "kairos/core/exit_codes.hpp"
 #include "kairos/core/version.hpp"
 #include "kairos/daemon/daemon.hpp"
+#include "kairos/mcp/handler.hpp"
+#include "kairos/mcp/transport.hpp"
 #include "kairos/observability/logging.hpp"
 #include "kairos/persist/database.hpp"
 #include "kairos/platform/platform.hpp"
+#include "kairos/watch/real_scanner.hpp"
+#include "kairos/watch/watch_engine.hpp"
 
 #include <CLI/CLI.hpp>
+#include <nlohmann/json.hpp>
 #include <spdlog/spdlog.h>
+#include <spdlog/fmt/fmt.h>
+#include <spdlog/sinks/stdout_color_sinks.h>
 
 #include <filesystem>
 #include <iostream>
@@ -21,6 +28,7 @@
 #include <unordered_map>
 
 namespace fs = std::filesystem;
+using json = nlohmann::json;
 
 namespace kairos::cli {
 
@@ -99,14 +107,50 @@ int run(int argc, char** argv) {
     cmd_initdb->add_option("--db-path", db_path_override,
                            "Override database path");
 
-    // ── Future subcommand stubs ───────────────────────────────────────
+    // ── watches ─────────────────────────────────────────────────────
+    auto* cmd_watches = app.add_subcommand("watches",
+        "Watch group management");
+    cmd_watches->require_subcommand(1);
+
+    auto* watches_list = cmd_watches->add_subcommand("list",
+        "List watch groups and their status");
+
+    auto* watches_show = cmd_watches->add_subcommand("show",
+        "Show watch group detail");
+    std::string watch_show_name;
+    watches_show->add_option("name", watch_show_name,
+        "Watch group name")->required();
+
+    auto* watches_scan = cmd_watches->add_subcommand("scan-once",
+        "Run a single scan cycle");
+    std::string watch_scan_group;
+    watches_scan->add_option("group", watch_scan_group,
+        "Watch group to scan (all if omitted)");
+
+    // ── events ───────────────────────────────────────────────────
+    auto* cmd_events = app.add_subcommand("events",
+        "Watch events");
+    cmd_events->require_subcommand(1);
+
+    auto* events_list = cmd_events->add_subcommand("list",
+        "List recent events");
+    std::string events_group;
+    int events_limit = 50;
+    events_list->add_option("--watch-group", events_group,
+        "Filter by watch group");
+    events_list->add_option("-n,--limit", events_limit,
+        "Max events to show (default 50)");
+
+    // ── mcp ──────────────────────────────────────────────────────
+    auto* cmd_mcp = app.add_subcommand("mcp",
+        "Start MCP stdio server for agent integration");
+
+    // ── Future subcommand stubs ──────────────────────────────────
     app.add_subcommand("workflows", "Manage workflows")->disabled();
     app.add_subcommand("jobs", "Manage jobs")->disabled();
     app.add_subcommand("runs", "Query run history")->disabled();
     app.add_subcommand("logs", "View/follow logs")->disabled();
-    app.add_subcommand("events", "View watch events")->disabled();
     app.add_subcommand("explain", "Explain execution plan")->disabled();
-    app.add_subcommand("mcp", "Start MCP stdio server")->disabled();
     app.add_subcommand("status", "Show daemon status")->disabled();
     app.add_subcommand("reload", "Reload configuration")->disabled();
     app.add_subcommand("stop", "Stop the daemon")->disabled();
@@ -193,6 +237,152 @@ int run(int argc, char** argv) {
         observability::initialize_logging(log_cfg);
 
         return daemon::run_daemon(cfg);
+    }
+
+    // ── watches list ──────────────────────────────────────────────
+    if (watches_list->parsed()) {
+        setup_logging(log_level, json_output, false);
+
+        auto cfg = load_config_or_die(config_path, {});
+        if (!cfg) return static_cast<int>(ExitCode::kConfigError);
+
+        // Build a minimal watch engine to query status.
+        // For a running daemon, this would connect via IPC.
+        // For v1, we load config and create a standalone WatchEngine.
+        watch::WatchEngineConfig watch_cfg;
+        watch::RealFilesystemScanner scanner;
+        watch::WatchEngine engine(
+            watch_cfg,
+            watch::WatchEngine::Dependencies{
+                .clock = nullptr,
+                .scanner = &scanner,
+            },
+            {}  // Empty groups — status from config.
+        );
+
+        auto statuses = engine.get_status();
+
+        if (json_output) {
+            json arr = json::array();
+            for (const auto& s : statuses) {
+                arr.push_back({
+                    {"name", s.group_name},
+                    {"mode", s.mode},
+                    {"watched_paths", s.watched_paths},
+                    {"files_in_last_sample", s.files_in_last_sample},
+                    {"last_scan_time", s.last_scan_time},
+                    {"status", s.status}
+                });
+            }
+            std::cout << json{{"watch_groups", arr}}.dump(2) << "\n";
+        } else {
+            if (statuses.empty()) {
+                std::cout << "No watch groups configured.\n";
+            } else {
+                // Simple table output.
+                std::cout << fmt::format("{:<20} {:<8} {:<6} {:<6} {:<22} {}\n",
+                    "GROUP", "MODE", "PATHS", "FILES",
+                    "LAST SCAN", "STATUS");
+                std::cout << std::string(80, '-') << "\n";
+                for (const auto& s : statuses) {
+                    std::cout << fmt::format(
+                        "{:<20} {:<8} {:<6} {:<6} {:<22} {}\n",
+                        s.group_name, s.mode, s.watched_paths,
+                        s.files_in_last_sample,
+                        s.last_scan_time.empty() ? "(none)" : s.last_scan_time,
+                        s.status);
+                }
+            }
+        }
+        return 0;
+    }
+
+    // ── watches show ──────────────────────────────────────────────
+    if (watches_show->parsed()) {
+        setup_logging(log_level, json_output, false);
+        // Stub: show details for a specific watch group.
+        if (json_output) {
+            std::cout << json{
+                {"watch_group", watch_show_name},
+                {"status", "not_implemented"},
+                {"message", "Watch group detail requires a running daemon"}
+            }.dump(2) << "\n";
+        } else {
+            std::cerr << "Watch group detail requires a running daemon.\n"
+                      << "Use 'kairos start' first, then query via MCP.\n";
+        }
+        return 0;
+    }
+
+    // ── watches scan-once ─────────────────────────────────────────
+    if (watches_scan->parsed()) {
+        setup_logging(log_level, json_output, false);
+        // Stub: scan-once requires daemon access.
+        if (json_output) {
+            std::cout << json{
+                {"status", "not_implemented"},
+                {"message", "scan-once requires a running daemon"}
+            }.dump(2) << "\n";
+        } else {
+            std::cerr << "scan-once requires a running daemon.\n"
+                      << "Use 'kairos start' first, then query via MCP.\n";
+        }
+        return 0;
+    }
+
+    // ── events list ───────────────────────────────────────────────
+    if (events_list->parsed()) {
+        setup_logging(log_level, json_output, false);
+        // Stub: events list requires daemon access.
+        if (json_output) {
+            std::cout << json{
+                {"events", json::array()},
+                {"message", "Event listing requires a running daemon"}
+            }.dump(2) << "\n";
+        } else {
+            std::cerr << "Event listing requires a running daemon.\n"
+                      << "Use 'kairos start' first, then query via MCP.\n";
+        }
+        return 0;
+    }
+
+    // ── mcp ───────────────────────────────────────────────────────
+    if (cmd_mcp->parsed()) {
+        // MCP mode: stdout is reserved for JSON-RPC.
+        // Redirect all logging to stderr.
+        auto stderr_sink = std::make_shared<spdlog::sinks::stderr_color_sink_mt>();
+        stderr_sink->set_level(spdlog::level::info);
+        auto logger = std::make_shared<spdlog::logger>("kairos", stderr_sink);
+        logger->set_level(spdlog::level::info);
+        spdlog::set_default_logger(logger);
+
+        auto cfg = load_config_or_die(config_path, {});
+        if (!cfg) return static_cast<int>(ExitCode::kConfigError);
+
+        spdlog::info("Starting MCP stdio server");
+
+        // Create a standalone MCP handler with minimal deps.
+        // In a full daemon, this would share state with the daemon.
+        // For v1, MCP runs standalone and creates its own watch engine.
+        mcp::McpHandler::Dependencies mcp_deps;
+        mcp_deps.server_info.name = "kairos";
+        mcp_deps.server_info.version = std::string(kairos::kVersion);
+
+        mcp::McpHandler handler(mcp_deps);
+
+        mcp::StdioTransport transport(
+            [&handler](const std::string& method,
+                       const json& params,
+                       const json& id) -> json {
+                return handler.dispatch(method, params, id);
+            });
+
+        // Run the MCP transport loop (blocks until EOF).
+        transport.run();
+
+        spdlog::info("MCP server stopped ({} requests processed)",
+                     transport.requests_processed());
+        return 0;
     }
 
     // Should not reach here (require_subcommand is set).

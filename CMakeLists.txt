@@ -58,6 +58,8 @@ add_library(kairos_core STATIC
     src/watch/debounce_buffer.cpp
     src/watch/hash_util.cpp
     src/config/yaml_loader.cpp
+    src/mcp/transport.cpp
+    src/mcp/handler.cpp
 )
 
 # ── Native watch backends (platform-specific) ─────────────────────────────

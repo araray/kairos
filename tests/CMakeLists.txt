@@ -345,3 +345,21 @@ add_executable(test_e2e_watch
 )
 target_link_libraries(test_e2e_watch PRIVATE kairos_test_helpers)
 gtest_discover_tests(test_e2e_watch)
+
+# ── Phase 3 Batch 9: MCP transport tests ────────────────────────────
+
+# JSON-RPC 2.0 protocol compliance
+add_executable(test_mcp_transport
+    unit/mcp/transport_test.cpp
+)
+target_link_libraries(test_mcp_transport PRIVATE kairos_test_helpers)
+gtest_discover_tests(test_mcp_transport)
+
+# ── Phase 3 Batch 9: MCP handler tests ─────────────────────────────
+
+# Tool dispatch, watch tools, protocol methods
+add_executable(test_mcp_handler
+    unit/mcp/handler_test.cpp
+)
+target_link_libraries(test_mcp_handler PRIVATE kairos_test_helpers)
+gtest_discover_tests(test_mcp_handler)
