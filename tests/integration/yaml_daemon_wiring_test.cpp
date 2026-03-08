@@ -62,12 +62,12 @@ jobs:
   compile:
     steps:
       - name: compile
-        command: make build
+        run: make build
   test:
     needs: [compile]
     steps:
       - name: test
-        command: make test
+        run: make test
 triggers:
   - cron: "0 */6 * * *"
 )");
@@ -123,7 +123,7 @@ jobs:
   deploy:
     steps:
       - name: deploy
-        command: ./deploy.sh
+        run: ./deploy.sh
 )");
 
     // Write a watch group.
@@ -164,12 +164,12 @@ jobs:
   lint:
     steps:
       - name: lint
-        command: flake8 .
+        run: flake8 .
   build:
     needs: [lint]
     steps:
       - name: build
-        command: make
+        run: make
 triggers:
   - cron: "0 0 * * *"
 )");
@@ -216,7 +216,7 @@ jobs:
   step1:
     steps:
       - name: run
-        command: echo hello
+        run: echo hello
 )");
 
     // Reload should pick up the new file.
