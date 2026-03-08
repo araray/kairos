@@ -20,11 +20,21 @@ DBWriter::DBWriter(SQLite::Database& db, DBWriterConfig config)
 }
 
 DBWriter::~DBWriter() {
-    // Flush remaining items before destruction.
-    flush();
+    // Close the queue so the writer thread's pop() unblocks.
+    queue_.close();
+
+    // Join the writer thread first — it performs its own final flush
+    // in writer_loop(). We must wait for that to complete before we
+    // touch any shared state (prepared statements, database).
     if (writer_thread_.joinable()) {
         writer_thread_.request_stop();
+        writer_thread_.join();
     }
+
+    // Now safe: no other thread accesses the statements.
+    // Drain anything enqueued after the writer thread's final flush
+    // (e.g., items pushed between thread exit and queue_.close()).
+    flush();
 }
 
 void DBWriter::prepare_statements() {

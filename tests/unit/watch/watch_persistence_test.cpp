@@ -54,7 +54,7 @@ protected:
 
     void TearDown() override {
         stop_->request_stop();
-        writer_->flush();
+        // Let the destructor join the writer thread, then flush.
         writer_.reset();
     }
 

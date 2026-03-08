@@ -68,7 +68,9 @@ protected:
     void TearDown() override {
         stop_->request_stop();
         pool_->shutdown();
-        writer_->flush();
+        // Don't call writer_->flush() here — the writer thread is
+        // still running its own final flush after stop. Let the
+        // destructor join the thread first, then flush safely.
         writer_.reset();
     }
 
