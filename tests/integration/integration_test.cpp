@@ -164,11 +164,18 @@ TEST_F(IntegrationTest, SchedulerFiresTriggerPipelineExecutes) {
     };
     scheduler.start(stop.get_token(), sched_sink);
 
-    // Advance clock past the interval.
+    // Let the scheduler thread enter sleep_until() before advancing.
+    // Without this, advance() fires before anyone is listening and
+    // the wake notification is lost (classic FakeClock race).
+    std::this_thread::sleep_for(100ms);
+
+    // Advance clock past the 5s interval.
     clock_.advance(6s);
 
-    // Give threads time to process.
-    std::this_thread::sleep_for(200ms);
+    // Give the full pipeline time to process:
+    //   scheduler fires → trigger_bus → pipeline pops → resolves DAG →
+    //   dispatches to runner → FakeProcess returns → persist result.
+    std::this_thread::sleep_for(500ms);
 
     // Stop everything.
     stop.request_stop();
