@@ -75,7 +75,7 @@ protected:
     /// Helper: build a trigger event.
     TriggerEvent make_trigger(const std::string& target_wf) {
         TriggerEvent event;
-        event.type = TriggerType::Manual;
+        event.type = TriggerType::ManualRun;
         event.trigger_id = "trg-manual";
         event.target_id = target_wf;
         event.target_kind = TriggerEvent::TargetKind::Workflow;
@@ -103,11 +103,12 @@ protected:
     {
         auto dag = WorkflowDag::build(dag_nodes);
 
-        WorkflowDef wf;
-        wf.workflow_id = wf_id;
-        wf.workflow_name = wf_name;
-        wf.dag = std::move(dag);
-        wf.jobs = std::move(jobs);
+        WorkflowDef wf{
+            .workflow_id = wf_id,
+            .workflow_name = wf_name,
+            .jobs = std::move(jobs),
+            .dag = std::move(dag),
+        };
 
         auto reg = std::make_shared<WorkflowRegistry>(
             std::vector<WorkflowDef>{std::move(wf)},

@@ -214,7 +214,7 @@ TEST_F(WatchPersistenceTest, WatchEnginePersistsSamples) {
 
     WatchEngine engine(config, deps, {group});
 
-    engine::TriggerSink sink = [](engine::TriggerEvent) {};
+    engine::TriggerSink sink = [](engine::TriggerEvent) { return true; };
     engine.scan_once(sink);
 
     flush_writer();
@@ -256,7 +256,7 @@ TEST_F(WatchPersistenceTest, WatchEnginePersistsEvents) {
 
     WatchEngine engine(config, deps, {group});
 
-    engine::TriggerSink sink = [](engine::TriggerEvent) {};
+    engine::TriggerSink sink = [](engine::TriggerEvent) { return true; };
 
     // First scan: baseline.
     engine.scan_once(sink);
@@ -303,7 +303,7 @@ TEST_F(WatchPersistenceTest, NullDBWriterIsHandledGracefully) {
 
     WatchEngine engine(config, deps, {group});
 
-    engine::TriggerSink sink = [](engine::TriggerEvent) {};
+    engine::TriggerSink sink = [](engine::TriggerEvent) { return true; };
     EXPECT_NO_THROW(engine.scan_once(sink));
 }
 

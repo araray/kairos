@@ -13,6 +13,8 @@
 
 #ifdef __linux__
 
+#include <sys/inotify.h>
+
 #include <string>
 #include <unordered_map>
 

@@ -118,7 +118,7 @@ TEST_F(InotifyWatcherTest, AddWatchRecursive) {
 
 TEST_F(InotifyWatcherTest, AddWatchNonexistentPath) {
     InotifyWatcher watcher;
-    EXPECT_FALSE(watcher.add_watch("/nonexistent/path/12345"));
+    EXPECT_FALSE(watcher.add_watch("/nonexistent/path/12345", false));
 }
 
 TEST_F(InotifyWatcherTest, RemoveWatch) {
