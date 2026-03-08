@@ -55,12 +55,16 @@ add_library(kairos_core STATIC
     src/watch/sample.cpp
     src/watch/watch_engine.cpp
     src/watch/real_scanner.cpp
+    src/watch/debounce_buffer.cpp
     src/config/yaml_loader.cpp
 )
 
 # ── Native watch backends (platform-specific) ─────────────────────────────
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     target_sources(kairos_core PRIVATE src/watch/inotify_watcher.cpp)
+elseif(CMAKE_SYSTEM_NAME STREQUAL "Darwin")
+    target_sources(kairos_core PRIVATE src/watch/fsevents_watcher.cpp)
+    target_link_libraries(kairos_core PUBLIC "-framework CoreServices")
 else()
     target_sources(kairos_core PRIVATE src/watch/file_watcher_stub.cpp)
 endif()

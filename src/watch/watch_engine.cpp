@@ -45,17 +45,49 @@ bool rule_matches_event(const WatchRuleDef& rule,
     return false;
 }
 
+/// Simple glob matching: * matches any chars, ? matches one char.
+/// No ** or character classes in v1 (per spec §12.6).
+bool glob_match_simple(const std::string& pattern, const std::string& str) {
+    size_t pi = 0, si = 0;
+    size_t star_pi = std::string::npos, star_si = 0;
+
+    while (si < str.size()) {
+        if (pi < pattern.size() &&
+            (pattern[pi] == str[si] || pattern[pi] == '?')) {
+            ++pi;
+            ++si;
+        } else if (pi < pattern.size() && pattern[pi] == '*') {
+            star_pi = pi;
+            star_si = si;
+            ++pi;
+        } else if (star_pi != std::string::npos) {
+            pi = star_pi + 1;
+            ++star_si;
+            si = star_si;
+        } else {
+            return false;
+        }
+    }
+
+    while (pi < pattern.size() && pattern[pi] == '*') ++pi;
+    return pi == pattern.size();
+}
+
 /// Build a KEL evaluation context for a watch rule.
 /// Binds: watch_group (string), event (string), file (map-like via members),
 /// prev_file (map-like via members).
 ///
 /// Per spec §12.11, the context type 2 includes:
 ///   data, event, watch_group, file, prev_file
+///
+/// Also registers aggregate(data, glob, metric, func) which operates on
+/// the sample passed by reference through the closure.
 kel::EvalContext build_watch_kel_context(
     const std::string& group_name,
     const std::string& event_type,
     const FileMetrics& file_metrics,
-    const FileMetrics* prev_metrics)
+    const FileMetrics* prev_metrics,
+    const Sample* current_sample = nullptr)
 {
     auto ctx = kel::make_default_context();
 
@@ -94,6 +126,101 @@ kel::EvalContext build_watch_kel_context(
             ctx.variables["prev_file_pattern_found"] =
                 kel::KelValue(*prev_metrics->pattern_found);
         }
+    }
+
+    // Data sentinel — per spec §7.8 context 2, `data` is a variable
+    // passed as the first arg to aggregate(). The actual sample data
+    // is captured by the aggregate() closure below.
+    ctx.variables["data"] = kel::KelValue(std::string("__sample_data__"));
+
+    // aggregate(data, glob, metric, func) — spec §7.7 category 3.
+    // Operates on the captured current_sample.
+    if (current_sample) {
+        ctx.functions["aggregate"] =
+            [current_sample](const std::vector<kel::KelValue>& args)
+                -> kel::KelValue
+        {
+            if (args.size() != 4) {
+                throw kel::KelEvalError(
+                    "aggregate() requires 4 arguments: "
+                    "(data, glob, metric, func)");
+            }
+            // args[0] is `data` (sentinel, ignored — sample is captured).
+            if (!args[1].is_string() || !args[2].is_string() ||
+                !args[3].is_string()) {
+                throw kel::KelEvalError(
+                    "aggregate() arguments 2-4 must be strings");
+            }
+
+            const auto& glob = args[1].as_string();
+            const auto& metric = args[2].as_string();
+            const auto& func = args[3].as_string();
+
+            // Collect values from matching files.
+            std::vector<double> values;
+            for (const auto& [path, fm] : current_sample->entries) {
+                // Match glob against filename or full path.
+                std::string fname = path;
+                auto sep = path.find_last_of("/\\");
+                if (sep != std::string::npos)
+                    fname = path.substr(sep + 1);
+
+                if (!glob_match_simple(glob, fname) &&
+                    !glob_match_simple(glob, path)) {
+                    continue;
+                }
+
+                if (metric == "size") {
+                    values.push_back(static_cast<double>(fm.size));
+                } else if (metric == "mtime") {
+                    // Convert mtime to epoch seconds for aggregation.
+                    auto epoch = std::chrono::duration_cast<
+                        std::chrono::seconds>(
+                            fm.last_modified.time_since_epoch()).count();
+                    values.push_back(static_cast<double>(epoch));
+                } else if (metric == "pattern_found") {
+                    values.push_back(
+                        (fm.pattern_found.has_value() && *fm.pattern_found)
+                            ? 1.0 : 0.0);
+                } else if (metric == "hash") {
+                    // Count non-empty hashes.
+                    values.push_back(
+                        (fm.sha256.has_value() || fm.md5.has_value())
+                            ? 1.0 : 0.0);
+                } else {
+                    throw kel::KelEvalError(
+                        "aggregate(): unknown metric '" + metric + "'");
+                }
+            }
+
+            // Apply aggregation function.
+            double result = 0.0;
+            if (!values.empty()) {
+                if (func == "sum") {
+                    for (double v : values) result += v;
+                } else if (func == "count") {
+                    result = static_cast<double>(values.size());
+                } else if (func == "min") {
+                    result = *std::min_element(
+                        values.begin(), values.end());
+                } else if (func == "max") {
+                    result = *std::max_element(
+                        values.begin(), values.end());
+                } else if (func == "avg") {
+                    for (double v : values) result += v;
+                    result /= static_cast<double>(values.size());
+                } else {
+                    throw kel::KelEvalError(
+                        "aggregate(): unknown func '" + func + "'");
+                }
+            }
+
+            // Return as int if whole number.
+            if (result == static_cast<double>(static_cast<int64_t>(result))) {
+                return kel::KelValue(static_cast<int64_t>(result));
+            }
+            return kel::KelValue(result);
+        };
     }
 
     return ctx;
@@ -417,7 +544,8 @@ std::vector<WatchTriggerResult> WatchEngine::evaluate_rules(
                 ? &prev_it->second : nullptr;
 
         auto ctx = build_watch_kel_context(
-            group.group_name, event_str, file_metrics, prev_metrics);
+            group.group_name, event_str, file_metrics, prev_metrics,
+            &current);
 
         // Evaluate the KEL expression.
         try {

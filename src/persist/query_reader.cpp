@@ -5,10 +5,12 @@
 // ╚════════════════════════════════════════════════════════════════════════════╝
 
 #include "kairos/persist/query_reader.hpp"
+#include "kairos/kel/errors.hpp"
 
 #include <chrono>
 #include <cmath>
 #include <iomanip>
+#include <limits>
 #include <sstream>
 
 namespace kairos::persist {
@@ -254,6 +256,225 @@ void QueryReader::register_kel_bindings(
 
         return kairos::kel::KelValue(
             finished_within(extract_job_name(obj), window, reference_time));
+    };
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Watch sample queries for aggregate()/previous() — spec §7.7 category 3
+// ═══════════════════════════════════════════════════════════════════════════
+
+int64_t QueryReader::last_sample_epoch(
+    const std::string& group_name) const
+{
+    SQLite::Statement query(db_,
+        "SELECT MAX(sample_epoch) FROM watch_samples WHERE watch_group = ?");
+    query.bind(1, group_name);
+    if (query.executeStep()) {
+        if (!query.isColumnNull(0)) {
+            return query.getColumn(0).getInt64();
+        }
+    }
+    return -1;  // No samples exist.
+}
+
+std::vector<QueryReader::SampleFileRow> QueryReader::query_sample(
+    const std::string& group_name, int64_t epoch) const
+{
+    std::vector<SampleFileRow> rows;
+
+    SQLite::Statement query(db_,
+        "SELECT file_path, file_size, mtime, hash "
+        "FROM watch_samples "
+        "WHERE watch_group = ? AND sample_epoch = ?");
+    query.bind(1, group_name);
+    query.bind(2, epoch);
+
+    while (query.executeStep()) {
+        SampleFileRow row;
+        row.file_path = query.getColumn(0).getString();
+        row.size = query.getColumn(1).isNull()
+            ? 0 : query.getColumn(1).getInt64();
+        row.mtime = query.getColumn(2).isNull()
+            ? "" : query.getColumn(2).getString();
+        row.hash = query.getColumn(3).isNull()
+            ? "" : query.getColumn(3).getString();
+        rows.push_back(std::move(row));
+    }
+
+    return rows;
+}
+
+// ── Portable glob matching ──────────────────────────────────────────────
+// Simple glob for patterns: * matches any chars, ? matches one char.
+// No ** or character classes in v1 (per spec §12.6).
+
+namespace {
+
+bool glob_match(const std::string& pattern, const std::string& str) {
+    size_t pi = 0, si = 0;
+    size_t star_pi = std::string::npos, star_si = 0;
+
+    while (si < str.size()) {
+        if (pi < pattern.size() && (pattern[pi] == str[si] || pattern[pi] == '?')) {
+            ++pi;
+            ++si;
+        } else if (pi < pattern.size() && pattern[pi] == '*') {
+            star_pi = pi;
+            star_si = si;
+            ++pi;
+        } else if (star_pi != std::string::npos) {
+            pi = star_pi + 1;
+            ++star_si;
+            si = star_si;
+        } else {
+            return false;
+        }
+    }
+
+    while (pi < pattern.size() && pattern[pi] == '*') ++pi;
+    return pi == pattern.size();
+}
+
+/// Extract just the filename from a path string.
+std::string filename_from_path(const std::string& path) {
+    auto pos = path.find_last_of("/\\");
+    return (pos == std::string::npos) ? path : path.substr(pos + 1);
+}
+
+/// Perform aggregation over a list of numeric values.
+double aggregate_values(
+    const std::vector<double>& values,
+    const std::string& func)
+{
+    if (values.empty()) return 0.0;
+
+    if (func == "sum") {
+        double total = 0.0;
+        for (double v : values) total += v;
+        return total;
+    }
+    if (func == "count") {
+        return static_cast<double>(values.size());
+    }
+    if (func == "min") {
+        double m = values[0];
+        for (size_t i = 1; i < values.size(); ++i)
+            if (values[i] < m) m = values[i];
+        return m;
+    }
+    if (func == "max") {
+        double m = values[0];
+        for (size_t i = 1; i < values.size(); ++i)
+            if (values[i] > m) m = values[i];
+        return m;
+    }
+    if (func == "avg") {
+        double total = 0.0;
+        for (double v : values) total += v;
+        return total / static_cast<double>(values.size());
+    }
+    return 0.0;  // Unknown function.
+}
+
+}  // namespace
+
+// ── register_watch_kel_bindings ─────────────────────────────────────────
+
+void QueryReader::register_watch_kel_bindings(
+    kairos::kel::EvalContext& ctx) const
+{
+    // ── aggregate(data, glob, metric, func) ─────────────────────────
+    //
+    // `data` is expected to be a list of KelValues, each representing
+    // a file entry with members: path (string), size (int), hash (string),
+    // pattern_found (bool).
+    //
+    // For simplicity in v1, the watch engine binds the sample data as
+    // a special string sentinel "__sample_data__". The actual sample
+    // reference is captured by value in the lambda (via the closure in
+    // the caller's register call). Here we provide the function
+    // infrastructure; the caller passes the sample data through the
+    // context variable "data" as a KelValue list.
+    //
+    // Alternative approach (implemented): the watch engine registers
+    // aggregate() as a closure that captures the current sample.
+    // The `data` argument is accepted but not used (the captured
+    // sample is authoritative). This preserves the spec's 4-arg syntax.
+
+    // Note: aggregate() registration is done by the watch engine
+    // (see WatchEngine::build_watch_kel_context_with_aggregate),
+    // because it needs the current sample. Here we only provide
+    // previous(), which queries SQLite.
+
+    // ── previous(group, glob, metric) ───────────────────────────────
+    //
+    // Queries the most recent prior sample for the named watch group,
+    // filters files matching glob, and returns the sum of the specified
+    // metric. Returns 0 if no prior sample exists.
+    //
+    // This is the only KEL function that performs I/O during evaluation.
+    // The evaluation timeout (default 100ms) bounds the total time.
+
+    ctx.functions["previous"] =
+        [this](const std::vector<kairos::kel::KelValue>& args)
+            -> kairos::kel::KelValue
+    {
+        if (args.size() != 3) {
+            throw kairos::kel::KelEvalError(
+                "previous() requires 3 arguments: (group, glob, metric)");
+        }
+        if (!args[0].is_string() || !args[1].is_string() ||
+            !args[2].is_string()) {
+            throw kairos::kel::KelEvalError(
+                "previous() arguments must be strings");
+        }
+
+        const auto& group = args[0].as_string();
+        const auto& glob = args[1].as_string();
+        const auto& metric = args[2].as_string();
+
+        // Find the most recent sample epoch.
+        int64_t epoch = last_sample_epoch(group);
+        if (epoch < 0) {
+            return kairos::kel::KelValue(int64_t(0));
+        }
+
+        // Query the sample data for that epoch.
+        auto rows = query_sample(group, epoch);
+
+        // Filter by glob and collect metric values.
+        std::vector<double> values;
+        for (const auto& row : rows) {
+            auto fname = filename_from_path(row.file_path);
+            if (!glob_match(glob, fname) && !glob_match(glob, row.file_path)) {
+                continue;
+            }
+
+            if (metric == "size") {
+                values.push_back(static_cast<double>(row.size));
+            } else if (metric == "hash" || metric == "mtime") {
+                // For string metrics, count non-empty values.
+                const auto& val = (metric == "hash") ? row.hash : row.mtime;
+                values.push_back(val.empty() ? 0.0 : 1.0);
+            } else if (metric == "pattern_found") {
+                // Not stored directly in sample rows; default to 0.
+                values.push_back(0.0);
+            } else {
+                throw kairos::kel::KelEvalError(
+                    "previous(): unknown metric '" + metric + "'");
+            }
+        }
+
+        // Sum by default for previous() (matches EventWatcher behavior).
+        double result = aggregate_values(values, "sum");
+
+        // Return as int if it's a whole number, float otherwise.
+        if (result == std::floor(result) &&
+            result >= static_cast<double>(std::numeric_limits<int64_t>::min()) &&
+            result <= static_cast<double>(std::numeric_limits<int64_t>::max())) {
+            return kairos::kel::KelValue(static_cast<int64_t>(result));
+        }
+        return kairos::kel::KelValue(result);
     };
 }
 

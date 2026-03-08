@@ -15,6 +15,7 @@
 // ╚════════════════════════════════════════════════════════════════════════════╝
 
 #include "kairos/daemon/daemon.hpp"
+#include "kairos/config/yaml_loader.hpp"
 #include "kairos/core/version.hpp"
 #include "kairos/engine/pipeline.hpp"
 #include "kairos/engine/scheduler.hpp"
@@ -29,6 +30,7 @@
 #include "kairos/persist/query_reader.hpp"
 #include "kairos/platform/platform.hpp"
 #include "kairos/testing/fake_clock.hpp"
+#include "kairos/watch/real_scanner.hpp"
 #include "kairos/watch/watch_engine.hpp"
 
 #include <spdlog/spdlog.h>
@@ -42,11 +44,97 @@
 namespace kairos::daemon {
 
 using namespace std::chrono_literals;
+namespace fs = std::filesystem;
+
+// ── YAML loading helper ─────────────────────────────────────────────────
+
+/// Resolve a YAML directory path relative to the config file directory.
+/// If the path is absolute, use it as-is. Otherwise, resolve relative to
+/// the config file's parent directory.
+static fs::path resolve_yaml_dir(
+    const fs::path& config_file,
+    const std::string& dir_value)
+{
+    fs::path p(dir_value);
+    if (p.is_absolute()) return p;
+
+    // Resolve relative to config file's parent directory.
+    auto config_dir = config_file.parent_path();
+    if (config_dir.empty()) config_dir = ".";
+    return config_dir / p;
+}
+
+/// Load workflows and watch groups from YAML directories using the
+/// YAML loader. Returns a WorkflowRegistry built from the loaded defs.
+///
+/// On YAML errors, logs warnings but continues with whatever loaded
+/// successfully (fail-open on individual files, not the daemon).
+static std::shared_ptr<engine::WorkflowRegistry> load_registry_from_yaml(
+    const std::shared_ptr<const config::ConfigState>& cfg,
+    std::shared_ptr<spdlog::logger> log)
+{
+    auto workflows_dir_str =
+        cfg->global.get<std::string>("kairos.workflows_dir", "workflows");
+    auto watch_groups_dir_str =
+        cfg->global.get<std::string>("kairos.watch_groups_dir", "watch_groups");
+
+    auto workflows_dir =
+        resolve_yaml_dir(cfg->config_file_path, workflows_dir_str);
+    auto watch_groups_path =
+        resolve_yaml_dir(cfg->config_file_path, watch_groups_dir_str);
+
+    log->info("Loading YAML: workflows_dir={}, watch_groups_path={}",
+              workflows_dir.string(), watch_groups_path.string());
+
+    // Attempt to load. Missing directories are not fatal — the daemon
+    // can run with an empty registry and load files later via reload.
+    config::YamlLoadResult yaml_result;
+
+    std::error_code ec;
+    bool wf_exists = fs::exists(workflows_dir, ec) && !ec;
+    bool wg_exists = fs::exists(watch_groups_path, ec) && !ec;
+
+    if (wf_exists || wg_exists) {
+        if (wf_exists && wg_exists) {
+            yaml_result = config::load_all(workflows_dir, watch_groups_path);
+        } else if (wf_exists) {
+            yaml_result = config::load_workflows_dir(workflows_dir);
+        } else {
+            // watch_groups_path may be a file or directory.
+            if (fs::is_directory(watch_groups_path, ec)) {
+                yaml_result = config::load_watch_groups_dir(watch_groups_path);
+            } else {
+                yaml_result = config::load_watch_groups_file(watch_groups_path);
+            }
+        }
+    } else {
+        log->info("No workflow/watch-group directories found — "
+                  "starting with empty registry");
+    }
+
+    // Log any YAML errors (non-fatal).
+    for (const auto& err : yaml_result.errors) {
+        log->warn("YAML error in {}: {} — {}", err.file, err.path, err.message);
+    }
+
+    auto registry = std::make_shared<engine::WorkflowRegistry>(
+        std::move(yaml_result.workflows),
+        std::move(yaml_result.triggers),
+        std::move(yaml_result.standalone_jobs),
+        std::move(yaml_result.watch_groups));
+
+    log->info("Registry loaded: {} workflows, {} triggers, {} watch groups",
+              registry->workflow_count(),
+              registry->trigger_count(),
+              registry->watch_group_count());
+
+    return registry;
+}
 
 // ── Config reload helper ────────────────────────────────────────────────
 
-/// Perform a full config reload: re-parse, validate, rebuild registry,
-/// and propagate to all engines.
+/// Perform a full config reload: re-parse TOML, re-load YAML, rebuild
+/// registry, and propagate to all engines.
 ///
 /// Returns true on success, false if the reload failed (old config kept).
 static bool perform_config_reload(
@@ -68,20 +156,8 @@ static bool perform_config_reload(
         return false;
     }
 
-    // Build new registry from reloaded config.
-    // In Phase 4, this will parse YAML workflow files.
-    // For now, rebuild with the same empty-ish structure.
-    auto new_registry = std::make_shared<engine::WorkflowRegistry>(
-        std::vector<engine::WorkflowDef>{},
-        std::vector<engine::TimerEntry>{},
-        std::vector<engine::JobDef>{},
-        std::vector<watch::WatchGroupDef>{});
-
-    log->info("Config reload: rebuilt registry ({} workflows, {} triggers, "
-              "{} watch groups)",
-              new_registry->workflow_count(),
-              new_registry->trigger_count(),
-              new_registry->watch_group_count());
+    // Reload YAML workflows and watch groups.
+    auto new_registry = load_registry_from_yaml(result.state, log);
 
     // Propagate to engines.
     scheduler.request_reload(new_registry);
@@ -132,15 +208,7 @@ int run_daemon(std::shared_ptr<const kairos::config::ConfigState> config) {
     SystemClockSource clock;
 
     // ── Step 6: Load workflow/watch-group definitions ──────────────
-    auto registry = std::make_shared<engine::WorkflowRegistry>(
-        std::vector<engine::WorkflowDef>{},
-        std::vector<engine::TimerEntry>{},
-        std::vector<engine::JobDef>{},
-        std::vector<watch::WatchGroupDef>{});
-    log->info("Workflow registry loaded: {} workflows, {} triggers, "
-              "{} watch groups",
-              registry->workflow_count(), registry->trigger_count(),
-              registry->watch_group_count());
+    auto registry = load_registry_from_yaml(config, log);
 
     // ── Step 7: Create shared stop source ──────────────────────────
     std::stop_source stop_source;
@@ -208,11 +276,12 @@ int run_daemon(std::shared_ptr<const kairos::config::ConfigState> config) {
 
     // ── Step 15: Start Watch Engine thread ─────────────────────────
     watch::WatchEngineConfig watch_cfg;
+    watch::RealFilesystemScanner real_scanner;  // Production scanner.
     watch::WatchEngine watch_engine(
         watch_cfg,
         watch::WatchEngine::Dependencies{
             .clock = &clock,
-            .scanner = nullptr,  // Real scanner created in Phase 4.
+            .scanner = &real_scanner,
             .db_writer = &db_writer,
         },
         registry->watch_groups());

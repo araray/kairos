@@ -255,3 +255,30 @@ add_executable(test_parallel_pipeline
 )
 target_link_libraries(test_parallel_pipeline PRIVATE kairos_test_helpers)
 gtest_discover_tests(test_parallel_pipeline)
+
+# ── Phase 3 Batch 6: Debounce buffer tests ─────────────────────────────
+
+# DebounceBuffer coalescing and timing
+add_executable(test_debounce_buffer
+    unit/watch/debounce_buffer_test.cpp
+)
+target_link_libraries(test_debounce_buffer PRIVATE kairos_test_helpers)
+gtest_discover_tests(test_debounce_buffer)
+
+# ── Phase 3 Batch 6: KEL aggregate/previous tests ─────────────────────
+
+# KEL aggregate() and previous() functions
+add_executable(test_kel_aggregate
+    unit/watch/kel_aggregate_test.cpp
+)
+target_link_libraries(test_kel_aggregate PRIVATE kairos_test_helpers)
+gtest_discover_tests(test_kel_aggregate)
+
+# ── Phase 3 Batch 6: YAML→daemon wiring integration test ──────────────
+
+# Workflow/watch-group loading and registry construction
+add_executable(test_yaml_daemon_wiring
+    integration/yaml_daemon_wiring_test.cpp
+)
+target_link_libraries(test_yaml_daemon_wiring PRIVATE kairos_test_helpers)
+gtest_discover_tests(test_yaml_daemon_wiring)

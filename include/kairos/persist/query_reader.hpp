@@ -98,6 +98,40 @@ public:
         std::chrono::system_clock::time_point reference_time =
             std::chrono::system_clock::now()) const;
 
+    // ── KEL aggregate/previous support ───────────────────────────
+
+    /// Query the most recent prior sample epoch for a watch group.
+    /// Returns -1 if no prior sample exists.
+    [[nodiscard]] int64_t last_sample_epoch(
+        const std::string& group_name) const;
+
+    /// Query sample data for a specific group + epoch.
+    /// Returns a map of file_path → (metric_name → metric_value).
+    /// The metric values are: "size" (int64), "mtime" (string),
+    /// "hash" (string), "pattern_found" (0 or 1).
+    struct SampleFileRow {
+        std::string file_path;
+        bool is_dir = false;
+        int64_t size = 0;
+        std::string mtime;
+        std::string hash;
+    };
+    [[nodiscard]] std::vector<SampleFileRow> query_sample(
+        const std::string& group_name,
+        int64_t epoch) const;
+
+    /// Register aggregate() and previous() KEL functions for
+    /// watch-rule evaluation contexts (spec §7.7 category 3).
+    ///
+    /// - aggregate(data, glob, metric, func):
+    ///     Operates on in-memory sample data passed via context variable.
+    /// - previous(group, glob, metric):
+    ///     Queries SQLite for prior sample and aggregates.
+    ///
+    /// @param ctx The KEL context to register into.
+    void register_watch_kel_bindings(
+        kairos::kel::EvalContext& ctx) const;
+
 private:
     SQLite::Database& db_;
 };
