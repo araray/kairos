@@ -54,6 +54,8 @@ add_library(kairos_core STATIC
     src/engine/pipeline.cpp
     src/watch/sample.cpp
     src/watch/watch_engine.cpp
+    src/watch/real_scanner.cpp
+    src/config/yaml_loader.cpp
 )
 
 target_include_directories(kairos_core PUBLIC

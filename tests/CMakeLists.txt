@@ -192,3 +192,39 @@ add_executable(test_integration
 )
 target_link_libraries(test_integration PRIVATE kairos_test_helpers)
 gtest_discover_tests(test_integration)
+
+# ── Phase 3 Batch 4: YAML loader tests ──────────────────────────────────
+
+# YAML workflow/watch-group loader tests
+add_executable(test_yaml_loader
+    unit/config/yaml_loader_test.cpp
+)
+target_link_libraries(test_yaml_loader PRIVATE kairos_test_helpers)
+gtest_discover_tests(test_yaml_loader)
+
+# ── Phase 3 Batch 4: Real filesystem scanner tests ──────────────────────
+
+# Production filesystem scanner tests
+add_executable(test_real_scanner
+    unit/watch/real_scanner_test.cpp
+)
+target_link_libraries(test_real_scanner PRIVATE kairos_test_helpers)
+gtest_discover_tests(test_real_scanner)
+
+# ── Phase 3 Batch 4: Cron trigger tests ─────────────────────────────────
+
+# CronTrigger::next_fire_after via croncpp
+add_executable(test_cron_trigger
+    unit/engine/cron_trigger_test.cpp
+)
+target_link_libraries(test_cron_trigger PRIVATE kairos_test_helpers)
+gtest_discover_tests(test_cron_trigger)
+
+# ── Phase 3 Batch 4: KEL watch rule evaluation tests ────────────────────
+
+# KEL condition evaluation in watch engine
+add_executable(test_kel_rules
+    unit/watch/kel_rules_test.cpp
+)
+target_link_libraries(test_kel_rules PRIVATE kairos_test_helpers)
+gtest_discover_tests(test_kel_rules)

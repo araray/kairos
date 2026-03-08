@@ -13,6 +13,7 @@
 
 #include "kairos/watch/watch_engine.hpp"
 #include "kairos/core/id_generator.hpp"
+#include "kairos/kel/evaluator.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -42,6 +43,105 @@ bool rule_matches_event(const WatchRuleDef& rule,
         }
     }
     return false;
+}
+
+/// Build a KEL evaluation context for a watch rule.
+/// Binds: watch_group (string), event (string), file (map-like via members),
+/// prev_file (map-like via members).
+///
+/// Per spec §12.11, the context type 2 includes:
+///   data, event, watch_group, file, prev_file
+kel::EvalContext build_watch_kel_context(
+    const std::string& group_name,
+    const std::string& event_type,
+    const FileMetrics& file_metrics,
+    const FileMetrics* prev_metrics)
+{
+    auto ctx = kel::make_default_context();
+
+    // Scalar variables.
+    ctx.variables["watch_group"] = kel::KelValue(group_name);
+    ctx.variables["event"] = kel::KelValue(event_type);
+
+    // File metrics as a pseudo-object using a "file." prefix convention.
+    // We register member accessors for the "file" variable.
+    ctx.variables["file"] = kel::KelValue(std::string("file_obj"));
+    ctx.variables["prev_file"] = kel::KelValue(
+        prev_metrics ? std::string("prev_file_obj")
+                     : std::string(""));
+
+    // Direct variable bindings for common KEL expressions like
+    // "file.size > X" — we expose file_size, file_mtime, etc. as
+    // flat variables since KEL v1 doesn't support dot-access on maps.
+    ctx.variables["file_size"] = kel::KelValue(file_metrics.size);
+    ctx.variables["file_type"] = kel::KelValue(file_metrics.entry_type);
+    ctx.variables["file_path"] = kel::KelValue(file_metrics.path);
+    ctx.variables["file_permissions"] = kel::KelValue(file_metrics.permissions);
+
+    if (file_metrics.pattern_found.has_value()) {
+        ctx.variables["file_pattern_found"] =
+            kel::KelValue(*file_metrics.pattern_found);
+    } else {
+        ctx.variables["file_pattern_found"] = kel::KelValue(false);
+    }
+
+    if (file_metrics.md5.has_value()) {
+        ctx.variables["file_md5"] = kel::KelValue(*file_metrics.md5);
+    }
+    if (file_metrics.sha256.has_value()) {
+        ctx.variables["file_sha256"] = kel::KelValue(*file_metrics.sha256);
+    }
+
+    // Prev file metrics (if available).
+    if (prev_metrics) {
+        ctx.variables["prev_file_size"] = kel::KelValue(prev_metrics->size);
+        ctx.variables["prev_file_type"] = kel::KelValue(prev_metrics->entry_type);
+        if (prev_metrics->pattern_found.has_value()) {
+            ctx.variables["prev_file_pattern_found"] =
+                kel::KelValue(*prev_metrics->pattern_found);
+        }
+    }
+
+    // Member resolver for "file.X" and "prev_file.X" syntax.
+    // The KEL evaluator calls members["file_obj.size"](file_obj_value).
+    auto make_member = [&](const FileMetrics& m) {
+        return [&m](const std::string& member_name) -> kel::KelValue {
+            if (member_name == "size") return kel::KelValue(m.size);
+            if (member_name == "path") return kel::KelValue(m.path);
+            if (member_name == "type") return kel::KelValue(m.entry_type);
+            if (member_name == "permissions") return kel::KelValue(m.permissions);
+            if (member_name == "pattern_found") {
+                return kel::KelValue(m.pattern_found.value_or(false));
+            }
+            if (member_name == "md5") {
+                return kel::KelValue(m.md5.value_or(""));
+            }
+            if (member_name == "sha256") {
+                return kel::KelValue(m.sha256.value_or(""));
+            }
+            return kel::KelValue(false);
+        };
+    };
+
+    // Register member resolvers.
+    auto file_resolver = make_member(file_metrics);
+    ctx.members["file_obj.size"] = [file_resolver](const kel::KelValue&) {
+        return file_resolver("size");
+    };
+    ctx.members["file_obj.path"] = [file_resolver](const kel::KelValue&) {
+        return file_resolver("path");
+    };
+    ctx.members["file_obj.type"] = [file_resolver](const kel::KelValue&) {
+        return file_resolver("type");
+    };
+    ctx.members["file_obj.permissions"] = [file_resolver](const kel::KelValue&) {
+        return file_resolver("permissions");
+    };
+    ctx.members["file_obj.pattern_found"] = [file_resolver](const kel::KelValue&) {
+        return file_resolver("pattern_found");
+    };
+
+    return ctx;
 }
 
 }  // namespace
@@ -241,7 +341,7 @@ ScanResult WatchEngine::run_scan(
         // Evaluate rules if there are changes.
         if (!result.diff.empty()) {
             result.triggered = evaluate_rules(
-                state.def, current, result.diff);
+                state.def, current, state.last_sample, result.diff);
 
             // Emit TriggerEvents.
             if (!result.triggered.empty()) {
@@ -326,18 +426,75 @@ Sample WatchEngine::collect_sample(
 std::vector<WatchTriggerResult> WatchEngine::evaluate_rules(
     const WatchGroupDef& group,
     const Sample& current,
+    const Sample& previous,
     const SampleDiff& diff)
 {
     std::vector<WatchTriggerResult> results;
 
-    // For v1: evaluate rules against each diff entry.
-    // A rule matches if the event type matches the rule's event_types filter
-    // (empty = match all). Full KEL evaluation deferred to later batch;
-    // for now, all rules with matching event_types fire.
+    kel::EvalLimits limits;  // Default limits — safe for watch rules.
+
+    // Helper lambda: evaluate a single rule against a single file event.
+    // Returns true if the rule fires (event-type match AND KEL condition true).
+    auto try_rule = [&](const WatchRuleDef& rule,
+                        const std::string& path,
+                        const std::string& event_str) -> bool
+    {
+        // Step 1: Event-type filter (fast path).
+        if (!rule_matches_event(rule, event_str)) return false;
+
+        // Step 2: KEL condition evaluation.
+        // If condition is empty or "true", the rule always fires.
+        if (rule.condition.empty() || rule.condition == "true") {
+            return true;
+        }
+
+        // Build KEL context with file metrics and event info.
+        auto entry_it = current.entries.find(path);
+        FileMetrics empty_metrics;
+        empty_metrics.path = path;
+        const FileMetrics& file_metrics =
+            (entry_it != current.entries.end())
+                ? entry_it->second : empty_metrics;
+
+        auto prev_it = previous.entries.find(path);
+        const FileMetrics* prev_metrics =
+            (prev_it != previous.entries.end())
+                ? &prev_it->second : nullptr;
+
+        auto ctx = build_watch_kel_context(
+            group.group_name, event_str, file_metrics, prev_metrics);
+
+        // Evaluate the KEL expression.
+        try {
+            auto result = kel::eval_expression(
+                rule.condition, ctx, limits);
+            return result.is_truthy();
+        } catch (const std::exception&) {
+            // KEL evaluation error → rule does not fire.
+            // In production, this would be logged. For now, silently skip.
+            return false;
+        }
+    };
+
+    // Helper lambda: check a rule against a file and add result if matched.
+    auto check_and_add = [&](const WatchRuleDef& rule,
+                             const std::string& path,
+                             const std::string& event_str) {
+        if (try_rule(rule, path, event_str)) {
+            WatchTriggerResult tr;
+            tr.rule_name = rule.rule_name;
+            tr.watch_group_name = group.group_name;
+            tr.affected_paths = {path};
+            tr.event_type = event_str;
+            tr.severity = rule.severity;
+            tr.trigger_target = rule.trigger_target;
+            tr.trigger_is_workflow = rule.trigger_is_workflow;
+            results.push_back(std::move(tr));
+        }
+    };
 
     // Process created files.
     for (const auto& path : diff.created) {
-        auto event_type = WatchEventType::FileCreated;
         auto entry_it = current.entries.find(path);
         bool is_dir = (entry_it != current.entries.end() &&
                        entry_it->second.entry_type == "directory");
@@ -347,17 +504,7 @@ std::vector<WatchTriggerResult> WatchEngine::evaluate_rules(
                                         : WatchEventType::FileCreated);
 
         for (const auto& rule : group.rules) {
-            if (rule_matches_event(rule, event_str)) {
-                WatchTriggerResult tr;
-                tr.rule_name = rule.rule_name;
-                tr.watch_group_name = group.group_name;
-                tr.affected_paths = {path};
-                tr.event_type = event_str;
-                tr.severity = rule.severity;
-                tr.trigger_target = rule.trigger_target;
-                tr.trigger_is_workflow = rule.trigger_is_workflow;
-                results.push_back(std::move(tr));
-            }
+            check_and_add(rule, path, event_str);
         }
     }
 
@@ -366,17 +513,7 @@ std::vector<WatchTriggerResult> WatchEngine::evaluate_rules(
         std::string event_str = event_type_to_string(WatchEventType::FileDeleted);
 
         for (const auto& rule : group.rules) {
-            if (rule_matches_event(rule, event_str)) {
-                WatchTriggerResult tr;
-                tr.rule_name = rule.rule_name;
-                tr.watch_group_name = group.group_name;
-                tr.affected_paths = {path};
-                tr.event_type = event_str;
-                tr.severity = rule.severity;
-                tr.trigger_target = rule.trigger_target;
-                tr.trigger_is_workflow = rule.trigger_is_workflow;
-                results.push_back(std::move(tr));
-            }
+            check_and_add(rule, path, event_str);
         }
     }
 
@@ -392,17 +529,7 @@ std::vector<WatchTriggerResult> WatchEngine::evaluate_rules(
         std::string event_str = event_type_to_string(event_flags);
 
         for (const auto& rule : group.rules) {
-            if (rule_matches_event(rule, event_str)) {
-                WatchTriggerResult tr;
-                tr.rule_name = rule.rule_name;
-                tr.watch_group_name = group.group_name;
-                tr.affected_paths = {path};
-                tr.event_type = event_str;
-                tr.severity = rule.severity;
-                tr.trigger_target = rule.trigger_target;
-                tr.trigger_is_workflow = rule.trigger_is_workflow;
-                results.push_back(std::move(tr));
-            }
+            check_and_add(rule, path, event_str);
         }
     }
 

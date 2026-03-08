@@ -120,10 +120,11 @@ private:
     /// Collect a sample from the scanner for a watch group.
     Sample collect_sample(const WatchGroupDef& group, std::stop_token stop);
 
-    /// Evaluate watch rules against a diff.
+    /// Evaluate watch rules against a diff (with KEL evaluation).
     std::vector<WatchTriggerResult> evaluate_rules(
         const WatchGroupDef& group,
         const Sample& current,
+        const Sample& previous,
         const SampleDiff& diff);
 
     /// Emit TriggerEvents for triggered rules.
