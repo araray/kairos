@@ -530,7 +530,7 @@ int run(int argc, char** argv) {
                     const auto& r = results[i];
                     auto groups = registry->watch_groups();
                     std::string gname = i < groups.size()
-                        ? groups[i].name : "(unknown)";
+                        ? groups[i].group_name : "(unknown)";
                     std::cout << fmt::format(
                         "Group: {} — {} files scanned "
                         "(+{} -{} ~{}) in {}ms",
