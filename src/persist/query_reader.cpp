@@ -478,4 +478,48 @@ void QueryReader::register_watch_kel_bindings(
     };
 }
 
+std::vector<QueryReader::WatchEventRow> QueryReader::query_watch_events(
+    int limit, const std::string& watch_group) const
+{
+    std::vector<WatchEventRow> results;
+
+    // The watch_events table uses:
+    //   file_path → stores affected_files JSON
+    //   action_taken → stores severity
+    //   (no event_uid or sample_epoch columns in v1 schema)
+    std::string sql =
+        "SELECT id, watch_group, rule_name, event_type, action_taken, "
+        "file_path, details_json, created_at "
+        "FROM watch_events ";
+
+    if (!watch_group.empty()) {
+        sql += "WHERE watch_group = ? ";
+    }
+    sql += "ORDER BY created_at DESC LIMIT ?";
+
+    SQLite::Statement query(db_, sql);
+
+    int bind_idx = 1;
+    if (!watch_group.empty()) {
+        query.bind(bind_idx++, watch_group);
+    }
+    query.bind(bind_idx, limit);
+
+    while (query.executeStep()) {
+        WatchEventRow row;
+        row.event_uid          = std::to_string(query.getColumn(0).getInt64());
+        row.watch_group        = query.getColumn(1).getString();
+        row.rule_name          = query.getColumn(2).getString();
+        row.event_type         = query.getColumn(3).getString();
+        row.severity           = query.getColumn(4).getString();
+        row.affected_files_json= query.getColumn(5).getString();
+        row.details_json       = query.getColumn(6).getString();
+        row.created_at         = query.getColumn(7).getString();
+        row.sample_epoch       = 0;  // Not stored in v1 schema.
+        results.push_back(std::move(row));
+    }
+
+    return results;
+}
+
 }  // namespace kairos::persist

@@ -285,6 +285,55 @@ void DBWriter::execute_request(const DBWriteRequest& req) {
             int deleted = prune_runs.exec();
             spdlog::info("Pruned {} runs older than {}",
                          deleted, r.cutoff_date);
+
+        } else if constexpr (std::is_same_v<T, BatchInsertWatchSamples>) {
+            // Batch insert: all entries for one scan epoch in the
+            // enclosing transaction. This is the optimized path
+            // from §16.5 — avoids per-file enqueue overhead.
+            for (const auto& entry : r.entries) {
+                stmt_insert_watch_sample_->reset();
+                stmt_insert_watch_sample_->bind(1, r.watch_group);
+                stmt_insert_watch_sample_->bind(2, r.sample_epoch);
+                stmt_insert_watch_sample_->bind(3, entry.file_path);
+                stmt_insert_watch_sample_->bind(4, entry.size);
+                stmt_insert_watch_sample_->bind(5, entry.mtime);
+                stmt_insert_watch_sample_->bind(6, entry.hash);
+                stmt_insert_watch_sample_->bind(7, r.scan_duration_ms);
+                stmt_insert_watch_sample_->exec();
+            }
+            spdlog::trace("Batch-inserted {} sample entries for group '{}' "
+                          "epoch {}",
+                          r.entries.size(), r.watch_group, r.sample_epoch);
+
+        } else if constexpr (std::is_same_v<T, PruneWatchSamples>) {
+            // Prune old sample epochs, keeping the most recent N
+            // per group. §16.8 retention policy for watch samples.
+            //
+            // Strategy: find the Nth most-recent distinct epoch for
+            // this group. Delete all epochs older than that.
+            SQLite::Statement find_cutoff(db_,
+                "SELECT sample_epoch FROM watch_samples "
+                "WHERE watch_group = ? "
+                "GROUP BY sample_epoch "
+                "ORDER BY sample_epoch DESC "
+                "LIMIT 1 OFFSET ?");
+            find_cutoff.bind(1, r.watch_group);
+            find_cutoff.bind(2, r.max_epochs - 1);
+
+            if (find_cutoff.executeStep()) {
+                int64_t cutoff_epoch = find_cutoff.getColumn(0).getInt64();
+                SQLite::Statement prune(db_,
+                    "DELETE FROM watch_samples "
+                    "WHERE watch_group = ? AND sample_epoch < ?");
+                prune.bind(1, r.watch_group);
+                prune.bind(2, cutoff_epoch);
+                int deleted = prune.exec();
+                if (deleted > 0) {
+                    spdlog::info("Pruned {} watch sample rows for group '{}' "
+                                 "(kept {} epochs)",
+                                 deleted, r.watch_group, r.max_epochs);
+                }
+            }
         }
     }, req);
 }

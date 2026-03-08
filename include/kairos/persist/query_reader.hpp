@@ -132,6 +132,28 @@ public:
     void register_watch_kel_bindings(
         kairos::kel::EvalContext& ctx) const;
 
+    // ── Watch event queries (for CLI / MCP) ──────────────────────
+
+    /// A watch event row from the database.
+    struct WatchEventRow {
+        std::string event_uid;
+        std::string watch_group;
+        std::string rule_name;
+        std::string event_type;
+        std::string severity;
+        std::string affected_files_json;
+        int64_t sample_epoch = 0;
+        std::string details_json;
+        std::string created_at;
+    };
+
+    /// Query recent watch events from the database.
+    /// @param limit Max number of events to return.
+    /// @param watch_group Optional filter by group name (empty = all).
+    [[nodiscard]] std::vector<WatchEventRow> query_watch_events(
+        int limit = 50,
+        const std::string& watch_group = "") const;
+
 private:
     SQLite::Database& db_;
 };

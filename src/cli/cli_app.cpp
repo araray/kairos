@@ -5,14 +5,19 @@
 
 #include "kairos/cli/cli_app.hpp"
 #include "kairos/config/config_store.hpp"
+#include "kairos/config/yaml_loader.hpp"
 #include "kairos/core/exit_codes.hpp"
 #include "kairos/core/version.hpp"
 #include "kairos/daemon/daemon.hpp"
+#include "kairos/engine/workflow_registry.hpp"
 #include "kairos/mcp/handler.hpp"
 #include "kairos/mcp/transport.hpp"
 #include "kairos/observability/logging.hpp"
 #include "kairos/persist/database.hpp"
+#include "kairos/persist/migration.hpp"
+#include "kairos/persist/query_reader.hpp"
 #include "kairos/platform/platform.hpp"
+#include "kairos/testing/fake_clock.hpp"
 #include "kairos/watch/real_scanner.hpp"
 #include "kairos/watch/watch_engine.hpp"
 
@@ -33,6 +38,68 @@ using json = nlohmann::json;
 namespace kairos::cli {
 
 namespace {
+
+/// Resolve a YAML directory path relative to the config file directory.
+static fs::path resolve_yaml_dir(
+    const fs::path& config_file,
+    const std::string& dir_value)
+{
+    fs::path p(dir_value);
+    if (p.is_absolute()) return p;
+    auto config_dir = config_file.parent_path();
+    if (config_dir.empty()) config_dir = ".";
+    return config_dir / p;
+}
+
+/// Load workflow/watch-group definitions from YAML directories.
+/// Shared by CLI commands that need standalone access to definitions.
+static std::shared_ptr<engine::WorkflowRegistry> load_registry_from_yaml(
+    const std::shared_ptr<const config::ConfigState>& cfg,
+    std::shared_ptr<spdlog::logger> log)
+{
+    auto workflows_dir_str =
+        cfg->global.get<std::string>("kairos.workflows_dir", "workflows");
+    auto watch_groups_dir_str =
+        cfg->global.get<std::string>("kairos.watch_groups_dir", "watch_groups");
+
+    auto workflows_dir =
+        resolve_yaml_dir(cfg->config_file_path, workflows_dir_str);
+    auto watch_groups_path =
+        resolve_yaml_dir(cfg->config_file_path, watch_groups_dir_str);
+
+    config::YamlLoadResult yaml_result;
+
+    std::error_code ec;
+    bool wf_exists = fs::exists(workflows_dir, ec) && !ec;
+    bool wg_exists = fs::exists(watch_groups_path, ec) && !ec;
+
+    if (wf_exists || wg_exists) {
+        if (wf_exists && wg_exists) {
+            yaml_result = config::load_all(workflows_dir, watch_groups_path);
+        } else if (wf_exists) {
+            yaml_result = config::load_workflows_dir(workflows_dir);
+        } else {
+            if (fs::is_directory(watch_groups_path, ec)) {
+                yaml_result = config::load_watch_groups_dir(watch_groups_path);
+            } else {
+                yaml_result = config::load_watch_groups_file(watch_groups_path);
+            }
+        }
+    }
+
+    for (const auto& err : yaml_result.errors) {
+        if (log) {
+            log->warn("YAML error in {}: {} — {}",
+                      err.file, err.path, err.message);
+        }
+    }
+
+    return std::make_shared<engine::WorkflowRegistry>(
+        std::move(yaml_result.workflows),
+        std::move(yaml_result.triggers),
+        std::move(yaml_result.standalone_jobs),
+        std::move(yaml_result.watch_groups));
+}
 
 /// Initialize logging based on config or CLI flags.
 void setup_logging(const std::string& log_level, bool json_output, bool is_daemon) {
@@ -246,19 +313,21 @@ int run(int argc, char** argv) {
         auto cfg = load_config_or_die(config_path, {});
         if (!cfg) return static_cast<int>(ExitCode::kConfigError);
 
-        // Build a minimal watch engine to query status.
-        // For a running daemon, this would connect via IPC.
-        // For v1, we load config and create a standalone WatchEngine.
+        // Load YAML watch-group definitions to populate the engine
+        // with actual group metadata (standalone mode per §23.10).
+        auto registry = load_registry_from_yaml(cfg, spdlog::default_logger());
+
+        // Create a standalone WatchEngine with the loaded groups.
         watch::WatchEngineConfig watch_cfg;
         watch::RealFilesystemScanner scanner;
+        SystemClockSource clock;
         watch::WatchEngine engine(
             watch_cfg,
             watch::WatchEngine::Dependencies{
-                .clock = nullptr,
+                .clock = &clock,
                 .scanner = &scanner,
             },
-            {}  // Empty groups — status from config.
-        );
+            registry->watch_groups());
 
         auto statuses = engine.get_status();
 
@@ -279,7 +348,7 @@ int run(int argc, char** argv) {
             if (statuses.empty()) {
                 std::cout << "No watch groups configured.\n";
             } else {
-                // Simple table output.
+                // Table output.
                 std::cout << fmt::format("{:<20} {:<8} {:<6} {:<6} {:<22} {}\n",
                     "GROUP", "MODE", "PATHS", "FILES",
                     "LAST SCAN", "STATUS");
@@ -300,16 +369,95 @@ int run(int argc, char** argv) {
     // ── watches show ──────────────────────────────────────────────
     if (watches_show->parsed()) {
         setup_logging(log_level, json_output, false);
-        // Stub: show details for a specific watch group.
+
+        auto cfg = load_config_or_die(config_path, {});
+        if (!cfg) return static_cast<int>(ExitCode::kConfigError);
+
+        auto registry = load_registry_from_yaml(cfg, spdlog::default_logger());
+        const auto& groups = registry->watch_groups();
+
+        // Find the requested group.
+        const watch::WatchGroupDef* found = nullptr;
+        for (const auto& g : groups) {
+            if (g.group_name == watch_show_name) {
+                found = &g;
+                break;
+            }
+        }
+
+        if (!found) {
+            if (json_output) {
+                std::cout << json{
+                    {"error", "watch group not found"},
+                    {"name", watch_show_name}
+                }.dump(2) << "\n";
+            } else {
+                std::cerr << "Watch group '" << watch_show_name
+                          << "' not found.\n";
+            }
+            return 1;
+        }
+
+        // Convert WatchMode enum to string.
+        auto mode_str = [](watch::WatchMode m) -> std::string {
+            switch (m) {
+                case watch::WatchMode::Native: return "native";
+                case watch::WatchMode::Sample: return "sample";
+                case watch::WatchMode::Hybrid: return "hybrid";
+            }
+            return "unknown";
+        };
+
         if (json_output) {
+            json paths = json::array();
+            for (const auto& wi : found->watch_items) {
+                paths.push_back(wi);
+            }
+            json rules = json::array();
+            for (const auto& r : found->rules) {
+                rules.push_back({
+                    {"name", r.rule_name},
+                    {"condition", r.condition},
+                    {"severity", r.severity},
+                    {"description", r.description}
+                });
+            }
             std::cout << json{
-                {"watch_group", watch_show_name},
-                {"status", "not_implemented"},
-                {"message", "Watch group detail requires a running daemon"}
+                {"name", found->group_name},
+                {"id", found->group_id},
+                {"mode", mode_str(found->mode)},
+                {"sample_rate_s", found->sample_rate.count()},
+                {"max_depth", found->max_depth},
+                {"max_files", found->max_files},
+                {"watch_items", paths},
+                {"rules", rules},
+                {"exclude_globs", found->exclude_globs},
+                {"enabled", found->enabled}
             }.dump(2) << "\n";
         } else {
-            std::cerr << "Watch group detail requires a running daemon.\n"
-                      << "Use 'kairos start' first, then query via MCP.\n";
+            std::cout << "Watch Group: " << found->group_name << "\n";
+            std::cout << "ID: " << found->group_id << "\n";
+            std::cout << "Mode: " << mode_str(found->mode) << "\n";
+            std::cout << "Sample Rate: " << found->sample_rate.count()
+                      << "s\n";
+            std::cout << "Max Depth: " << found->max_depth << "\n";
+            std::cout << "Max Files: " << found->max_files << "\n";
+            std::cout << "\nWatch Items:\n";
+            for (const auto& wi : found->watch_items) {
+                std::cout << "  " << wi << "\n";
+            }
+            if (!found->exclude_globs.empty()) {
+                std::cout << "\nExclude Globs:\n";
+                for (const auto& g : found->exclude_globs) {
+                    std::cout << "  " << g << "\n";
+                }
+            }
+            std::cout << "\nRules (" << found->rules.size() << "):\n";
+            for (const auto& r : found->rules) {
+                std::cout << "  " << r.rule_name << ": "
+                          << r.condition
+                          << " [" << r.severity << "]\n";
+            }
         }
         return 0;
     }
@@ -317,15 +465,148 @@ int run(int argc, char** argv) {
     // ── watches scan-once ─────────────────────────────────────────
     if (watches_scan->parsed()) {
         setup_logging(log_level, json_output, false);
-        // Stub: scan-once requires daemon access.
-        if (json_output) {
-            std::cout << json{
-                {"status", "not_implemented"},
-                {"message", "scan-once requires a running daemon"}
-            }.dump(2) << "\n";
+
+        auto cfg = load_config_or_die(config_path, {});
+        if (!cfg) return static_cast<int>(ExitCode::kConfigError);
+
+        auto registry = load_registry_from_yaml(cfg, spdlog::default_logger());
+
+        // Create a standalone WatchEngine for scanning.
+        watch::WatchEngineConfig watch_cfg;
+        watch::RealFilesystemScanner scanner;
+        SystemClockSource clock;
+        watch::WatchEngine engine(
+            watch_cfg,
+            watch::WatchEngine::Dependencies{
+                .clock = &clock,
+                .scanner = &scanner,
+            },
+            registry->watch_groups());
+
+        // Null sink — standalone scan doesn't push to trigger bus.
+        engine::TriggerSink null_sink = [](engine::TriggerEvent) {
+            return true;
+        };
+
+        if (watch_scan_group.empty()) {
+            // Scan all groups.
+            auto results = engine.scan_once(null_sink);
+
+            if (json_output) {
+                json arr = json::array();
+                for (size_t i = 0; i < results.size(); ++i) {
+                    const auto& r = results[i];
+                    json triggered = json::array();
+                    for (const auto& t : r.triggered) {
+                        triggered.push_back({
+                            {"rule_name", t.rule_name},
+                            {"event_type", t.event_type},
+                            {"affected_count",
+                             static_cast<int>(t.affected_paths.size())}
+                        });
+                    }
+                    arr.push_back({
+                        {"files_scanned",
+                         static_cast<int>(r.sample.entries.size())},
+                        {"changes", {
+                            {"created",
+                             static_cast<int>(r.diff.created.size())},
+                            {"modified",
+                             static_cast<int>(r.diff.modified.size())},
+                            {"deleted",
+                             static_cast<int>(r.diff.deleted.size())},
+                        }},
+                        {"triggered", triggered},
+                        {"scan_duration_ms", r.scan_duration.count()},
+                        {"incomplete", r.incomplete}
+                    });
+                }
+                std::cout << json{
+                    {"scanned_groups", static_cast<int>(results.size())},
+                    {"results", arr}
+                }.dump(2) << "\n";
+            } else {
+                for (size_t i = 0; i < results.size(); ++i) {
+                    const auto& r = results[i];
+                    auto groups = registry->watch_groups();
+                    std::string gname = i < groups.size()
+                        ? groups[i].name : "(unknown)";
+                    std::cout << fmt::format(
+                        "Group: {} — {} files scanned "
+                        "(+{} -{} ~{}) in {}ms",
+                        gname,
+                        r.sample.entries.size(),
+                        r.diff.created.size(),
+                        r.diff.deleted.size(),
+                        r.diff.modified.size(),
+                        r.scan_duration.count()) << "\n";
+                    for (const auto& t : r.triggered) {
+                        std::cout << "  Triggered: " << t.rule_name
+                                  << " (" << t.event_type << ", "
+                                  << t.affected_paths.size()
+                                  << " files)\n";
+                    }
+                }
+                if (results.empty()) {
+                    std::cout << "No watch groups configured.\n";
+                }
+            }
         } else {
-            std::cerr << "scan-once requires a running daemon.\n"
-                      << "Use 'kairos start' first, then query via MCP.\n";
+            // Scan a specific group.
+            try {
+                auto result = engine.scan_group(watch_scan_group, null_sink);
+                if (json_output) {
+                    json triggered = json::array();
+                    for (const auto& t : result.triggered) {
+                        json paths = json::array();
+                        for (const auto& p : t.affected_paths) {
+                            paths.push_back(p);
+                        }
+                        triggered.push_back({
+                            {"rule_name", t.rule_name},
+                            {"event_type", t.event_type},
+                            {"affected_paths", paths}
+                        });
+                    }
+                    std::cout << json{
+                        {"watch_group", watch_scan_group},
+                        {"files_scanned",
+                         static_cast<int>(result.sample.entries.size())},
+                        {"changes", {
+                            {"created",
+                             static_cast<int>(result.diff.created.size())},
+                            {"modified",
+                             static_cast<int>(result.diff.modified.size())},
+                            {"deleted",
+                             static_cast<int>(result.diff.deleted.size())},
+                        }},
+                        {"triggered", triggered},
+                        {"scan_duration_ms", result.scan_duration.count()},
+                        {"incomplete", result.incomplete}
+                    }.dump(2) << "\n";
+                } else {
+                    std::cout << fmt::format(
+                        "Group: {} — {} files scanned "
+                        "(+{} -{} ~{}) in {}ms\n",
+                        watch_scan_group,
+                        result.sample.entries.size(),
+                        result.diff.created.size(),
+                        result.diff.deleted.size(),
+                        result.diff.modified.size(),
+                        result.scan_duration.count());
+                    for (const auto& t : result.triggered) {
+                        std::cout << "  Triggered: " << t.rule_name
+                                  << " (" << t.event_type << ", "
+                                  << t.affected_paths.size()
+                                  << " files)\n";
+                    }
+                }
+            } catch (const std::exception& e) {
+                std::cerr << "Error scanning group '"
+                          << watch_scan_group << "': "
+                          << e.what() << "\n";
+                return 1;
+            }
         }
         return 0;
     }
@@ -333,15 +614,72 @@ int run(int argc, char** argv) {
     // ── events list ───────────────────────────────────────────────
     if (events_list->parsed()) {
         setup_logging(log_level, json_output, false);
-        // Stub: events list requires daemon access.
-        if (json_output) {
-            std::cout << json{
-                {"events", json::array()},
-                {"message", "Event listing requires a running daemon"}
-            }.dump(2) << "\n";
-        } else {
-            std::cerr << "Event listing requires a running daemon.\n"
-                      << "Use 'kairos start' first, then query via MCP.\n";
+
+        auto cfg = load_config_or_die(config_path, {});
+        if (!cfg) return static_cast<int>(ExitCode::kConfigError);
+
+        // Open the SQLite database in read-only mode and query
+        // watch_events directly (no running daemon needed).
+        try {
+            auto db = persist::open_database(cfg->db_path);
+            persist::QueryReader reader(*db);
+
+            auto events = reader.query_watch_events(
+                events_limit, events_group);
+
+            if (json_output) {
+                json arr = json::array();
+                for (const auto& e : events) {
+                    arr.push_back({
+                        {"event_uid", e.event_uid},
+                        {"watch_group", e.watch_group},
+                        {"rule_name", e.rule_name},
+                        {"event_type", e.event_type},
+                        {"severity", e.severity},
+                        {"affected_files", e.affected_files_json},
+                        {"sample_epoch", e.sample_epoch},
+                        {"created_at", e.created_at}
+                    });
+                }
+                std::cout << json{
+                    {"events", arr},
+                    {"count", static_cast<int>(events.size())}
+                }.dump(2) << "\n";
+            } else {
+                if (events.empty()) {
+                    std::cout << "No events found.\n";
+                    if (!events_group.empty()) {
+                        std::cout << "  (filtered by group: "
+                                  << events_group << ")\n";
+                    }
+                } else {
+                    std::cout << fmt::format(
+                        "{:<20} {:<15} {:<15} {:<10} {}\n",
+                        "GROUP", "RULE", "TYPE", "SEVERITY",
+                        "CREATED");
+                    std::cout << std::string(80, '-') << "\n";
+                    for (const auto& e : events) {
+                        std::cout << fmt::format(
+                            "{:<20} {:<15} {:<15} {:<10} {}\n",
+                            e.watch_group, e.rule_name, e.event_type,
+                            e.severity, e.created_at);
+                    }
+                    std::cout << "\n" << events.size() << " event(s)\n";
+                }
+            }
+        } catch (const std::exception& e) {
+            if (json_output) {
+                std::cout << json{
+                    {"events", json::array()},
+                    {"error", e.what()}
+                }.dump(2) << "\n";
+            } else {
+                std::cerr << "Failed to query events: " << e.what()
+                          << "\n"
+                          << "Run 'kairos init-db' first if the "
+                          << "database does not exist.\n";
+            }
+            return 1;
         }
         return 0;
     }

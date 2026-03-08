@@ -46,6 +46,7 @@ add_library(kairos_core STATIC
     src/observability/logging.cpp
     src/observability/json_formatter.cpp
     src/observability/metrics.cpp
+    src/observability/null_tracer.cpp
     src/engine/trigger_types.cpp
     src/engine/dag.cpp
     src/engine/execution_plan.cpp

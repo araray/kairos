@@ -22,8 +22,11 @@
 #include "kairos/engine/trigger_event.hpp"
 #include "kairos/engine/workflow_registry.hpp"
 #include "kairos/exec/runner_pool.hpp"
+#include "kairos/mcp/handler.hpp"
+#include "kairos/mcp/transport.hpp"
 #include "kairos/observability/logging.hpp"
 #include "kairos/observability/metrics.hpp"
+#include "kairos/observability/tracer.hpp"
 #include "kairos/persist/database.hpp"
 #include "kairos/persist/db_writer.hpp"
 #include "kairos/persist/migration.hpp"
@@ -306,6 +309,72 @@ int run_daemon(std::shared_ptr<const kairos::config::ConfigState> config) {
     watch_engine.start(stop_token, watch_sink);
     log->info("Watch engine started ({} groups)", watch_engine.group_count());
 
+    // ── Step 15.5: Create tracer ───────────────────────────────────
+    // NullTracer by default; OTelTracer when KAIROS_OTEL=ON and
+    // kairos.otel.enabled=true in config.
+    bool otel_enabled = config->global.get<bool>(
+        "kairos.otel.enabled", false);
+    std::string otel_endpoint = config->global.get<std::string>(
+        "kairos.otel.endpoint", "localhost:4317");
+    auto tracer = observability::create_tracer(
+        otel_enabled, otel_endpoint, "kairos");
+    log->debug("Tracer initialized (otel={})", otel_enabled);
+
+    // ── Step 15.7: Start MCP server thread (if enabled) ───────────
+    // The MCP server runs on a dedicated thread (Thread N+3 per §3.3).
+    // It reads JSON-RPC from stdin and writes to stdout.
+    // Dependencies are wired to live engine state.
+    bool mcp_enabled = config->global.get<bool>(
+        "kairos.mcp.enabled", false);
+
+    // MCP handler and transport (kept alive for the daemon's lifetime).
+    std::unique_ptr<mcp::McpHandler> mcp_handler;
+    std::unique_ptr<mcp::StdioTransport> mcp_transport;
+    std::jthread mcp_thread;
+
+    if (mcp_enabled) {
+        // Wire all live dependencies into the MCP handler.
+        mcp::McpHandler::Dependencies mcp_deps;
+        mcp_deps.watch_engine = &watch_engine;
+        mcp_deps.metrics = &metrics_registry;
+        mcp_deps.server_info.name = "kairos";
+        mcp_deps.server_info.version = std::string(kairos::kVersion);
+
+        // Config reload callback: delegates to the daemon's reload logic.
+        mcp_deps.reload_config =
+            [&config, &scheduler, &pipeline, &watch_engine, &log]
+            (std::vector<std::string>& errors) -> bool {
+                bool ok = perform_config_reload(
+                    config->config_file_path,
+                    scheduler, pipeline, watch_engine, log);
+                if (!ok) {
+                    errors.push_back("Config reload failed — see logs");
+                }
+                return ok;
+            };
+
+        mcp_handler = std::make_unique<mcp::McpHandler>(std::move(mcp_deps));
+
+        mcp_transport = std::make_unique<mcp::StdioTransport>(
+            [&mcp_handler](const std::string& method,
+                           const nlohmann::json& params,
+                           const nlohmann::json& id) -> nlohmann::json {
+                return mcp_handler->dispatch(method, params, id);
+            });
+
+        // Start MCP on a dedicated thread.
+        mcp_thread = std::jthread([&mcp_transport, &log](std::stop_token st) {
+            platform::set_thread_name("kairos-mcp");
+            log->info("MCP server thread started (stdio transport)");
+            mcp_transport->run();
+            log->info("MCP server thread stopped");
+        });
+
+        log->info("MCP server enabled (stdio transport)");
+    } else {
+        log->debug("MCP server disabled (kairos.mcp.enabled=false)");
+    }
+
     // ── Step 16: Install signal handlers ───────────────────────────
     platform::install_signal_handlers(
         [&](platform::SignalType sig) {
@@ -374,6 +443,16 @@ int run_daemon(std::shared_ptr<const kairos::config::ConfigState> config) {
     log->debug("Stopping watch engine");
     watch_engine.stop();
 
+    // 2.5. Stop MCP server (close stdin reader).
+    if (mcp_transport) {
+        log->debug("Stopping MCP server");
+        mcp_transport->stop();
+        // The MCP thread blocks on stdin — stopping the transport
+        // sets the stopped_ flag, but the thread may still be blocked
+        // on std::getline. It will exit on next stdin input or EOF.
+        // We join below after pipeline stops to give it time.
+    }
+
     // 3. Close trigger bus → pipeline drains remaining events.
     log->debug("Stopping pipeline");
     trigger_bus.close();
@@ -382,6 +461,22 @@ int run_daemon(std::shared_ptr<const kairos::config::ConfigState> config) {
     // 4. Stop runner pool (wait for in-flight).
     log->debug("Stopping runner pool");
     runner_pool.shutdown();
+
+    // 4.5. Join MCP thread if running.
+    if (mcp_thread.joinable()) {
+        log->debug("Joining MCP server thread");
+        mcp_thread.request_stop();
+        // Give the MCP thread a brief timeout — if it's blocked on stdin,
+        // it won't exit until EOF. We can proceed regardless.
+        mcp_thread.join();
+    }
+    mcp_handler.reset();
+    mcp_transport.reset();
+
+    // 4.7. Flush tracer spans.
+    if (tracer) {
+        tracer->flush();
+    }
 
     // 5. Flush DB writer.
     log->debug("Flushing DB writer");

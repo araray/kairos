@@ -363,3 +363,30 @@ add_executable(test_mcp_handler
 )
 target_link_libraries(test_mcp_handler PRIVATE kairos_test_helpers)
 gtest_discover_tests(test_mcp_handler)
+
+# ── Phase 3 Batch 10: Tracer abstraction tests ────────────────────
+
+# NullTracer, ScopedSpan, factory
+add_executable(test_tracer
+    unit/observability/tracer_test.cpp
+)
+target_link_libraries(test_tracer PRIVATE kairos_test_helpers)
+gtest_discover_tests(test_tracer)
+
+# ── Phase 3 Batch 10: Batch persistence + pruning tests ──────────
+
+# BatchInsertWatchSamples, PruneWatchSamples
+add_executable(test_batch_persistence
+    unit/persist/batch_persistence_test.cpp
+)
+target_link_libraries(test_batch_persistence PRIVATE kairos_test_helpers)
+gtest_discover_tests(test_batch_persistence)
+
+# ── Phase 3 Batch 10: Watch events query test ─────────────────────
+
+# QueryReader::query_watch_events
+add_executable(test_watch_events_query
+    unit/persist/watch_events_query_test.cpp
+)
+target_link_libraries(test_watch_events_query PRIVATE kairos_test_helpers)
+gtest_discover_tests(test_watch_events_query)

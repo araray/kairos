@@ -139,6 +139,32 @@ struct InsertWatchEvent {
     std::string details_json;       ///< Arbitrary JSON payload.
 };
 
+/// Batch insert watch samples (all entries in one transaction).
+/// This is the optimized path for persisting an entire scan epoch.
+/// Spec reference: §16.5, §16.8 (batch inserts).
+struct BatchInsertWatchSamples {
+    std::string watch_group;
+    int64_t sample_epoch = 0;
+    int scan_duration_ms = 0;
+
+    /// Individual file entries for this epoch.
+    struct Entry {
+        std::string file_path;
+        bool is_dir = false;
+        int64_t size = 0;
+        std::string mtime;           ///< ISO-8601
+        std::string hash;
+    };
+    std::vector<Entry> entries;
+};
+
+/// Prune old watch samples, keeping only the most recent N epochs
+/// per group. Spec reference: §16.8 (retention policy).
+struct PruneWatchSamples {
+    std::string watch_group;
+    int max_epochs = 10;             ///< Keep this many most-recent epochs.
+};
+
 /// Prune records older than a given date.
 struct PruneOlderThan {
     std::string cutoff_date;        ///< ISO-8601
@@ -152,6 +178,7 @@ using DBWriteRequest = std::variant<
     InsertLogChunk,
     InsertTriggerHistory,
     InsertWatchSample, InsertWatchEvent,
+    BatchInsertWatchSamples, PruneWatchSamples,
     PruneOlderThan
 >;
 
