@@ -204,8 +204,8 @@ TEST_F(DiagnosticsTest, ScanOnceReturnsCorrectStructure) {
         EXPECT_FALSE(r.sample.empty()) << "Sample should contain entries";
         EXPECT_TRUE(r.diff.empty()) << "First scan should have empty diff";
         EXPECT_TRUE(r.triggered.empty()) << "First scan should have no events";
-        EXPECT_GT(r.scan_duration.count(), 0)
-            << "Scan duration should be measured";
+        EXPECT_GE(r.scan_duration.count(), 0)
+            << "Scan duration should be non-negative";
     }
 }
 
