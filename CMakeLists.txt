@@ -50,6 +50,8 @@ add_library(kairos_core STATIC
     src/engine/dag.cpp
     src/engine/execution_plan.cpp
     src/engine/event_types.cpp
+    src/engine/scheduler.cpp
+    src/engine/pipeline.cpp
 )
 
 target_include_directories(kairos_core PUBLIC

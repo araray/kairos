@@ -153,3 +153,17 @@ add_executable(test_execution_plan
 )
 target_link_libraries(test_execution_plan PRIVATE kairos_test_helpers)
 gtest_discover_tests(test_execution_plan)
+
+# Scheduler engine tests (component tests with FakeClock)
+add_executable(test_scheduler
+    unit/engine/scheduler_test.cpp
+)
+target_link_libraries(test_scheduler PRIVATE kairos_test_helpers)
+gtest_discover_tests(test_scheduler)
+
+# Pipeline engine tests (component tests with FakeProcess)
+add_executable(test_pipeline
+    unit/engine/pipeline_test.cpp
+)
+target_link_libraries(test_pipeline PRIVATE kairos_test_helpers)
+gtest_discover_tests(test_pipeline)
