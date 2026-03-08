@@ -228,3 +228,30 @@ add_executable(test_kel_rules
 )
 target_link_libraries(test_kel_rules PRIVATE kairos_test_helpers)
 gtest_discover_tests(test_kel_rules)
+
+# ── Phase 3 Batch 5: Native watch backend tests ────────────────────────
+
+# InotifyWatcher component tests (Linux only)
+add_executable(test_inotify_watcher
+    unit/watch/inotify_watcher_test.cpp
+)
+target_link_libraries(test_inotify_watcher PRIVATE kairos_test_helpers)
+gtest_discover_tests(test_inotify_watcher)
+
+# ── Phase 3 Batch 5: Watch persistence tests ───────────────────────────
+
+# InsertWatchSample + InsertWatchEvent via DBWriter
+add_executable(test_watch_persistence
+    unit/watch/watch_persistence_test.cpp
+)
+target_link_libraries(test_watch_persistence PRIVATE kairos_test_helpers)
+gtest_discover_tests(test_watch_persistence)
+
+# ── Phase 3 Batch 5: Parallel pipeline execution tests ─────────────────
+
+# Parallel level-by-level execution via Pipeline
+add_executable(test_parallel_pipeline
+    unit/engine/parallel_pipeline_test.cpp
+)
+target_link_libraries(test_parallel_pipeline PRIVATE kairos_test_helpers)
+gtest_discover_tests(test_parallel_pipeline)

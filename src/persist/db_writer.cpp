@@ -62,6 +62,16 @@ void DBWriter::prepare_statements() {
         "INSERT INTO trigger_history (trigger_id, trigger_type, "
         "target_id, fired_at, status, run_id) "
         "VALUES (?, ?, ?, ?, ?, ?)");
+
+    stmt_insert_watch_sample_ = std::make_unique<SQLite::Statement>(db_,
+        "INSERT INTO watch_samples (watch_group, sample_epoch, file_path, "
+        "file_size, mtime, hash, scan_duration_ms) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?)");
+
+    stmt_insert_watch_event_ = std::make_unique<SQLite::Statement>(db_,
+        "INSERT INTO watch_events (watch_group, event_type, file_path, "
+        "rule_name, details_json, action_taken, created_at) "
+        "VALUES (?, ?, ?, ?, ?, ?, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))");
 }
 
 void DBWriter::start(std::stop_token stop) {
@@ -235,6 +245,27 @@ void DBWriter::execute_request(const DBWriteRequest& req) {
             stmt_insert_trigger_->bind(5, r.status);
             stmt_insert_trigger_->bind(6, r.run_id);
             stmt_insert_trigger_->exec();
+
+        } else if constexpr (std::is_same_v<T, InsertWatchSample>) {
+            stmt_insert_watch_sample_->reset();
+            stmt_insert_watch_sample_->bind(1, r.watch_group);
+            stmt_insert_watch_sample_->bind(2, r.sample_epoch);
+            stmt_insert_watch_sample_->bind(3, r.file_path);
+            stmt_insert_watch_sample_->bind(4, r.size);
+            stmt_insert_watch_sample_->bind(5, r.mtime);
+            stmt_insert_watch_sample_->bind(6, r.hash);
+            stmt_insert_watch_sample_->bind(7, r.scan_duration_ms);
+            stmt_insert_watch_sample_->exec();
+
+        } else if constexpr (std::is_same_v<T, InsertWatchEvent>) {
+            stmt_insert_watch_event_->reset();
+            stmt_insert_watch_event_->bind(1, r.watch_group);
+            stmt_insert_watch_event_->bind(2, r.event_type);
+            stmt_insert_watch_event_->bind(3, r.affected_files_json);
+            stmt_insert_watch_event_->bind(4, r.rule_name);
+            stmt_insert_watch_event_->bind(5, r.details_json);
+            stmt_insert_watch_event_->bind(6, r.severity);
+            stmt_insert_watch_event_->exec();
 
         } else if constexpr (std::is_same_v<T, PruneOlderThan>) {
             // Prune runs older than cutoff.

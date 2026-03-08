@@ -146,13 +146,46 @@ void Pipeline::execute_level(const std::vector<std::string>& job_ids,
                               const WorkflowDag& dag, RunContext& ctx,
                               std::stop_token stop)
 {
-    // Execute jobs at this level sequentially for v1.
-    // (Parallel dispatch within a level is a v2 enhancement.)
+    if (job_ids.empty()) return;
+
+    // ── Single job at this level: no parallelism overhead ────────────
+    if (job_ids.size() == 1) {
+        const auto& job_id = job_ids[0];
+        execute_single_job_in_level(job_id, dag, ctx, stop);
+        return;
+    }
+
+    // ── Multiple jobs at this level: parallel dispatch ───────────────
+    // Per spec §11.4: evaluate conditions on the pipeline thread (they
+    // may read RunContext::job_statuses from prior levels), then dispatch
+    // ready jobs to run concurrently via std::jthread.
+    //
+    // We use an atomic counter + condition_variable to wait for all
+    // jobs at this level to complete before proceeding.
+
+    std::atomic<int> remaining{0};
+    std::mutex level_mu;
+    std::condition_variable level_cv;
+
+    // Pre-evaluate needs and conditions (on pipeline thread).
+    // This produces a list of jobs to actually execute.
+    struct JobDecision {
+        std::string job_id;
+        bool should_run = false;
+    };
+    std::vector<JobDecision> decisions;
+    decisions.reserve(job_ids.size());
+
     for (const auto& job_id : job_ids) {
+        JobDecision dec;
+        dec.job_id = job_id;
+
         if (stop.stop_requested()) {
+            std::lock_guard lock(level_mu);
             ctx.job_statuses[job_id] = RunContext::JobStatus{
                 .status = RunStatus::Cancelled, .reason = "Shutdown requested",
                 .start_time = deps_.clock->now(), .end_time = deps_.clock->now()};
+            decisions.push_back(std::move(dec));
             continue;
         }
 
@@ -161,6 +194,7 @@ void Pipeline::execute_level(const std::vector<std::string>& job_ids,
         // Check needs resolution.
         auto needs_dec = check_needs(node, ctx);
         if (needs_dec.action != ConditionDecision::Action::Run) {
+            std::lock_guard lock(level_mu);
             ctx.job_statuses[job_id] = RunContext::JobStatus{
                 .status = RunStatus::Skipped, .exit_code = 0,
                 .reason = needs_dec.reason,
@@ -169,12 +203,14 @@ void Pipeline::execute_level(const std::vector<std::string>& job_ids,
                          ctx.run_id, node.job_name, needs_dec.reason);
             persist_job_start(ctx, job_id, node.job_name, RunStatus::Skipped, "");
             persist_job_complete(ctx, job_id, RunStatus::Skipped, 0);
+            decisions.push_back(std::move(dec));
             continue;
         }
 
-        // Evaluate condition.
+        // Evaluate KEL condition.
         auto cond_dec = evaluate_condition(node, ctx);
         if (cond_dec.action == ConditionDecision::Action::Skip) {
+            std::lock_guard lock(level_mu);
             ctx.job_statuses[job_id] = RunContext::JobStatus{
                 .status = RunStatus::Skipped, .exit_code = 0,
                 .reason = cond_dec.reason,
@@ -183,10 +219,12 @@ void Pipeline::execute_level(const std::vector<std::string>& job_ids,
                          ctx.run_id, node.job_name, cond_dec.reason);
             persist_job_start(ctx, job_id, node.job_name, RunStatus::Skipped, "false");
             persist_job_complete(ctx, job_id, RunStatus::Skipped, 0);
+            decisions.push_back(std::move(dec));
             continue;
         }
 
         if (cond_dec.action == ConditionDecision::Action::Error) {
+            std::lock_guard lock(level_mu);
             ctx.job_statuses[job_id] = RunContext::JobStatus{
                 .status = RunStatus::Failure, .exit_code = 201,
                 .reason = cond_dec.reason,
@@ -195,21 +233,138 @@ void Pipeline::execute_level(const std::vector<std::string>& job_ids,
                           ctx.run_id, node.job_name, cond_dec.reason);
             persist_job_start(ctx, job_id, node.job_name, RunStatus::Failure, "error");
             persist_job_complete(ctx, job_id, RunStatus::Failure, 201);
+            decisions.push_back(std::move(dec));
             continue;
         }
 
-        // Execute job.
-        ctx.job_statuses[job_id] = RunContext::JobStatus{
-            .status = RunStatus::Running, .start_time = deps_.clock->now()};
-        persist_job_start(ctx, job_id, node.job_name, RunStatus::Running, "true");
+        // This job will run.
+        dec.should_run = true;
+        remaining.fetch_add(1, std::memory_order_relaxed);
 
-        auto job_status = execute_job(job_id, ctx, stop);
+        {
+            std::lock_guard lock(level_mu);
+            ctx.job_statuses[job_id] = RunContext::JobStatus{
+                .status = RunStatus::Running,
+                .start_time = deps_.clock->now()};
+        }
+        const auto& node_name = dag.node(job_id).job_name;
+        persist_job_start(ctx, job_id, node_name, RunStatus::Running, "true");
 
-        ctx.job_statuses[job_id].status = job_status;
-        ctx.job_statuses[job_id].end_time = deps_.clock->now();
-        persist_job_complete(ctx, job_id, job_status,
-                            ctx.job_statuses[job_id].exit_code);
+        decisions.push_back(std::move(dec));
     }
+
+    // If nothing to actually run, return immediately.
+    if (remaining.load(std::memory_order_relaxed) == 0) return;
+
+    // Dispatch runnable jobs as parallel jthreads.
+    std::vector<std::jthread> job_threads;
+    job_threads.reserve(remaining.load());
+
+    for (const auto& dec : decisions) {
+        if (!dec.should_run) continue;
+
+        job_threads.emplace_back([this, &dec, &ctx, &dag, &remaining,
+                                   &level_mu, &level_cv, stop]() {
+            auto job_status = execute_job(dec.job_id, ctx, stop);
+
+            {
+                std::lock_guard lock(level_mu);
+                ctx.job_statuses[dec.job_id].status = job_status;
+                ctx.job_statuses[dec.job_id].end_time = deps_.clock->now();
+            }
+
+            persist_job_complete(ctx, dec.job_id, job_status,
+                                ctx.job_statuses[dec.job_id].exit_code);
+
+            if (remaining.fetch_sub(1, std::memory_order_acq_rel) == 1) {
+                level_cv.notify_one();
+            }
+        });
+    }
+
+    // Wait for all parallel jobs at this level to complete.
+    {
+        std::unique_lock lock(level_mu);
+        level_cv.wait(lock, [&] {
+            return remaining.load(std::memory_order_acquire) == 0
+                   || stop.stop_requested();
+        });
+    }
+
+    // Join all threads (destructors would do this, but explicit is clearer).
+    for (auto& t : job_threads) {
+        if (t.joinable()) t.join();
+    }
+}
+
+/// Helper: execute a single job within a level (no parallelism overhead).
+/// Handles needs checking, condition evaluation, and execution sequentially.
+void Pipeline::execute_single_job_in_level(
+    const std::string& job_id,
+    const WorkflowDag& dag,
+    RunContext& ctx,
+    std::stop_token stop)
+{
+    if (stop.stop_requested()) {
+        ctx.job_statuses[job_id] = RunContext::JobStatus{
+            .status = RunStatus::Cancelled, .reason = "Shutdown requested",
+            .start_time = deps_.clock->now(), .end_time = deps_.clock->now()};
+        return;
+    }
+
+    const auto& node = dag.node(job_id);
+
+    // Check needs resolution.
+    auto needs_dec = check_needs(node, ctx);
+    if (needs_dec.action != ConditionDecision::Action::Run) {
+        ctx.job_statuses[job_id] = RunContext::JobStatus{
+            .status = RunStatus::Skipped, .exit_code = 0,
+            .reason = needs_dec.reason,
+            .start_time = deps_.clock->now(), .end_time = deps_.clock->now()};
+        spdlog::info("Run {}: job '{}' skipped ({})",
+                     ctx.run_id, node.job_name, needs_dec.reason);
+        persist_job_start(ctx, job_id, node.job_name, RunStatus::Skipped, "");
+        persist_job_complete(ctx, job_id, RunStatus::Skipped, 0);
+        return;
+    }
+
+    // Evaluate condition.
+    auto cond_dec = evaluate_condition(node, ctx);
+    if (cond_dec.action == ConditionDecision::Action::Skip) {
+        ctx.job_statuses[job_id] = RunContext::JobStatus{
+            .status = RunStatus::Skipped, .exit_code = 0,
+            .reason = cond_dec.reason,
+            .start_time = deps_.clock->now(), .end_time = deps_.clock->now()};
+        spdlog::info("Run {}: job '{}' condition false: {}",
+                     ctx.run_id, node.job_name, cond_dec.reason);
+        persist_job_start(ctx, job_id, node.job_name, RunStatus::Skipped, "false");
+        persist_job_complete(ctx, job_id, RunStatus::Skipped, 0);
+        return;
+    }
+
+    if (cond_dec.action == ConditionDecision::Action::Error) {
+        ctx.job_statuses[job_id] = RunContext::JobStatus{
+            .status = RunStatus::Failure, .exit_code = 201,
+            .reason = cond_dec.reason,
+            .start_time = deps_.clock->now(), .end_time = deps_.clock->now()};
+        spdlog::error("Run {}: job '{}' condition error: {}",
+                      ctx.run_id, node.job_name, cond_dec.reason);
+        persist_job_start(ctx, job_id, node.job_name, RunStatus::Failure, "error");
+        persist_job_complete(ctx, job_id, RunStatus::Failure, 201);
+        return;
+    }
+
+    // Execute job.
+    ctx.job_statuses[job_id] = RunContext::JobStatus{
+        .status = RunStatus::Running, .start_time = deps_.clock->now()};
+    persist_job_start(ctx, job_id, node.job_name, RunStatus::Running, "true");
+
+    auto job_status = execute_job(job_id, ctx, stop);
+
+    ctx.job_statuses[job_id].status = job_status;
+    ctx.job_statuses[job_id].end_time = deps_.clock->now();
+    persist_job_complete(ctx, job_id, job_status,
+                        ctx.job_statuses[job_id].exit_code);
 }
 
 RunStatus Pipeline::execute_job(const std::string& job_id, RunContext& ctx,

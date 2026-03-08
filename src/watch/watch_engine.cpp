@@ -537,22 +537,68 @@ void WatchEngine::emit_triggers(
 void WatchEngine::persist_sample(
     const std::string& group_name, const Sample& sample)
 {
-    // In a full implementation, this would enqueue InsertWatchSample
-    // requests to the DBWriter. For v1, persistence of raw samples
-    // is deferred — the run-level persistence (InsertRun, etc.) is
-    // sufficient for KEL job() queries. Sample persistence will be
-    // added when KEL aggregate()/previous() functions need it.
-    (void)group_name;
-    (void)sample;
+    if (!deps_.db_writer) return;
+
+    for (const auto& [path, metrics] : sample.entries) {
+        persist::InsertWatchSample req;
+        req.watch_group = group_name;
+        req.sample_epoch = sample.epoch;
+        req.file_path = path;
+        req.is_dir = (metrics.entry_type == "directory");
+        req.size = metrics.size;
+
+        // Format mtime as ISO-8601 string.
+        req.mtime = format_iso8601(metrics.last_modified);
+
+        // Use whichever hash is available (prefer SHA256).
+        if (metrics.sha256.has_value()) {
+            req.hash = *metrics.sha256;
+        } else if (metrics.md5.has_value()) {
+            req.hash = *metrics.md5;
+        }
+
+        deps_.db_writer->enqueue(
+            persist::DBWriteRequest{std::move(req)},
+            std::chrono::milliseconds(100));
+    }
 }
 
 void WatchEngine::persist_event(
     const WatchTriggerResult& result, int64_t sample_epoch)
 {
-    // Similarly, watch event persistence is deferred to when the
-    // watch_events table queries are needed.
-    (void)result;
-    (void)sample_epoch;
+    if (!deps_.db_writer) return;
+
+    // Build a deterministic event UID from group + rule + epoch + paths.
+    std::string uid_input = result.watch_group_name + ":"
+        + result.rule_name + ":"
+        + std::to_string(sample_epoch);
+    for (const auto& p : result.affected_paths) {
+        uid_input += ":" + p;
+    }
+    auto event_uid = core::generate_content_id(
+        core::EntityType::kWatchRule, uid_input);
+
+    // Build JSON array of affected paths.
+    std::string paths_json = "[";
+    for (size_t i = 0; i < result.affected_paths.size(); ++i) {
+        if (i > 0) paths_json += ",";
+        paths_json += "\"" + result.affected_paths[i] + "\"";
+    }
+    paths_json += "]";
+
+    persist::InsertWatchEvent req;
+    req.event_uid = event_uid;
+    req.watch_group = result.watch_group_name;
+    req.rule_name = result.rule_name;
+    req.event_type = result.event_type;
+    req.severity = result.severity;
+    req.affected_files_json = paths_json;
+    req.sample_epoch = sample_epoch;
+    req.details_json = "{}";
+
+    deps_.db_writer->enqueue(
+        persist::DBWriteRequest{std::move(req)},
+        std::chrono::milliseconds(100));
 }
 
 // ── Utility ─────────────────────────────────────────────────────────────

@@ -58,6 +58,13 @@ add_library(kairos_core STATIC
     src/config/yaml_loader.cpp
 )
 
+# ── Native watch backends (platform-specific) ─────────────────────────────
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    target_sources(kairos_core PRIVATE src/watch/inotify_watcher.cpp)
+else()
+    target_sources(kairos_core PRIVATE src/watch/file_watcher_stub.cpp)
+endif()
+
 target_include_directories(kairos_core PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
     $<INSTALL_INTERFACE:include>

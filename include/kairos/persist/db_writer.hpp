@@ -113,6 +113,32 @@ struct InsertTriggerHistory {
     std::string run_id;             ///< associated run, if any
 };
 
+/// Insert a watch sample record (one row per file per epoch).
+/// Spec reference: §16.5, §16.2 (watch_samples table).
+struct InsertWatchSample {
+    std::string watch_group;
+    int64_t sample_epoch = 0;
+    std::string file_path;
+    bool is_dir = false;
+    int64_t size = 0;
+    std::string mtime;              ///< ISO-8601
+    std::string hash;               ///< MD5 or SHA256 (whichever computed).
+    int scan_duration_ms = 0;
+};
+
+/// Insert a watch event record (emitted rule trigger).
+/// Spec reference: §16.5, §16.2 (watch_events table).
+struct InsertWatchEvent {
+    std::string event_uid;          ///< Deterministic ID.
+    std::string watch_group;
+    std::string rule_name;
+    std::string event_type;         ///< WatchEventType string.
+    std::string severity;           ///< "info"|"warning"|"critical"
+    std::string affected_files_json;///< JSON array of paths.
+    int64_t sample_epoch = 0;
+    std::string details_json;       ///< Arbitrary JSON payload.
+};
+
 /// Prune records older than a given date.
 struct PruneOlderThan {
     std::string cutoff_date;        ///< ISO-8601
@@ -125,6 +151,7 @@ using DBWriteRequest = std::variant<
     InsertStepRun, UpdateStepComplete,
     InsertLogChunk,
     InsertTriggerHistory,
+    InsertWatchSample, InsertWatchEvent,
     PruneOlderThan
 >;
 
@@ -189,6 +216,8 @@ private:
     std::unique_ptr<SQLite::Statement> stmt_update_step_;
     std::unique_ptr<SQLite::Statement> stmt_insert_log_chunk_;
     std::unique_ptr<SQLite::Statement> stmt_insert_trigger_;
+    std::unique_ptr<SQLite::Statement> stmt_insert_watch_sample_;
+    std::unique_ptr<SQLite::Statement> stmt_insert_watch_event_;
 };
 
 }  // namespace kairos::persist

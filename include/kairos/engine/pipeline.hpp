@@ -162,11 +162,17 @@ private:
                           RunContext& ctx,
                           std::stop_token stop);
 
-    /// Execute one level of the DAG.
+    /// Execute one level of the DAG (parallel when multiple jobs).
     void execute_level(const std::vector<std::string>& job_ids,
                        const WorkflowDag& dag,
                        RunContext& ctx,
                        std::stop_token stop);
+
+    /// Execute a single job within a level (no parallelism overhead).
+    void execute_single_job_in_level(const std::string& job_id,
+                                     const WorkflowDag& dag,
+                                     RunContext& ctx,
+                                     std::stop_token stop);
 
     /// Execute a single job (all steps).
     RunStatus execute_job(const std::string& job_id,
