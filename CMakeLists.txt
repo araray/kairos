@@ -46,6 +46,10 @@ add_library(kairos_core STATIC
     src/observability/logging.cpp
     src/observability/json_formatter.cpp
     src/observability/metrics.cpp
+    src/engine/trigger_types.cpp
+    src/engine/dag.cpp
+    src/engine/execution_plan.cpp
+    src/engine/event_types.cpp
 )
 
 target_include_directories(kairos_core PUBLIC
@@ -59,6 +63,7 @@ target_link_libraries(kairos_core PUBLIC
     spdlog::spdlog
     nlohmann_json::nlohmann_json
     yaml-cpp::yaml-cpp
+    croncpp::croncpp
 )
 
 # Embed version info.

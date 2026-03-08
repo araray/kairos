@@ -123,3 +123,33 @@ add_executable(test_metrics
 )
 target_link_libraries(test_metrics PRIVATE kairos_test_helpers)
 gtest_discover_tests(test_metrics)
+
+# ── Phase 3: Engine tests ────────────────────────────────────────────────
+
+# FakeClock tests
+add_executable(test_fake_clock
+    unit/testing/fake_clock_test.cpp
+)
+target_link_libraries(test_fake_clock PRIVATE kairos_test_helpers)
+gtest_discover_tests(test_fake_clock)
+
+# TriggerEvent + ActiveRunTracker + Trigger types tests
+add_executable(test_trigger_event
+    unit/engine/trigger_event_test.cpp
+)
+target_link_libraries(test_trigger_event PRIVATE kairos_test_helpers)
+gtest_discover_tests(test_trigger_event)
+
+# DAG construction + topological sort tests
+add_executable(test_dag
+    unit/engine/dag_test.cpp
+)
+target_link_libraries(test_dag PRIVATE kairos_test_helpers)
+gtest_discover_tests(test_dag)
+
+# ExecutionPlan + WatchEventType + FakeFilesystem tests
+add_executable(test_execution_plan
+    unit/engine/execution_plan_test.cpp
+)
+target_link_libraries(test_execution_plan PRIVATE kairos_test_helpers)
+gtest_discover_tests(test_execution_plan)
