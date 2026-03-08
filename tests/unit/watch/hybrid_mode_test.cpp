@@ -15,6 +15,7 @@
 
 #include "kairos/watch/watch_engine.hpp"
 #include "kairos/testing/fake_clock.hpp"
+#include "kairos/testing/fake_filesystem.hpp"
 #include "kairos/testing/fake_fs_scanner.hpp"
 
 #include <gtest/gtest.h>
@@ -22,11 +23,12 @@
 #include <chrono>
 #include <vector>
 
-namespace kairos::watch {
-namespace {
-
+using namespace kairos::watch;
+using namespace kairos::engine;
+using namespace kairos::testing;
 using namespace std::chrono_literals;
-namespace engine = kairos::engine;
+
+namespace {
 
 // ── Test fixture ────────────────────────────────────────────────────────
 
@@ -67,29 +69,24 @@ protected:
         return g;
     }
 
-    /// Create a native event.
-    NativeEvent make_event(
-        NativeEventType type,
-        const std::string& path,
-        bool is_dir = false)
-    {
-        NativeEvent ev;
-        ev.type = type;
-        ev.path = path;
-        ev.is_directory = is_dir;
-        ev.timestamp = clock_.now();
-        return ev;
+    /// Helper to add a file to the fake filesystem.
+    void add_file(const std::string& path, int64_t size,
+                  std::chrono::system_clock::time_point mtime = {}) {
+        FakeFileEntry entry;
+        entry.size = static_cast<std::uintmax_t>(size);
+        entry.mtime = mtime;
+        fake_fs_.add_file(path, entry);
     }
 
     /// Trigger sink that records events.
-    std::vector<engine::TriggerEvent> triggered_;
-    engine::TriggerSink sink_ = [this](engine::TriggerEvent evt) {
+    std::vector<TriggerEvent> triggered_;
+    TriggerSink sink_ = [this](TriggerEvent evt) {
         triggered_.push_back(std::move(evt));
         return true;
     };
 
-    FakeClock clock_;
-    FakeFilesystemScanner fake_scanner_;
+    kairos::testing::FakeClock clock_;
+    FakeFilesystem fake_fs_;
 };
 
 // ══════════════════════════════════════════════════════════════════════════
@@ -99,24 +96,25 @@ protected:
 TEST_F(HybridModeTest, EngineStartsWithHybridGroup) {
     auto group = make_group();
     WatchEngineConfig cfg;
+    FakeFilesystemScanner scanner(fake_fs_);
     WatchEngine engine(cfg,
-        WatchEngine::Dependencies{.clock = &clock_, .scanner = &fake_scanner_},
+        WatchEngine::Dependencies{.clock = &clock_, .scanner = &scanner},
         {group});
 
     EXPECT_EQ(engine.group_count(), 1u);
 }
 
 TEST_F(HybridModeTest, NativeEventProcessing_BasicFlow) {
-    // Set up scanner with initial and modified files.
-    fake_scanner_.add_file("/watched/file.txt", 100,
-        std::chrono::system_clock::now());
+    // Set up scanner with initial file.
+    add_file("/watched/file.txt", 100, std::chrono::system_clock::now());
 
     auto group = make_group_with_rule();
     WatchEngineConfig cfg;
     cfg.debounce_ms = 10ms;
 
+    FakeFilesystemScanner scanner(fake_fs_);
     WatchEngine engine(cfg,
-        WatchEngine::Dependencies{.clock = &clock_, .scanner = &fake_scanner_},
+        WatchEngine::Dependencies{.clock = &clock_, .scanner = &scanner},
         {group});
 
     // First scan (baseline) — no events expected.
@@ -124,15 +122,9 @@ TEST_F(HybridModeTest, NativeEventProcessing_BasicFlow) {
     EXPECT_TRUE(triggered_.empty())
         << "First scan is baseline — no events";
 
-    // Simulate native event: file modified.
-    // Push directly into the engine's queue by using process_native_events.
-    // In production, the native watcher sub-thread does this.
-    // For testing, we inject events and process them.
-    // Since we can't directly access the queue, we test via scan_once.
-
     // Modify file in fake filesystem.
-    fake_scanner_.add_file("/watched/file.txt", 200,
-        std::chrono::system_clock::now() + 1s);
+    add_file("/watched/file.txt", 200,
+             std::chrono::system_clock::now() + 1s);
 
     // Second scan (periodic) — should detect the change.
     auto results2 = engine.scan_once(sink_);
@@ -145,22 +137,21 @@ TEST_F(HybridModeTest, NativeEventProcessing_BasicFlow) {
 // ══════════════════════════════════════════════════════════════════════════
 
 TEST_F(HybridModeTest, RecentlyReportedSetPruning) {
-    // The recently-reported set should prune entries older than 2 epochs.
     auto group = make_group_with_rule();
     WatchEngineConfig cfg;
 
+    FakeFilesystemScanner scanner(fake_fs_);
     WatchEngine engine(cfg,
-        WatchEngine::Dependencies{.clock = &clock_, .scanner = &fake_scanner_},
+        WatchEngine::Dependencies{.clock = &clock_, .scanner = &scanner},
         {group});
 
     // Scan 1: baseline.
-    fake_scanner_.add_file("/watched/a.txt", 100,
-        std::chrono::system_clock::now());
+    add_file("/watched/a.txt", 100, std::chrono::system_clock::now());
     engine.scan_once(sink_);
 
     // Scan 2: change detected.
-    fake_scanner_.add_file("/watched/a.txt", 200,
-        std::chrono::system_clock::now() + 1s);
+    add_file("/watched/a.txt", 200,
+             std::chrono::system_clock::now() + 1s);
     engine.scan_once(sink_);
     size_t events_after_2 = triggered_.size();
     EXPECT_GE(events_after_2, 1u);
@@ -168,10 +159,10 @@ TEST_F(HybridModeTest, RecentlyReportedSetPruning) {
     // Scan 3: no change.
     engine.scan_once(sink_);
 
-    // Scan 4: same change again — should still report since the path
+    // Scan 4: another change — should still report since the path
     // should have been pruned from recently_reported by now.
-    fake_scanner_.add_file("/watched/a.txt", 300,
-        std::chrono::system_clock::now() + 2s);
+    add_file("/watched/a.txt", 300,
+             std::chrono::system_clock::now() + 2s);
     engine.scan_once(sink_);
     EXPECT_GT(triggered_.size(), events_after_2)
         << "Change after pruning should be re-reported";
@@ -186,13 +177,13 @@ TEST_F(HybridModeTest, HashPolicyMtimeOnly_NoHashes) {
     group.hash_policy = HashPolicy::MtimeOnly;
 
     WatchEngineConfig cfg;
+    FakeFilesystemScanner scanner(fake_fs_);
     WatchEngine engine(cfg,
-        WatchEngine::Dependencies{.clock = &clock_, .scanner = &fake_scanner_},
+        WatchEngine::Dependencies{.clock = &clock_, .scanner = &scanner},
         {group});
 
     // With MtimeOnly, no hashes should be computed.
-    fake_scanner_.add_file("/watched/file.txt", 100,
-        std::chrono::system_clock::now());
+    add_file("/watched/file.txt", 100, std::chrono::system_clock::now());
 
     auto results = engine.scan_once(sink_);
     ASSERT_FALSE(results.empty());
@@ -212,8 +203,9 @@ TEST_F(HybridModeTest, HashPolicyMtimeOnly_NoHashes) {
 TEST_F(HybridModeTest, DebouncePendingCount_EmptyInitially) {
     auto group = make_group();
     WatchEngineConfig cfg;
+    FakeFilesystemScanner scanner(fake_fs_);
     WatchEngine engine(cfg,
-        WatchEngine::Dependencies{.clock = &clock_, .scanner = &fake_scanner_},
+        WatchEngine::Dependencies{.clock = &clock_, .scanner = &scanner},
         {group});
 
     EXPECT_EQ(engine.debounce_pending(), 0u);
@@ -223,23 +215,23 @@ TEST_F(HybridModeTest, DebouncePendingCount_EmptyInitially) {
 // Mode-specific behavior
 // ══════════════════════════════════════════════════════════════════════════
 
-TEST_F(HybridModeTest, SampleOnlyMode_IgnoresNativeEvents) {
+TEST_F(HybridModeTest, SampleOnlyMode_DetectsChanges) {
     auto group = make_group_with_rule();
     group.mode = WatchMode::Sample;
 
     WatchEngineConfig cfg;
+    FakeFilesystemScanner scanner(fake_fs_);
     WatchEngine engine(cfg,
-        WatchEngine::Dependencies{.clock = &clock_, .scanner = &fake_scanner_},
+        WatchEngine::Dependencies{.clock = &clock_, .scanner = &scanner},
         {group});
 
     // Set up files and do baseline scan.
-    fake_scanner_.add_file("/watched/file.txt", 100,
-        std::chrono::system_clock::now());
+    add_file("/watched/file.txt", 100, std::chrono::system_clock::now());
     engine.scan_once(sink_);
 
     // Modify and scan — should detect via periodic scan.
-    fake_scanner_.add_file("/watched/file.txt", 200,
-        std::chrono::system_clock::now() + 1s);
+    add_file("/watched/file.txt", 200,
+             std::chrono::system_clock::now() + 1s);
     triggered_.clear();
     engine.scan_once(sink_);
     EXPECT_GE(triggered_.size(), 1u)
@@ -253,29 +245,30 @@ TEST_F(HybridModeTest, MultipleGroups_IndependentScanning) {
     g2.watch_items = {"/watched_b"};
 
     WatchEngineConfig cfg;
+    FakeFilesystemScanner scanner(fake_fs_);
     WatchEngine engine(cfg,
-        WatchEngine::Dependencies{.clock = &clock_, .scanner = &fake_scanner_},
+        WatchEngine::Dependencies{.clock = &clock_, .scanner = &scanner},
         {g1, g2});
 
     EXPECT_EQ(engine.group_count(), 2u);
 
     // Baseline.
-    fake_scanner_.add_file("/watched_a/file.txt", 100,
-        std::chrono::system_clock::now());
-    fake_scanner_.add_file("/watched_b/file.txt", 100,
-        std::chrono::system_clock::now());
+    add_file("/watched_a/file.txt", 100,
+             std::chrono::system_clock::now());
+    add_file("/watched_b/file.txt", 100,
+             std::chrono::system_clock::now());
     engine.scan_once(sink_);
 
     // Change only in group_a.
-    fake_scanner_.add_file("/watched_a/file.txt", 200,
-        std::chrono::system_clock::now() + 1s);
+    add_file("/watched_a/file.txt", 200,
+             std::chrono::system_clock::now() + 1s);
     triggered_.clear();
     engine.scan_once(sink_);
 
     // Should see event only for group_a's file.
     bool found_a = false, found_b = false;
     for (const auto& ev : triggered_) {
-        auto payload = std::get_if<engine::FileDiffPayload>(&ev.payload);
+        auto payload = std::get_if<FileDiffPayload>(&ev.payload);
         if (payload) {
             if (payload->watch_group == "group_a") found_a = true;
             if (payload->watch_group == "group_b") found_b = true;
@@ -286,4 +279,3 @@ TEST_F(HybridModeTest, MultipleGroups_IndependentScanning) {
 }
 
 }  // namespace
-}  // namespace kairos::watch
