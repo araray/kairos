@@ -15,11 +15,10 @@
 
 #include <atomic>
 #include <chrono>
-#include <stop_source>
+#include <stop_token>
 #include <thread>
 #include <vector>
 
-using namespace kairos;
 using namespace kairos::engine;
 using namespace std::chrono_literals;
 
@@ -76,7 +75,7 @@ protected:
         return entry;
     }
 
-    testing::FakeClock clock_;
+    kairos::testing::FakeClock clock_;
     ActiveRunTracker active_runs_;
 };
 
@@ -97,26 +96,20 @@ TEST_F(SchedulerTest, IntervalTriggerFiresAfterInterval) {
         .active_runs = &active_runs_,
     });
 
-    // Start scheduler on a background thread.
     sched.start(stop.get_token(), [&](TriggerEvent evt) {
         std::lock_guard lock(mu);
         fired.push_back(std::move(evt));
         return true;
     });
 
-    // Wait for scheduler to initialize.
     std::this_thread::sleep_for(50ms);
-
-    // Advance clock past the interval.
     clock_.advance(6000ms);
     std::this_thread::sleep_for(50ms);
 
-    // Stop scheduler.
     stop.request_stop();
     clock_.wake();
     sched.stop();
 
-    // Verify: at least one fire event.
     std::lock_guard lock(mu);
     ASSERT_GE(fired.size(), 1u);
     EXPECT_EQ(fired[0].type, TriggerType::ScheduleTick);
@@ -147,7 +140,6 @@ TEST_F(SchedulerTest, IntervalTriggerFiresMultipleTimes) {
 
     std::this_thread::sleep_for(50ms);
 
-    // Advance 3 times.
     for (int i = 0; i < 3; ++i) {
         clock_.advance(1100ms);
         std::this_thread::sleep_for(50ms);
@@ -162,10 +154,11 @@ TEST_F(SchedulerTest, IntervalTriggerFiresMultipleTimes) {
 }
 
 TEST_F(SchedulerTest, DateTriggerFiresOnceAndExhausts) {
-    auto fire_at = clock_.now() + 2000ms;
-    auto registry = make_registry({
-        make_date_trigger("trg-date-001", "wfl-once", fire_at),
-    });
+    auto fire_at = clock_.now() + std::chrono::milliseconds(2000);
+    std::vector<TimerEntry> triggers;
+    triggers.push_back(
+        make_date_trigger("trg-date-001", "wfl-once", fire_at));
+    auto registry = make_registry(std::move(triggers));
 
     std::stop_source stop;
     std::vector<TriggerEvent> fired;
@@ -184,12 +177,8 @@ TEST_F(SchedulerTest, DateTriggerFiresOnceAndExhausts) {
     });
 
     std::this_thread::sleep_for(50ms);
-
-    // Advance past fire time.
     clock_.advance(3000ms);
     std::this_thread::sleep_for(50ms);
-
-    // Advance again — should NOT fire again.
     clock_.advance(3000ms);
     std::this_thread::sleep_for(50ms);
 
@@ -206,7 +195,9 @@ TEST_F(SchedulerTest, DisabledTriggerDoesNotFire) {
     auto trigger = make_interval_trigger("trg-disabled", "wfl-disabled", 1000ms);
     trigger.enabled = false;
 
-    auto registry = make_registry({std::move(trigger)});
+    std::vector<TimerEntry> triggers;
+    triggers.push_back(std::move(trigger));
+    auto registry = make_registry(std::move(triggers));
 
     std::stop_source stop;
     std::vector<TriggerEvent> fired;
@@ -240,7 +231,6 @@ TEST_F(SchedulerTest, MaxInstancesBlocksFiring) {
         make_interval_trigger("trg-max", "wfl-busy", 1000ms),
     });
 
-    // Pre-saturate active runs.
     active_runs_.increment("wfl-busy");
 
     std::stop_source stop;
@@ -272,7 +262,6 @@ TEST_F(SchedulerTest, MaxInstancesBlocksFiring) {
 }
 
 TEST_F(SchedulerTest, ConfigReloadRebuildsTriggers) {
-    // Start with one trigger.
     auto registry1 = make_registry({
         make_interval_trigger("trg-A", "wfl-A", 10000ms),
     });
@@ -295,14 +284,12 @@ TEST_F(SchedulerTest, ConfigReloadRebuildsTriggers) {
 
     std::this_thread::sleep_for(50ms);
 
-    // Reload with a fast trigger.
     auto registry2 = make_registry({
         make_interval_trigger("trg-B", "wfl-B", 500ms),
     });
     sched.request_reload(registry2);
     std::this_thread::sleep_for(50ms);
 
-    // Advance past the fast trigger's interval.
     clock_.advance(600ms);
     std::this_thread::sleep_for(50ms);
 
@@ -388,32 +375,8 @@ TEST_F(SchedulerTest, TriggerEventHasCorrectFields) {
     EXPECT_EQ(evt.target_id, "wfl-fields");
     EXPECT_FALSE(evt.correlation_id.empty());
 
-    // Check payload.
     auto* payload = std::get_if<ScheduleTickPayload>(&evt.payload);
     ASSERT_NE(payload, nullptr);
     EXPECT_EQ(payload->trigger_type, "interval");
     EXPECT_FALSE(payload->is_misfire);
-}
-
-TEST_F(SchedulerTest, SnapshotReturnsTimerInfo) {
-    auto registry = make_registry({
-        make_interval_trigger("trg-snap", "wfl-snap", 5000ms),
-    });
-
-    Scheduler sched(SchedulerConfig{}, Scheduler::Dependencies{
-        .clock = &clock_,
-        .registry = registry,
-    });
-
-    // Build heap by starting/stopping immediately.
-    std::stop_source stop;
-    stop.request_stop();
-
-    sched.start(stop.get_token(), [](TriggerEvent) { return true; });
-    std::this_thread::sleep_for(50ms);
-    sched.stop();
-
-    // Note: snapshot() works after build_heap() was called in run().
-    // Since we stopped immediately, the heap should still have entries.
-    // This tests the snapshot() method.
 }

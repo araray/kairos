@@ -6,7 +6,6 @@
 
 #include "kairos/engine/scheduler.hpp"
 #include "kairos/core/id_generator.hpp"
-#include "kairos/platform/threading.hpp"
 
 #include <spdlog/spdlog.h>
 
@@ -38,7 +37,6 @@ void Scheduler::stop() {
 }
 
 void Scheduler::run(std::stop_token stop, TriggerSink sink) {
-    platform::set_thread_name("kairos-sched");
     spdlog::info("Scheduler starting");
 
     // Phase 1: Build initial heap.

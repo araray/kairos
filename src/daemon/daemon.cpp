@@ -30,7 +30,7 @@
 #include <chrono>
 #include <condition_variable>
 #include <mutex>
-#include <stop_source>
+#include <stop_token>
 #include <thread>
 
 namespace kairos::daemon {

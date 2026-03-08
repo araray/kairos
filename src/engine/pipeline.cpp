@@ -6,7 +6,6 @@
 
 #include "kairos/engine/pipeline.hpp"
 #include "kairos/core/id_generator.hpp"
-#include "kairos/platform/threading.hpp"
 
 #include <spdlog/spdlog.h>
 
@@ -37,7 +36,6 @@ void Pipeline::stop() {
 }
 
 void Pipeline::run(std::stop_token stop) {
-    platform::set_thread_name("kairos-pipe");
     spdlog::info("Pipeline thread starting");
 
     while (!stop.stop_requested()) {

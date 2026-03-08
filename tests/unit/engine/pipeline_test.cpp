@@ -16,12 +16,31 @@
 #include <gtest/gtest.h>
 
 #include <chrono>
-#include <stop_source>
+#include <stop_token>
 #include <thread>
 
 using namespace kairos;
 using namespace kairos::engine;
+using namespace kairos::exec;
 using namespace std::chrono_literals;
+
+// ── Helpers ─────────────────────────────────────────────────────────────
+
+/// Build a WorkflowDef. Cannot default-construct because WorkflowDag
+/// has a private default ctor — must build the DAG first, then move it in.
+static WorkflowDef build_workflow_def(
+    std::string wf_id, std::string wf_name,
+    std::vector<JobDef> jobs,
+    std::vector<DagNode> dag_nodes)
+{
+    auto dag = WorkflowDag::build(std::move(dag_nodes));
+    return WorkflowDef{
+        .workflow_id = std::move(wf_id),
+        .workflow_name = std::move(wf_name),
+        .jobs = std::move(jobs),
+        .dag = std::move(dag),
+    };
+}
 
 // ── Test fixture ────────────────────────────────────────────────────────
 
@@ -57,18 +76,13 @@ protected:
         node.job_name = job_name;
         node.condition_expr = condition;
 
-        WorkflowDef wf;
-        wf.workflow_id = wf_id;
-        wf.workflow_name = wf_name;
-        wf.jobs = {job};
-        wf.dag = WorkflowDag::build({node});
-        return wf;
+        return build_workflow_def(
+            wf_id, wf_name, {job}, {node});
     }
 
     /// Build a 3-job DAG: setup -> [build, test]
     WorkflowDef make_three_job_workflow()
     {
-        // Jobs.
         StepDef step_setup{.step_id = "stp-s", .step_name = "run-setup",
                            .command = "echo setup"};
         StepDef step_build{.step_id = "stp-b", .step_name = "run-build",
@@ -83,19 +97,16 @@ protected:
         JobDef j_test{.job_id = "job-test", .job_name = "test",
                       .steps = {step_test}, .needs = {"job-setup"}};
 
-        // DAG nodes.
         DagNode n_setup{.job_id = "job-setup", .job_name = "setup"};
         DagNode n_build{.job_id = "job-build", .job_name = "build",
                         .needs = {"job-setup"}};
         DagNode n_test{.job_id = "job-test", .job_name = "test",
                        .needs = {"job-setup"}};
 
-        WorkflowDef wf;
-        wf.workflow_id = "wfl-three";
-        wf.workflow_name = "Three Job Pipeline";
-        wf.jobs = {j_setup, j_build, j_test};
-        wf.dag = WorkflowDag::build({n_setup, n_build, n_test});
-        return wf;
+        return build_workflow_def(
+            "wfl-three", "Three Job Pipeline",
+            {j_setup, j_build, j_test},
+            {n_setup, n_build, n_test});
     }
 
     /// Create a trigger event for a workflow.
@@ -107,12 +118,12 @@ protected:
             target_id, kind, "corr-test-001");
     }
 
-    /// Create a runner pool with fake processes.
+    /// Create a runner pool with fake processes that succeed.
     void setup_runner_pool() {
         pool_ = std::make_unique<exec::RunnerPool>(
             exec::RunnerPoolConfig{.worker_count = 2, .queue_capacity = 32});
         pool_->set_process_handle_factory([]() {
-            auto p = std::make_unique<testing::FakeProcessHandle>();
+            auto p = std::make_unique<kairos::testing::FakeProcessHandle>();
             p->set_exit_code(0);
             p->set_stdout_data("ok\n");
             return p;
@@ -125,7 +136,7 @@ protected:
         pool_ = std::make_unique<exec::RunnerPool>(
             exec::RunnerPoolConfig{.worker_count = 2, .queue_capacity = 32});
         pool_->set_process_handle_factory([]() {
-            auto p = std::make_unique<testing::FakeProcessHandle>();
+            auto p = std::make_unique<kairos::testing::FakeProcessHandle>();
             p->set_exit_code(1);
             p->set_stderr_data("error\n");
             return p;
@@ -138,7 +149,7 @@ protected:
         if (pool_) pool_->shutdown();
     }
 
-    testing::FakeClock clock_;
+    kairos::testing::FakeClock clock_;
     ActiveRunTracker active_runs_;
     std::stop_source stop_source_;
     std::unique_ptr<exec::RunnerPool> pool_;
@@ -153,7 +164,7 @@ TEST_F(PipelineTest, SingleJobWorkflowExecutesSuccessfully) {
         "wfl-single", "SingleJob", "job-echo", "echo-job", "echo hello");
 
     auto registry = std::make_shared<WorkflowRegistry>(
-        std::vector<WorkflowDef>{wf},
+        std::vector<WorkflowDef>{std::move(wf)},
         std::vector<TimerEntry>{});
 
     TriggerBus bus(64);
@@ -177,7 +188,7 @@ TEST_F(PipelineTest, ThreeJobDagExecutesInCorrectOrder) {
 
     auto wf = make_three_job_workflow();
     auto registry = std::make_shared<WorkflowRegistry>(
-        std::vector<WorkflowDef>{wf},
+        std::vector<WorkflowDef>{std::move(wf)},
         std::vector<TimerEntry>{});
 
     TriggerBus bus(64);
@@ -203,7 +214,7 @@ TEST_F(PipelineTest, FailedStepFailsJob) {
         "wfl-fail", "FailJob", "job-fail", "fail-job", "exit 1");
 
     auto registry = std::make_shared<WorkflowRegistry>(
-        std::vector<WorkflowDef>{wf},
+        std::vector<WorkflowDef>{std::move(wf)},
         std::vector<TimerEntry>{});
 
     TriggerBus bus(64);
@@ -225,13 +236,12 @@ TEST_F(PipelineTest, FailedStepFailsJob) {
 TEST_F(PipelineTest, ConditionFalseSkipsJob) {
     setup_runner_pool();
 
-    // Use a condition that evaluates to false.
     auto wf = make_single_job_workflow(
         "wfl-cond", "CondJob", "job-cond", "cond-job", "echo hello",
-        "false");  // KEL: literal false
+        "false");
 
     auto registry = std::make_shared<WorkflowRegistry>(
-        std::vector<WorkflowDef>{wf},
+        std::vector<WorkflowDef>{std::move(wf)},
         std::vector<TimerEntry>{});
 
     TriggerBus bus(64);
@@ -247,8 +257,7 @@ TEST_F(PipelineTest, ConditionFalseSkipsJob) {
     auto event = make_manual_trigger("wfl-cond");
     auto status = pipeline.process_event(event, stop_source_.get_token());
 
-    // The only job was skipped, so the run status should be success
-    // (no failures) but the job itself was skipped.
+    // The only job was skipped — no failures, so run succeeds.
     EXPECT_EQ(status, RunStatus::Success);
 }
 
@@ -260,7 +269,7 @@ TEST_F(PipelineTest, ConditionTrueRunsJob) {
         "echo hello", "true");
 
     auto registry = std::make_shared<WorkflowRegistry>(
-        std::vector<WorkflowDef>{wf},
+        std::vector<WorkflowDef>{std::move(wf)},
         std::vector<TimerEntry>{});
 
     TriggerBus bus(64);
@@ -284,7 +293,7 @@ TEST_F(PipelineTest, FailedDependencySkipsDownstream) {
 
     auto wf = make_three_job_workflow();
     auto registry = std::make_shared<WorkflowRegistry>(
-        std::vector<WorkflowDef>{wf},
+        std::vector<WorkflowDef>{std::move(wf)},
         std::vector<TimerEntry>{});
 
     TriggerBus bus(64);
@@ -300,7 +309,6 @@ TEST_F(PipelineTest, FailedDependencySkipsDownstream) {
     auto event = make_manual_trigger("wfl-three");
     auto status = pipeline.process_event(event, stop_source_.get_token());
 
-    // setup fails, build and test should be skipped.
     EXPECT_EQ(status, RunStatus::Failure);
 }
 
@@ -333,20 +341,16 @@ TEST_F(PipelineTest, EmptyJobSucceeds) {
     JobDef empty_job;
     empty_job.job_id = "job-empty";
     empty_job.job_name = "empty";
-    // No steps.
 
     DagNode node;
     node.job_id = "job-empty";
     node.job_name = "empty";
 
-    WorkflowDef wf;
-    wf.workflow_id = "wfl-empty";
-    wf.workflow_name = "EmptyJob";
-    wf.jobs = {empty_job};
-    wf.dag = WorkflowDag::build({node});
+    auto wf = build_workflow_def(
+        "wfl-empty", "EmptyJob", {empty_job}, {node});
 
     auto registry = std::make_shared<WorkflowRegistry>(
-        std::vector<WorkflowDef>{wf},
+        std::vector<WorkflowDef>{std::move(wf)},
         std::vector<TimerEntry>{});
 
     TriggerBus bus(64);
@@ -371,7 +375,7 @@ TEST_F(PipelineTest, ActiveRunTrackerIncrementDecrement) {
         "wfl-track", "TrackJob", "job-track", "track-job", "echo track");
 
     auto registry = std::make_shared<WorkflowRegistry>(
-        std::vector<WorkflowDef>{wf},
+        std::vector<WorkflowDef>{std::move(wf)},
         std::vector<TimerEntry>{});
 
     TriggerBus bus(64);
@@ -389,7 +393,6 @@ TEST_F(PipelineTest, ActiveRunTrackerIncrementDecrement) {
     auto event = make_manual_trigger("wfl-track");
     pipeline.process_event(event, stop_source_.get_token());
 
-    // After completion, active runs should be back to 0.
     EXPECT_EQ(active_runs_.count("wfl-track"), 0);
 }
 
