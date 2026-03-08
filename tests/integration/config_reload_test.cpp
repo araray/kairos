@@ -37,8 +37,8 @@ protected:
         test_dir_ = fs::temp_directory_path() / "kairos_reload_test";
         fs::create_directories(test_dir_ / "watch_groups");
 
-        clock_.reset(std::chrono::system_clock::now(),
-                     std::chrono::steady_clock::now());
+        clock_.set_now(std::chrono::system_clock::now());
+        clock_.set_steady(std::chrono::steady_clock::now());
     }
 
     void TearDown() override {

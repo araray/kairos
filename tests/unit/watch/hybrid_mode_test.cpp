@@ -35,8 +35,8 @@ namespace {
 class HybridModeTest : public ::testing::Test {
 protected:
     void SetUp() override {
-        clock_.reset(std::chrono::system_clock::now(),
-                     std::chrono::steady_clock::now());
+        clock_.set_now(std::chrono::system_clock::now());
+        clock_.set_steady(std::chrono::steady_clock::now());
     }
 
     /// Build a simple watch group with hybrid mode.
