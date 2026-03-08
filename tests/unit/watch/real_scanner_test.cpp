@@ -331,14 +331,18 @@ TEST_F(ScannerTestFixture, SymlinkHandling) {
     std::stop_source ss;
     auto entries = scanner_.scan(root_, 10, {}, ss.get_token());
 
-    // Should find both the real file and the symlink.
-    bool found_real = false, found_link = false;
+    // Should find the real directory/file AND the symlink entry.
+    bool found_real_data = false;
+    bool found_symlink = false;
     for (const auto& e : entries) {
-        if (e.path.find("real/data.txt") != std::string::npos) found_real = true;
-        if (e.path.find("link") != std::string::npos) found_link = true;
+        if (e.path.find("data.txt") != std::string::npos) found_real_data = true;
+        if (e.is_symlink) found_symlink = true;
     }
-    EXPECT_TRUE(found_real);
-    EXPECT_TRUE(found_link);
+    EXPECT_TRUE(found_real_data);
+    // The symlink directory entry should be detected. Note: canonical()
+    // resolves the symlink path to the real target, but the entry's
+    // is_symlink flag is set from symlink_status() before resolution.
+    EXPECT_TRUE(found_symlink);
 }
 #endif
 

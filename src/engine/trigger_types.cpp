@@ -31,7 +31,26 @@ SystemTimePoint CronTrigger::next_fire_after(
 #endif
 
     try {
-        auto parsed = cron::make_cron(expression);
+        // croncpp requires 6-field cron (with seconds). Standard cron
+        // is 5-field (min hour dom month dow). Auto-detect and prepend
+        // "0 " (seconds=0) for 5-field expressions per spec §10.3.1.
+        std::string expr_6field = expression;
+        {
+            int field_count = 1;
+            bool in_space = false;
+            for (char c : expression) {
+                if (c == ' ' || c == '\t') {
+                    if (!in_space) { ++field_count; in_space = true; }
+                } else {
+                    in_space = false;
+                }
+            }
+            if (field_count == 5) {
+                expr_6field = "0 " + expression;
+            }
+        }
+
+        auto parsed = cron::make_cron(expr_6field);
         auto next_tt = cron::cron_next(parsed, tt);
         return std::chrono::system_clock::from_time_t(next_tt);
     } catch (const cron::bad_cronexpr& e) {

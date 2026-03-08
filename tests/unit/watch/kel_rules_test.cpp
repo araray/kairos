@@ -6,6 +6,12 @@
 // ║  against file metrics: size checks, pattern_found, event type filters,    ║
 // ║  and boolean logic.                                                       ║
 // ║                                                                           ║
+// ║  Test pattern (matching EventWatcher baseline parity):                    ║
+// ║    1. Pre-populate FakeFilesystem with initial files                      ║
+// ║    2. First scan → baseline (no events emitted)                          ║
+// ║    3. Mutate filesystem (add/modify/delete)                              ║
+// ║    4. Second scan → diff detected → rules evaluated                      ║
+// ║                                                                           ║
 // ║  Spec reference: §12.11 (rule evaluation via KEL)                        ║
 // ╚════════════════════════════════════════════════════════════════════════════╝
 
@@ -20,49 +26,16 @@ namespace {
 
 using namespace kairos::engine;
 using namespace kairos::testing;
+using namespace std::chrono_literals;
 
-// ── Helpers ─────────────────────────────────────────────────────────────
-
-/// Create a FakeFileEntry with a given size.
-FakeFileEntry make_entry(std::uintmax_t size) {
-    FakeFileEntry e;
-    e.size = size;
-    e.mtime = std::chrono::system_clock::now();
-    return e;
-}
-
-/// A TriggerSink that accepts everything (returns true).
-TriggerSink make_null_sink() {
-    return [](TriggerEvent) { return true; };
-}
+// ── Test fixture ────────────────────────────────────────────────────────
 
 class KelRulesTest : public ::testing::Test {
 protected:
-    void SetUp() override {
-        clock_ = std::make_unique<FakeClock>();
-        fake_fs_ = std::make_unique<FakeFilesystem>();
-        scanner_ = std::make_unique<FakeFilesystemScanner>(*fake_fs_);
-    }
-
-    std::unique_ptr<WatchEngine> make_engine(
-        std::vector<WatchGroupDef> groups)
-    {
-        WatchEngineConfig config;
-        config.enabled = true;
-
-        WatchEngine::Dependencies deps;
-        deps.clock = clock_.get();
-        deps.scanner = scanner_.get();
-        deps.db_writer = nullptr;
-
-        return std::make_unique<WatchEngine>(
-            config, deps, std::move(groups));
-    }
-
     WatchGroupDef make_group(
         const std::string& name,
         const std::vector<std::string>& watch_items,
-        std::vector<WatchRuleDef> rules)
+        std::vector<WatchRuleDef> rules = {})
     {
         WatchGroupDef group;
         group.group_id = "wgr-test-" + name;
@@ -90,9 +63,8 @@ protected:
         return rule;
     }
 
-    std::unique_ptr<FakeClock> clock_;
-    std::unique_ptr<FakeFilesystem> fake_fs_;
-    std::unique_ptr<FakeFilesystemScanner> scanner_;
+    FakeClock clock_;
+    FakeFilesystem fs_;
 };
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -100,20 +72,33 @@ protected:
 // ═══════════════════════════════════════════════════════════════════════
 
 TEST_F(KelRulesTest, ConditionTrue_AlwaysFires) {
-    auto group = make_group("test", {"/data"}, {
+    // Baseline: one existing file.
+    fs_.add_file("/watched/a.txt", FakeFileEntry{
+        .size = 100, .mtime = clock_.now()});
+
+    FakeFilesystemScanner scanner(fs_);
+    auto group = make_group("test", {"/watched"}, {
         make_rule("always_fire", "true"),
     });
 
-    auto engine = make_engine({group});
+    WatchEngine engine(WatchEngineConfig{}, WatchEngine::Dependencies{
+        .clock = &clock_, .scanner = &scanner}, {group});
 
-    auto sink = make_null_sink();
-    engine->scan_once(sink);
+    TriggerSink sink = [](TriggerEvent) { return true; };
 
-    fake_fs_->add_file("/data/new.txt", make_entry(7));
-    auto results = engine->scan_once(sink);
+    // First scan: baseline.
+    engine.scan_once(sink);
+
+    // Add a new file.
+    clock_.advance(60s);
+    fs_.add_file("/watched/new.txt", FakeFileEntry{
+        .size = 50, .mtime = clock_.now()});
+
+    // Second scan: diff should detect created file, rule fires.
+    auto results = engine.scan_once(sink);
 
     ASSERT_EQ(results.size(), 1u);
-    EXPECT_GE(results[0].triggered.size(), 1u);
+    EXPECT_FALSE(results[0].triggered.empty());
     EXPECT_EQ(results[0].triggered[0].rule_name, "always_fire");
 }
 
@@ -122,20 +107,28 @@ TEST_F(KelRulesTest, ConditionTrue_AlwaysFires) {
 // ═══════════════════════════════════════════════════════════════════════
 
 TEST_F(KelRulesTest, ConditionFalse_NeverFires) {
-    auto group = make_group("test", {"/data"}, {
+    fs_.add_file("/watched/a.txt", FakeFileEntry{
+        .size = 100, .mtime = clock_.now()});
+
+    FakeFilesystemScanner scanner(fs_);
+    auto group = make_group("test", {"/watched"}, {
         make_rule("never_fire", "false"),
     });
 
-    auto engine = make_engine({group});
+    WatchEngine engine(WatchEngineConfig{}, WatchEngine::Dependencies{
+        .clock = &clock_, .scanner = &scanner}, {group});
 
-    auto sink = make_null_sink();
-    engine->scan_once(sink);
+    TriggerSink sink = [](TriggerEvent) { return true; };
+    engine.scan_once(sink);
 
-    fake_fs_->add_file("/data/new.txt", make_entry(7));
-    auto results = engine->scan_once(sink);
+    clock_.advance(60s);
+    fs_.add_file("/watched/new.txt", FakeFileEntry{
+        .size = 50, .mtime = clock_.now()});
 
+    auto results = engine.scan_once(sink);
     ASSERT_EQ(results.size(), 1u);
-    EXPECT_EQ(results[0].triggered.size(), 0u);
+    EXPECT_FALSE(results[0].diff.empty());  // Diff exists.
+    EXPECT_TRUE(results[0].triggered.empty());  // But rule doesn't fire.
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -143,22 +136,28 @@ TEST_F(KelRulesTest, ConditionFalse_NeverFires) {
 // ═══════════════════════════════════════════════════════════════════════
 
 TEST_F(KelRulesTest, FileSizeCondition_LargeFile) {
-    auto group = make_group("test", {"/data"}, {
+    fs_.add_file("/watched/existing.txt", FakeFileEntry{
+        .size = 10, .mtime = clock_.now()});
+
+    FakeFilesystemScanner scanner(fs_);
+    auto group = make_group("test", {"/watched"}, {
         make_rule("large_file", "file_size > 1000"),
     });
 
-    auto engine = make_engine({group});
+    WatchEngine engine(WatchEngineConfig{}, WatchEngine::Dependencies{
+        .clock = &clock_, .scanner = &scanner}, {group});
 
-    auto sink = make_null_sink();
-    engine->scan_once(sink);
+    TriggerSink sink = [](TriggerEvent) { return true; };
+    engine.scan_once(sink);
 
-    // Small file — should NOT trigger.
-    fake_fs_->add_file("/data/small.txt", make_entry(2));
-    // Large file — SHOULD trigger.
-    fake_fs_->add_file("/data/big.txt", make_entry(2000));
+    // Add a small file (should NOT trigger) and a large file (SHOULD).
+    clock_.advance(60s);
+    fs_.add_file("/watched/small.txt", FakeFileEntry{
+        .size = 2, .mtime = clock_.now()});
+    fs_.add_file("/watched/big.txt", FakeFileEntry{
+        .size = 2000, .mtime = clock_.now()});
 
-    auto results = engine->scan_once(sink);
-
+    auto results = engine.scan_once(sink);
     ASSERT_EQ(results.size(), 1u);
 
     int triggered_count = 0;
@@ -174,21 +173,28 @@ TEST_F(KelRulesTest, FileSizeCondition_LargeFile) {
 }
 
 TEST_F(KelRulesTest, FileSizeCondition_SmallFileOnly) {
-    auto group = make_group("test", {"/data"}, {
+    fs_.add_file("/watched/existing.txt", FakeFileEntry{
+        .size = 10, .mtime = clock_.now()});
+
+    FakeFilesystemScanner scanner(fs_);
+    auto group = make_group("test", {"/watched"}, {
         make_rule("large_file", "file_size > 1000"),
     });
 
-    auto engine = make_engine({group});
+    WatchEngine engine(WatchEngineConfig{}, WatchEngine::Dependencies{
+        .clock = &clock_, .scanner = &scanner}, {group});
 
-    auto sink = make_null_sink();
-    engine->scan_once(sink);
+    TriggerSink sink = [](TriggerEvent) { return true; };
+    engine.scan_once(sink);
 
-    fake_fs_->add_file("/data/a.txt", make_entry(5));
-    fake_fs_->add_file("/data/b.txt", make_entry(5));
+    // Only small files — no triggers.
+    clock_.advance(60s);
+    fs_.add_file("/watched/a.txt", FakeFileEntry{
+        .size = 5, .mtime = clock_.now()});
 
-    auto results = engine->scan_once(sink);
+    auto results = engine.scan_once(sink);
     ASSERT_EQ(results.size(), 1u);
-    EXPECT_EQ(results[0].triggered.size(), 0u);
+    EXPECT_TRUE(results[0].triggered.empty());
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -196,21 +202,28 @@ TEST_F(KelRulesTest, FileSizeCondition_SmallFileOnly) {
 // ═══════════════════════════════════════════════════════════════════════
 
 TEST_F(KelRulesTest, PatternFoundCondition) {
-    auto group = make_group("test", {"/data"}, {
+    fs_.add_file("/watched/existing.txt", FakeFileEntry{
+        .size = 10, .mtime = clock_.now()});
+
+    FakeFilesystemScanner scanner(fs_);
+    auto group = make_group("test", {"/watched"}, {
         make_rule("error_detected", "file_pattern_found == true"),
     });
 
-    auto engine = make_engine({group});
+    WatchEngine engine(WatchEngineConfig{}, WatchEngine::Dependencies{
+        .clock = &clock_, .scanner = &scanner}, {group});
 
-    auto sink = make_null_sink();
-    engine->scan_once(sink);
+    TriggerSink sink = [](TriggerEvent) { return true; };
+    engine.scan_once(sink);
 
-    // FakeFilesystem doesn't set pattern_found, so it defaults to false.
-    fake_fs_->add_file("/data/normal.txt", make_entry(15));
+    // FakeFilesystem doesn't set pattern_found → defaults to false.
+    clock_.advance(60s);
+    fs_.add_file("/watched/normal.txt", FakeFileEntry{
+        .size = 15, .mtime = clock_.now()});
 
-    auto results = engine->scan_once(sink);
+    auto results = engine.scan_once(sink);
     ASSERT_EQ(results.size(), 1u);
-    EXPECT_EQ(results[0].triggered.size(), 0u);
+    EXPECT_TRUE(results[0].triggered.empty());
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -218,40 +231,55 @@ TEST_F(KelRulesTest, PatternFoundCondition) {
 // ═══════════════════════════════════════════════════════════════════════
 
 TEST_F(KelRulesTest, BooleanAndCondition) {
-    auto group = make_group("test", {"/data"}, {
+    fs_.add_file("/watched/existing.txt", FakeFileEntry{
+        .size = 10, .mtime = clock_.now()});
+
+    FakeFilesystemScanner scanner(fs_);
+    auto group = make_group("test", {"/watched"}, {
         make_rule("large_and_file",
                   "file_size > 100 and file_type == \"file\""),
     });
 
-    auto engine = make_engine({group});
+    WatchEngine engine(WatchEngineConfig{}, WatchEngine::Dependencies{
+        .clock = &clock_, .scanner = &scanner}, {group});
 
-    auto sink = make_null_sink();
-    engine->scan_once(sink);
+    TriggerSink sink = [](TriggerEvent) { return true; };
+    engine.scan_once(sink);
 
-    fake_fs_->add_file("/data/big.txt", make_entry(500));
+    clock_.advance(60s);
+    fs_.add_file("/watched/big.txt", FakeFileEntry{
+        .size = 500, .mtime = clock_.now()});
 
-    auto results = engine->scan_once(sink);
+    auto results = engine.scan_once(sink);
     ASSERT_EQ(results.size(), 1u);
-    EXPECT_GE(results[0].triggered.size(), 1u);
+    EXPECT_FALSE(results[0].triggered.empty());
 }
 
 TEST_F(KelRulesTest, BooleanOrCondition) {
-    auto group = make_group("test", {"/data"}, {
+    fs_.add_file("/watched/existing.txt", FakeFileEntry{
+        .size = 10, .mtime = clock_.now()});
+
+    FakeFilesystemScanner scanner(fs_);
+    auto group = make_group("test", {"/watched"}, {
         make_rule("big_or_small",
                   "file_size > 10000 or file_size < 5"),
     });
 
-    auto engine = make_engine({group});
+    WatchEngine engine(WatchEngineConfig{}, WatchEngine::Dependencies{
+        .clock = &clock_, .scanner = &scanner}, {group});
 
-    auto sink = make_null_sink();
-    engine->scan_once(sink);
+    TriggerSink sink = [](TriggerEvent) { return true; };
+    engine.scan_once(sink);
 
     // Tiny file (size 2) — should trigger via "or file_size < 5".
-    fake_fs_->add_file("/data/tiny.txt", make_entry(2));
     // Medium file (size 50) — should NOT trigger.
-    fake_fs_->add_file("/data/medium.txt", make_entry(50));
+    clock_.advance(60s);
+    fs_.add_file("/watched/tiny.txt", FakeFileEntry{
+        .size = 2, .mtime = clock_.now()});
+    fs_.add_file("/watched/medium.txt", FakeFileEntry{
+        .size = 50, .mtime = clock_.now()});
 
-    auto results = engine->scan_once(sink);
+    auto results = engine.scan_once(sink);
     ASSERT_EQ(results.size(), 1u);
 
     int triggered_count = 0;
@@ -268,22 +296,33 @@ TEST_F(KelRulesTest, BooleanOrCondition) {
 // ═══════════════════════════════════════════════════════════════════════
 
 TEST_F(KelRulesTest, EventTypeFilterWithKel) {
-    auto group = make_group("test", {"/data"}, {
+    fs_.add_file("/watched/existing.txt", FakeFileEntry{
+        .size = 10, .mtime = clock_.now()});
+
+    FakeFilesystemScanner scanner(fs_);
+    auto group = make_group("test", {"/watched"}, {
+        // Only fires on content_changed (not file_created).
         make_rule("big_change", "file_size > 100",
                   {"content_changed"}),
+        // Fires on file_created.
         make_rule("any_created", "true", {"file_created"}),
     });
 
-    auto engine = make_engine({group});
+    WatchEngine engine(WatchEngineConfig{}, WatchEngine::Dependencies{
+        .clock = &clock_, .scanner = &scanner}, {group});
 
-    auto sink = make_null_sink();
-    engine->scan_once(sink);
+    TriggerSink sink = [](TriggerEvent) { return true; };
+    engine.scan_once(sink);
 
-    fake_fs_->add_file("/data/new.txt", make_entry(11));
+    clock_.advance(60s);
+    fs_.add_file("/watched/new.txt", FakeFileEntry{
+        .size = 11, .mtime = clock_.now()});
 
-    auto results = engine->scan_once(sink);
+    auto results = engine.scan_once(sink);
     ASSERT_EQ(results.size(), 1u);
 
+    // "any_created" should fire (file_created event, condition=true).
+    // "big_change" should NOT fire (event is file_created, not content_changed).
     bool found_created = false;
     bool found_big_change = false;
     for (const auto& tr : results[0].triggered) {
@@ -299,20 +338,27 @@ TEST_F(KelRulesTest, EventTypeFilterWithKel) {
 // ═══════════════════════════════════════════════════════════════════════
 
 TEST_F(KelRulesTest, InvalidKelExpression_DoesNotFire) {
-    auto group = make_group("test", {"/data"}, {
+    fs_.add_file("/watched/existing.txt", FakeFileEntry{
+        .size = 10, .mtime = clock_.now()});
+
+    FakeFilesystemScanner scanner(fs_);
+    auto group = make_group("test", {"/watched"}, {
         make_rule("bad_rule", "this is >>> not valid kel"),
     });
 
-    auto engine = make_engine({group});
+    WatchEngine engine(WatchEngineConfig{}, WatchEngine::Dependencies{
+        .clock = &clock_, .scanner = &scanner}, {group});
 
-    auto sink = make_null_sink();
-    engine->scan_once(sink);
+    TriggerSink sink = [](TriggerEvent) { return true; };
+    engine.scan_once(sink);
 
-    fake_fs_->add_file("/data/test.txt", make_entry(4));
+    clock_.advance(60s);
+    fs_.add_file("/watched/test.txt", FakeFileEntry{
+        .size = 4, .mtime = clock_.now()});
 
-    auto results = engine->scan_once(sink);
+    auto results = engine.scan_once(sink);
     ASSERT_EQ(results.size(), 1u);
-    EXPECT_EQ(results[0].triggered.size(), 0u);
+    EXPECT_TRUE(results[0].triggered.empty());
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -320,20 +366,27 @@ TEST_F(KelRulesTest, InvalidKelExpression_DoesNotFire) {
 // ═══════════════════════════════════════════════════════════════════════
 
 TEST_F(KelRulesTest, EmptyCondition_AlwaysFires) {
-    auto group = make_group("test", {"/data"}, {
+    fs_.add_file("/watched/existing.txt", FakeFileEntry{
+        .size = 10, .mtime = clock_.now()});
+
+    FakeFilesystemScanner scanner(fs_);
+    auto group = make_group("test", {"/watched"}, {
         make_rule("no_condition", ""),
     });
 
-    auto engine = make_engine({group});
+    WatchEngine engine(WatchEngineConfig{}, WatchEngine::Dependencies{
+        .clock = &clock_, .scanner = &scanner}, {group});
 
-    auto sink = make_null_sink();
-    engine->scan_once(sink);
+    TriggerSink sink = [](TriggerEvent) { return true; };
+    engine.scan_once(sink);
 
-    fake_fs_->add_file("/data/test.txt", make_entry(4));
+    clock_.advance(60s);
+    fs_.add_file("/watched/test.txt", FakeFileEntry{
+        .size = 4, .mtime = clock_.now()});
 
-    auto results = engine->scan_once(sink);
+    auto results = engine.scan_once(sink);
     ASSERT_EQ(results.size(), 1u);
-    EXPECT_GE(results[0].triggered.size(), 1u);
+    EXPECT_FALSE(results[0].triggered.empty());
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -341,22 +394,30 @@ TEST_F(KelRulesTest, EmptyCondition_AlwaysFires) {
 // ═══════════════════════════════════════════════════════════════════════
 
 TEST_F(KelRulesTest, MultipleRules_OnlyMatchingFire) {
-    auto group = make_group("test", {"/data"}, {
+    fs_.add_file("/watched/existing.txt", FakeFileEntry{
+        .size = 10, .mtime = clock_.now()});
+
+    FakeFilesystemScanner scanner(fs_);
+    auto group = make_group("test", {"/watched"}, {
         make_rule("always", "true"),
         make_rule("never", "false"),
         make_rule("size_check", "file_size > 50"),
     });
 
-    auto engine = make_engine({group});
+    WatchEngine engine(WatchEngineConfig{}, WatchEngine::Dependencies{
+        .clock = &clock_, .scanner = &scanner}, {group});
 
-    auto sink = make_null_sink();
-    engine->scan_once(sink);
+    TriggerSink sink = [](TriggerEvent) { return true; };
+    engine.scan_once(sink);
 
-    fake_fs_->add_file("/data/test.txt", make_entry(5));
+    clock_.advance(60s);
+    fs_.add_file("/watched/test.txt", FakeFileEntry{
+        .size = 5, .mtime = clock_.now()});
 
-    auto results = engine->scan_once(sink);
+    auto results = engine.scan_once(sink);
     ASSERT_EQ(results.size(), 1u);
 
+    // "always" fires, "never" doesn't, "size_check" doesn't (5 < 50).
     bool found_always = false, found_never = false, found_size = false;
     for (const auto& tr : results[0].triggered) {
         if (tr.rule_name == "always") found_always = true;
