@@ -159,27 +159,24 @@ void sha256_update(SHA256Context& ctx,
 }
 
 std::array<uint8_t, 32> sha256_final(SHA256Context& ctx) {
-    // Pad: append 1-bit, zeros, then 64-bit big-endian length.
-    uint8_t pad[64]{};
-    pad[0] = 0x80;
+    // Save the original message length BEFORE padding mutates bit_count.
+    uint64_t total_bits = ctx.bit_count;
 
-    uint32_t pad_len = (ctx.buffer_len < 56)
-        ? (56 - ctx.buffer_len)
-        : (120 - ctx.buffer_len);
+    // Pad: append 0x80, then zeros until buffer_len == 56 mod 64.
+    uint8_t pad_byte = 0x80;
+    sha256_update(ctx, &pad_byte, 1);
+    while (ctx.buffer_len != 56) {
+        uint8_t zero = 0;
+        sha256_update(ctx, &zero, 1);
+    }
 
-    sha256_update(ctx, pad, pad_len);
-
-    // Append length as big-endian 64-bit.
+    // Append original length as big-endian 64-bit.
     uint8_t len_bytes[8];
     for (int i = 7; i >= 0; --i) {
-        len_bytes[i] = static_cast<uint8_t>(ctx.bit_count & 0xFF);
-        ctx.bit_count >>= 8;
+        len_bytes[i] = static_cast<uint8_t>(total_bits & 0xFF);
+        total_bits >>= 8;
     }
-    // Update without counting these bytes toward bit_count.
-    // We directly transform since we know the buffer has exactly 56 bytes.
-    std::memcpy(ctx.buffer + ctx.buffer_len, len_bytes, 8);
-    sha256_transform(ctx, ctx.buffer);
-    ctx.buffer_len = 0;
+    sha256_update(ctx, len_bytes, 8);
 
     // Extract digest (big-endian).
     std::array<uint8_t, 32> digest{};
