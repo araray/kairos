@@ -65,22 +65,19 @@ protected:
         job.job_name = "echo_job";
         job.steps = {step};
 
-        // Build DAG.
+        // Build DAG via the public factory (default ctor is private).
         DagNode node;
         node.job_id = "job-echo1";
         node.job_name = "echo_job";
-        node.level = 0;
 
-        WorkflowDag dag;
-        dag.nodes["job-echo1"] = node;
-        dag.levels = {{"job-echo1"}};
+        auto dag = WorkflowDag::build({node});
 
-        WorkflowDef wf;
-        wf.workflow_id = "wfl-echo1";
-        wf.workflow_name = "echo_workflow";
-        wf.jobs = {job};
-        wf.dag = dag;
-        return wf;
+        return WorkflowDef{
+            .workflow_id = "wfl-echo1",
+            .workflow_name = "echo_workflow",
+            .jobs = {job},
+            .dag = std::move(dag),
+        };
     }
 
     /// Make an interval trigger that fires every `interval_ms`.
