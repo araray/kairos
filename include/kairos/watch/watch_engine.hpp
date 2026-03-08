@@ -1,24 +1,28 @@
 /// include/kairos/watch/watch_engine.hpp
 // ╔════════════════════════════════════════════════════════════════════════════╗
-// ║  kairos/watch/watch_engine.hpp — Watch engine (sample+diff + rules)      ║
+// ║  kairos/watch/watch_engine.hpp — Watch engine (hybrid + sample+diff)     ║
 // ║                                                                           ║
 // ║  Runs on a dedicated thread. For each watch group:                       ║
-// ║    - Periodically collects a sample (filesystem snapshot).               ║
+// ║    - Starts native watcher sub-thread (inotify/FSEvents/RDCW) if        ║
+// ║      mode is native or hybrid.                                           ║
+// ║    - Native events → BoundedQueue → DebounceBuffer → targeted rescan.   ║
+// ║    - Periodically collects a full sample (filesystem snapshot).          ║
 // ║    - Computes diff against previous sample.                              ║
 // ║    - Evaluates KEL rules against the diff.                               ║
+// ║    - Deduplicates events between native and periodic scans.             ║
 // ║    - Emits TriggerEvents for triggered rules.                            ║
 // ║    - Persists samples and events via DBWriter.                           ║
-// ║                                                                           ║
-// ║  v1 supports sample-only mode. Native backends (inotify, FSEvents,       ║
-// ║  RDCW) deferred to a later batch to keep this focused.                   ║
 // ║                                                                           ║
 // ║  Spec reference: §12.1–§12.15                                            ║
 // ╚════════════════════════════════════════════════════════════════════════════╝
 #pragma once
 
+#include "kairos/core/bounded_queue.hpp"
 #include "kairos/engine/trigger_event.hpp"
 #include "kairos/persist/db_writer.hpp"
 #include "kairos/testing/fake_clock.hpp"
+#include "kairos/watch/debounce_buffer.hpp"
+#include "kairos/watch/file_watcher.hpp"
 #include "kairos/watch/sample.hpp"
 #include "kairos/watch/watch_group_def.hpp"
 
@@ -30,6 +34,7 @@
 #include <string>
 #include <thread>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 namespace kairos::watch {
@@ -64,6 +69,7 @@ public:
         ClockSource* clock = nullptr;
         IFilesystemScanner* scanner = nullptr;       ///< Real or fake.
         persist::DBWriter* db_writer = nullptr;
+        IFileWatcher* native_watcher = nullptr;       ///< Optional: native backend.
     };
 
     explicit WatchEngine(
@@ -88,6 +94,9 @@ public:
     ScanResult scan_group(const std::string& group_name,
                           engine::TriggerSink& sink);
 
+    /// Process any pending native events through debounce (for testing).
+    void process_native_events(engine::TriggerSink& sink);
+
     /// Reload with new watch group definitions.
     void request_reload(std::vector<WatchGroupDef> new_groups);
 
@@ -96,6 +105,9 @@ public:
 
     /// Number of configured watch groups.
     [[nodiscard]] size_t group_count() const;
+
+    /// Number of pending debounced events.
+    [[nodiscard]] size_t debounce_pending() const;
 
     /// Stop the engine (joins thread if running).
     void stop();
@@ -109,6 +121,11 @@ private:
         std::chrono::steady_clock::time_point next_scan_time;
         std::string last_scan_iso;
         int events_emitted = 0;
+
+        /// Recently-reported paths for deduplication (§12.7).
+        /// Maps path → epoch when last reported via native event.
+        /// Entries older than 2×sample_rate are pruned.
+        std::unordered_map<std::string, int64_t> recently_reported;
     };
 
     /// Main coordinator loop.
@@ -119,6 +136,11 @@ private:
 
     /// Collect a sample from the scanner for a watch group.
     Sample collect_sample(const WatchGroupDef& group, std::stop_token stop);
+
+    /// Apply hash computation per hash_policy (§12.6.3).
+    /// Computes hashes only for files where size/mtime changed vs previous.
+    void apply_hashes(Sample& sample, const Sample& previous,
+                      HashPolicy policy, std::stop_token stop);
 
     /// Evaluate watch rules against a diff (with KEL evaluation).
     std::vector<WatchTriggerResult> evaluate_rules(
@@ -141,12 +163,48 @@ private:
     void persist_event(const WatchTriggerResult& result,
                        int64_t sample_epoch);
 
+    // ── Hybrid mode methods (§12.7) ───────────────────────────────────
+
+    /// Drain native events from the bounded queue into the debounce buffer.
+    void drain_native_queue();
+
+    /// Process settled debounced events: targeted re-scan + rules + emit.
+    void process_debounced_events(engine::TriggerSink& sink);
+
+    /// Targeted re-scan for a single file path (native event).
+    /// Returns the single-file diff, or empty if no change detected.
+    SampleDiff targeted_rescan(const NativeEvent& event,
+                               GroupState& state);
+
+    /// Find which watch group a path belongs to.
+    /// Returns nullptr if no match.
+    GroupState* find_group_for_path(const fs::path& path);
+
+    /// Check if a path was recently reported (for dedup).
+    bool is_recently_reported(const GroupState& state,
+                              const std::string& path) const;
+
+    /// Mark a path as recently reported.
+    void mark_reported(GroupState& state, const std::string& path);
+
+    /// Prune old entries from the recently-reported set.
+    void prune_recently_reported(GroupState& state);
+
+    /// Start native watcher sub-thread (if native watcher is available).
+    void start_native_watcher(std::stop_token stop);
+
+    /// Stop native watcher sub-thread.
+    void stop_native_watcher();
+
     /// Format a time_point as ISO 8601.
     static std::string format_iso8601(
         std::chrono::system_clock::time_point tp);
 
     /// Find the earliest next_scan_time across all groups.
     std::chrono::steady_clock::time_point earliest_scan_time() const;
+
+    /// Compute sleep duration considering both scan timer and debounce.
+    std::chrono::milliseconds compute_sleep_duration() const;
 
     WatchEngineConfig config_;
     Dependencies deps_;
@@ -159,6 +217,21 @@ private:
     std::atomic<bool> reload_requested_{false};
     std::vector<WatchGroupDef> pending_groups_;
     std::mutex reload_mu_;
+
+    // ── Hybrid mode state (§12.13) ────────────────────────────────────
+
+    /// Bounded MPSC queue for native events (sub-thread → coordinator).
+    /// Capacity 4096 per spec §12.13.
+    core::BoundedQueue<NativeEvent> native_event_queue_{4096};
+
+    /// Debounce buffer for coalescing rapid native events.
+    DebounceBuffer debounce_buffer_;
+
+    /// Native watcher sub-thread.
+    std::jthread native_watcher_thread_;
+
+    /// Whether native watcher is active.
+    std::atomic<bool> native_watcher_active_{false};
 
     // Thread.
     std::jthread thread_;

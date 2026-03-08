@@ -15,6 +15,7 @@
 #include "kairos/core/id_generator.hpp"
 #include "kairos/kel/evaluator.hpp"
 #include "kairos/kel/errors.hpp"
+#include "kairos/watch/hash_util.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -26,6 +27,7 @@ namespace kairos::watch {
 
 using namespace std::chrono_literals;
 namespace engine = kairos::engine;
+namespace fs = std::filesystem;
 
 // ── Internal helpers (anonymous namespace) ──────────────────────────────
 
@@ -237,6 +239,7 @@ WatchEngine::WatchEngine(
     std::vector<WatchGroupDef> groups)
     : config_(std::move(config))
     , deps_(deps)
+    , debounce_buffer_(config_.debounce_ms)
 {
     auto now_steady = deps_.clock ? deps_.clock->steady_now()
                                   : std::chrono::steady_clock::now();
@@ -258,6 +261,10 @@ WatchEngine::~WatchEngine() {
 // ── Public API ──────────────────────────────────────────────────────────
 
 void WatchEngine::start(std::stop_token stop, engine::TriggerSink sink) {
+    // Start native watcher sub-thread if a native backend is available
+    // and any group uses native or hybrid mode.
+    start_native_watcher(stop);
+
     thread_ = std::jthread([this, stop, sink = std::move(sink)](
                                 std::stop_token) mutable {
         coordinator_loop(stop, std::move(sink));
@@ -286,6 +293,11 @@ ScanResult WatchEngine::scan_group(
         return {};  // Unknown group.
     }
     return run_scan(it->second, sink);
+}
+
+void WatchEngine::process_native_events(engine::TriggerSink& sink) {
+    drain_native_queue();
+    process_debounced_events(sink);
 }
 
 void WatchEngine::request_reload(std::vector<WatchGroupDef> new_groups) {
@@ -321,7 +333,14 @@ size_t WatchEngine::group_count() const {
     return groups_.size();
 }
 
+size_t WatchEngine::debounce_pending() const {
+    return debounce_buffer_.pending_count();
+}
+
 void WatchEngine::stop() {
+    // Stop native watcher sub-thread first.
+    stop_native_watcher();
+
     if (thread_.joinable()) {
         thread_.request_stop();
         if (deps_.clock) deps_.clock->wake();
@@ -366,25 +385,49 @@ void WatchEngine::coordinator_loop(
             pending_groups_.clear();
         }
 
-        // Find next scan time.
+        // ── Process native events (hybrid mode) ────────────────────
+        // Drain the bounded queue into the debounce buffer, then
+        // process any settled events via targeted re-scan + rules.
+        drain_native_queue();
+        process_debounced_events(sink);
+
+        // ── Determine sleep duration ───────────────────────────────
+        // Sleep is the minimum of:
+        //   - Time until next periodic scan is due.
+        //   - Time until next debounce entry settles.
+        //   - Maximum 1 second (for stop responsiveness).
         auto target = earliest_scan_time();
         auto now_steady = deps_.clock ? deps_.clock->steady_now()
                                       : std::chrono::steady_clock::now();
 
-        // Sleep until the next scan is due.
+        auto sleep_dur = std::chrono::milliseconds(1000);
         if (target > now_steady) {
+            auto until_scan = std::chrono::duration_cast<
+                std::chrono::milliseconds>(target - now_steady);
+            sleep_dur = std::min(sleep_dur, until_scan);
+        } else {
+            sleep_dur = std::chrono::milliseconds(0);
+        }
+
+        // Check debounce timer.
+        auto debounce_wait = debounce_buffer_.time_until_next_settle(
+            std::chrono::steady_clock::now());
+        if (debounce_wait < sleep_dur) {
+            sleep_dur = debounce_wait;
+        }
+
+        // Sleep if there's time to wait.
+        if (sleep_dur > std::chrono::milliseconds(0)) {
             if (deps_.clock) {
-                deps_.clock->sleep_until(target);
+                deps_.clock->sleep_for(sleep_dur);
             } else {
-                std::this_thread::sleep_for(
-                    std::chrono::duration_cast<std::chrono::milliseconds>(
-                        target - now_steady));
+                std::this_thread::sleep_for(sleep_dur);
             }
         }
 
         if (stop.stop_requested()) break;
 
-        // Run scans for all groups that are due.
+        // ── Run periodic scans for all due groups ──────────────────
         now_steady = deps_.clock ? deps_.clock->steady_now()
                                  : std::chrono::steady_clock::now();
 
@@ -410,6 +453,10 @@ ScanResult WatchEngine::run_scan(
     auto current = collect_sample(state.def, temp_stop.get_token());
     current.epoch = ++state.sample_epoch;
 
+    // Apply hash computation per hash_policy (§12.6.3).
+    apply_hashes(current, state.last_sample,
+                 state.def.hash_policy, temp_stop.get_token());
+
     result.sample = current;
 
     // Record scan time.
@@ -421,7 +468,40 @@ ScanResult WatchEngine::run_scan(
     if (!state.last_sample.empty()) {
         result.diff = compute_diff(current, state.last_sample);
 
-        // Evaluate rules if there are changes.
+        // ── Hybrid mode deduplication (§12.7) ──────────────────────
+        // Suppress diff entries for paths recently reported by native
+        // events to avoid double-reporting the same change.
+        if (!result.diff.empty() &&
+            !state.recently_reported.empty())
+        {
+            // Remove recently-reported paths from created/deleted/modified.
+            auto remove_reported = [&](std::vector<std::string>& paths) {
+                paths.erase(
+                    std::remove_if(paths.begin(), paths.end(),
+                        [&](const std::string& p) {
+                            return is_recently_reported(state, p);
+                        }),
+                    paths.end());
+            };
+            remove_reported(result.diff.created);
+            remove_reported(result.diff.deleted);
+
+            // Remove reported paths from modified map.
+            for (auto it = result.diff.modified.begin();
+                 it != result.diff.modified.end(); )
+            {
+                if (is_recently_reported(state, it->first)) {
+                    it = result.diff.modified.erase(it);
+                } else {
+                    ++it;
+                }
+            }
+        }
+
+        // Prune stale entries from recently-reported.
+        prune_recently_reported(state);
+
+        // Evaluate rules if there are (non-deduplicated) changes.
         if (!result.diff.empty()) {
             result.triggered = evaluate_rules(
                 state.def, current, state.last_sample, result.diff);
@@ -493,15 +573,53 @@ Sample WatchEngine::collect_sample(
                 metrics.subdirs_count = entry.subdirs_count;
             }
 
-            // Hash computation deferred per hash_policy — in v1 the
-            // FakeFilesystem provides pre-set hashes, and real scanning
-            // will compute them in a later batch.
+            // Hash computation is handled by apply_hashes() after
+            // sample collection, so it can compare against the
+            // previous sample for the SizePlusMtime optimization.
 
             sample.entries[metrics.path] = std::move(metrics);
         }
     }
 
     return sample;
+}
+
+// ── Hash computation (§12.6.3) ─────────────────────────────────────────
+
+void WatchEngine::apply_hashes(
+    Sample& sample, const Sample& previous,
+    HashPolicy policy, std::stop_token stop)
+{
+    if (policy == HashPolicy::MtimeOnly) return;
+
+    for (auto& [path, metrics] : sample.entries) {
+        if (stop.stop_requested()) break;
+
+        // Skip directories — we only hash regular files.
+        if (metrics.entry_type != "file") continue;
+
+        if (policy == HashPolicy::SizePlusMtime) {
+            // Only compute hash if size or mtime changed vs previous.
+            auto prev_it = previous.entries.find(path);
+            if (prev_it != previous.entries.end()) {
+                const auto& prev = prev_it->second;
+                if (prev.size == metrics.size &&
+                    prev.last_modified == metrics.last_modified) {
+                    // No change — copy hashes from previous sample.
+                    metrics.md5 = prev.md5;
+                    metrics.sha256 = prev.sha256;
+                    continue;
+                }
+            }
+        }
+
+        // Compute fresh hashes (both MD5 and SHA-256 in one pass).
+        auto result = compute_file_hashes(fs::path(path), stop);
+        if (result) {
+            metrics.md5 = std::move(result->md5);
+            metrics.sha256 = std::move(result->sha256);
+        }
+    }
 }
 
 // ── Rule evaluation ─────────────────────────────────────────────────────
@@ -728,6 +846,279 @@ void WatchEngine::persist_event(
     deps_.db_writer->enqueue(
         persist::DBWriteRequest{std::move(req)},
         std::chrono::milliseconds(100));
+}
+
+// ── Hybrid mode: native event processing (§12.7, §12.13) ──────────────
+
+void WatchEngine::drain_native_queue() {
+    // Non-blocking drain of all available native events from the
+    // bounded queue into the debounce buffer.
+    while (true) {
+        auto event = native_event_queue_.try_pop();
+        if (!event) break;
+
+        debounce_buffer_.add(std::move(*event));
+    }
+}
+
+void WatchEngine::process_debounced_events(engine::TriggerSink& sink) {
+    auto now = std::chrono::steady_clock::now();
+    auto settled = debounce_buffer_.drain_settled(now);
+
+    if (settled.empty()) return;
+
+    std::lock_guard lock(groups_mu_);
+
+    for (const auto& event : settled) {
+        // ── Handle overflow: trigger full re-scan ──────────────
+        if (event.type == NativeEventType::Overflow ||
+            event.type == NativeEventType::Error) {
+            // On overflow, schedule immediate re-scan for all groups
+            // that watch the affected path's parent directory.
+            for (auto& [name, state] : groups_) {
+                auto now_steady = deps_.clock ? deps_.clock->steady_now()
+                    : std::chrono::steady_clock::now();
+                state.next_scan_time = now_steady;
+            }
+            continue;
+        }
+
+        // ── Find the relevant watch group for this path ────────
+        auto* state = find_group_for_path(event.path);
+        if (!state) continue;
+
+        // Skip if mode is sample-only.
+        if (state->def.mode == WatchMode::Sample) continue;
+
+        // ── Targeted re-scan (§12.7 step 2–4) ─────────────────
+        // Skip if we don't have a previous sample yet (baseline).
+        if (state->last_sample.empty()) continue;
+
+        auto diff = targeted_rescan(event, *state);
+        if (diff.empty()) continue;
+
+        // Evaluate rules against the single-file diff.
+        auto triggered = evaluate_rules(
+            state->def, state->last_sample, state->last_sample, diff);
+
+        // Emit trigger events and persist.
+        if (!triggered.empty()) {
+            emit_triggers(state->def, triggered, sink);
+            state->events_emitted +=
+                static_cast<int>(triggered.size());
+
+            for (const auto& tr : triggered) {
+                persist_event(tr, state->sample_epoch);
+            }
+        }
+
+        // Mark paths as recently reported for dedup.
+        for (const auto& p : diff.created) mark_reported(*state, p);
+        for (const auto& p : diff.deleted) mark_reported(*state, p);
+        for (const auto& [p, _] : diff.modified) mark_reported(*state, p);
+    }
+}
+
+SampleDiff WatchEngine::targeted_rescan(
+    const NativeEvent& event, GroupState& state)
+{
+    SampleDiff diff;
+
+    if (!deps_.scanner) return diff;
+
+    std::string path_str = event.path.string();
+
+    // Handle deletion events.
+    if (event.type == NativeEventType::Deleted) {
+        auto prev_it = state.last_sample.entries.find(path_str);
+        if (prev_it != state.last_sample.entries.end()) {
+            diff.deleted.push_back(path_str);
+            // Remove from current sample.
+            state.last_sample.entries.erase(prev_it);
+        }
+        return diff;
+    }
+
+    // For created/modified/renamed: stat the file and compare.
+    auto entry = deps_.scanner->stat_file(event.path);
+    if (!entry) {
+        // File disappeared between event and stat — treat as deleted.
+        auto prev_it = state.last_sample.entries.find(path_str);
+        if (prev_it != state.last_sample.entries.end()) {
+            diff.deleted.push_back(path_str);
+            state.last_sample.entries.erase(prev_it);
+        }
+        return diff;
+    }
+
+    // Build current metrics.
+    FileMetrics metrics;
+    metrics.path = entry->path;
+    metrics.entry_type = entry->entry_type;
+    metrics.size = entry->size;
+    metrics.last_modified = entry->mtime;
+    metrics.permissions = entry->permissions;
+    metrics.uid = entry->uid;
+    metrics.gid = entry->gid;
+
+    if (entry->is_directory) {
+        metrics.files_count = entry->files_count;
+        metrics.subdirs_count = entry->subdirs_count;
+    }
+
+    // Hash computation for the single file (if policy requires it).
+    if (state.def.hash_policy != HashPolicy::MtimeOnly &&
+        metrics.entry_type == "file") {
+        auto hash = compute_file_hashes(event.path);
+        if (hash) {
+            metrics.md5 = std::move(hash->md5);
+            metrics.sha256 = std::move(hash->sha256);
+        }
+    }
+
+    // Compare against previous sample.
+    auto prev_it = state.last_sample.entries.find(metrics.path);
+    if (prev_it == state.last_sample.entries.end()) {
+        // New file.
+        diff.created.push_back(metrics.path);
+    } else {
+        // Build a mini-sample for diff computation.
+        Sample mini_current;
+        mini_current.entries[metrics.path] = metrics;
+        Sample mini_previous;
+        mini_previous.entries[metrics.path] = prev_it->second;
+
+        auto mini_diff = compute_diff(mini_current, mini_previous);
+        if (!mini_diff.empty()) {
+            // Merge into our result diff.
+            for (auto& p : mini_diff.created) diff.created.push_back(std::move(p));
+            for (auto& p : mini_diff.deleted) diff.deleted.push_back(std::move(p));
+            for (auto& [p, changes] : mini_diff.modified) {
+                diff.modified[p] = std::move(changes);
+            }
+        }
+    }
+
+    // Update the last_sample with fresh metrics.
+    state.last_sample.entries[metrics.path] = std::move(metrics);
+
+    return diff;
+}
+
+WatchEngine::GroupState* WatchEngine::find_group_for_path(
+    const fs::path& path)
+{
+    // Check which watch group's watch_items match this path.
+    // A path matches a group if it starts with one of the group's
+    // watch_items (directory prefix match).
+    std::string path_str = path.string();
+
+    for (auto& [name, state] : groups_) {
+        if (state.def.mode == WatchMode::Sample) continue;
+
+        for (const auto& item : state.def.watch_items) {
+            // Check if the event path is under this watch item's directory.
+            if (path_str.find(item) == 0) {
+                return &state;
+            }
+            // Also check with generic (forward-slash) paths.
+            std::string generic_item =
+                fs::path(item).generic_string();
+            std::string generic_path = path.generic_string();
+            if (generic_path.find(generic_item) == 0) {
+                return &state;
+            }
+        }
+    }
+    return nullptr;
+}
+
+bool WatchEngine::is_recently_reported(
+    const GroupState& state, const std::string& path) const
+{
+    return state.recently_reported.count(path) > 0;
+}
+
+void WatchEngine::mark_reported(
+    GroupState& state, const std::string& path)
+{
+    state.recently_reported[path] = state.sample_epoch;
+}
+
+void WatchEngine::prune_recently_reported(GroupState& state) {
+    // Remove entries older than 2× sample_rate scans.
+    // Since sample_epoch increments once per scan, entries older than
+    // (current_epoch - 2) are stale.
+    int64_t cutoff = state.sample_epoch - 2;
+    for (auto it = state.recently_reported.begin();
+         it != state.recently_reported.end(); )
+    {
+        if (it->second < cutoff) {
+            it = state.recently_reported.erase(it);
+        } else {
+            ++it;
+        }
+    }
+}
+
+// ── Native watcher lifecycle (§12.13) ──────────────────────────────────
+
+void WatchEngine::start_native_watcher(std::stop_token stop) {
+    if (!deps_.native_watcher) return;
+
+    // Check if any group uses native or hybrid mode.
+    bool needs_native = false;
+    {
+        std::lock_guard lock(groups_mu_);
+        for (const auto& [name, state] : groups_) {
+            if (state.def.mode == WatchMode::Native ||
+                state.def.mode == WatchMode::Hybrid) {
+                needs_native = true;
+                break;
+            }
+        }
+    }
+
+    if (!needs_native) return;
+
+    // Add watches for all native/hybrid groups.
+    {
+        std::lock_guard lock(groups_mu_);
+        for (const auto& [name, state] : groups_) {
+            if (state.def.mode == WatchMode::Sample) continue;
+            for (const auto& item : state.def.watch_items) {
+                bool recursive = (state.def.max_depth > 0);
+                if (!deps_.native_watcher->add_watch(
+                        fs::path(item), recursive)) {
+                    // Non-fatal: log and continue with sample mode.
+                }
+            }
+        }
+    }
+
+    // Start the native watcher sub-thread.
+    // Events are pushed to the bounded queue for the coordinator.
+    native_watcher_active_.store(true, std::memory_order_release);
+    native_watcher_thread_ = std::jthread(
+        [this, stop](std::stop_token jthread_stop) {
+            auto callback = [this](const NativeEvent& event) {
+                // Push to bounded queue (non-blocking, drop on full).
+                if (!native_event_queue_.try_push(event)) {
+                    // Queue full — backpressure. The coordinator will
+                    // catch up via periodic full scans.
+                }
+            };
+
+            deps_.native_watcher->run(stop, callback);
+            native_watcher_active_.store(false, std::memory_order_release);
+        });
+}
+
+void WatchEngine::stop_native_watcher() {
+    if (native_watcher_thread_.joinable()) {
+        native_watcher_thread_.request_stop();
+        native_watcher_thread_.join();
+    }
 }
 
 // ── Utility ─────────────────────────────────────────────────────────────

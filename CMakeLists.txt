@@ -56,6 +56,7 @@ add_library(kairos_core STATIC
     src/watch/watch_engine.cpp
     src/watch/real_scanner.cpp
     src/watch/debounce_buffer.cpp
+    src/watch/hash_util.cpp
     src/config/yaml_loader.cpp
 )
 
@@ -65,6 +66,8 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
 elseif(CMAKE_SYSTEM_NAME STREQUAL "Darwin")
     target_sources(kairos_core PRIVATE src/watch/fsevents_watcher.cpp)
     target_link_libraries(kairos_core PUBLIC "-framework CoreServices")
+elseif(WIN32)
+    target_sources(kairos_core PRIVATE src/watch/rdcw_watcher.cpp)
 else()
     target_sources(kairos_core PRIVATE src/watch/file_watcher_stub.cpp)
 endif()

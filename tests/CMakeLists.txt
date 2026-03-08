@@ -282,3 +282,39 @@ add_executable(test_yaml_daemon_wiring
 )
 target_link_libraries(test_yaml_daemon_wiring PRIVATE kairos_test_helpers)
 gtest_discover_tests(test_yaml_daemon_wiring)
+
+# ── Phase 3 Batch 7: Hash utility tests ───────────────────────────────
+
+# MD5 + SHA-256 correctness (RFC 1321, FIPS 180-4 vectors)
+add_executable(test_hash_util
+    unit/watch/hash_util_test.cpp
+)
+target_link_libraries(test_hash_util PRIVATE kairos_test_helpers)
+gtest_discover_tests(test_hash_util)
+
+# ── Phase 3 Batch 7: Symlink cycle detection tests ───────────────────
+
+# RealScanner cycle detection with symlinks
+add_executable(test_symlink_cycle
+    unit/watch/symlink_cycle_test.cpp
+)
+target_link_libraries(test_symlink_cycle PRIVATE kairos_test_helpers)
+gtest_discover_tests(test_symlink_cycle)
+
+# ── Phase 3 Batch 7: Hybrid mode tests ───────────────────────────────
+
+# Native→debounce→targeted rescan→dedup
+add_executable(test_hybrid_mode
+    unit/watch/hybrid_mode_test.cpp
+)
+target_link_libraries(test_hybrid_mode PRIVATE kairos_test_helpers)
+gtest_discover_tests(test_hybrid_mode)
+
+# ── Phase 3 Batch 7: Config reload round-trip test ───────────────────
+
+# YAML modify → reload → verify
+add_executable(test_config_reload
+    integration/config_reload_test.cpp
+)
+target_link_libraries(test_config_reload PRIVATE kairos_test_helpers)
+gtest_discover_tests(test_config_reload)

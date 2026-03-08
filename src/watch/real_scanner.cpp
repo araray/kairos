@@ -11,9 +11,12 @@
 
 #include "kairos/watch/real_scanner.hpp"
 
+#include <spdlog/spdlog.h>
+
 #include <algorithm>
 #include <cstring>
 #include <system_error>
+#include <unordered_set>
 
 #ifndef _WIN32
 #include <grp.h>
@@ -278,12 +281,21 @@ std::vector<ScannedEntry> RealFilesystemScanner::scan(
     // Manual recursive scan with depth tracking.
     // We use a stack-based DFS instead of recursive_directory_iterator
     // because we need fine-grained depth control and exclude matching.
+    //
+    // Symlink cycle detection (§12.10): we track canonical paths visited
+    // during this scan. If a resolved path is already in the set, we
+    // skip it and log a warning. This prevents infinite recursion when
+    // symlinks form cycles (e.g., A → B → A).
     struct DirFrame {
         fs::path dir;
         int depth;
     };
 
     std::vector<DirFrame> stack;
+    std::unordered_set<std::string> visited_canonical;
+
+    // Register root as visited.
+    visited_canonical.insert(root_canonical.string());
     stack.push_back({root_canonical, 0});
 
     while (!stack.empty() && !stop.stop_requested()) {
@@ -312,6 +324,34 @@ std::vector<ScannedEntry> RealFilesystemScanner::scan(
 
             // Recurse into directories if within depth limit.
             if (entry.is_directory && depth < max_depth) {
+                // ── Symlink cycle detection ──────────────────────
+                // Resolve the canonical path. If we've already visited
+                // this canonical path, it's a cycle — skip with warning.
+                fs::path child_canonical;
+                if (entry.is_symlink) {
+                    child_canonical = fs::canonical(it->path(), ec);
+                    if (ec) {
+                        // Broken symlink target — skip recursion.
+                        continue;
+                    }
+                } else {
+                    child_canonical = it->path();
+                    // Normalize for consistent comparison.
+                    auto maybe = fs::canonical(child_canonical, ec);
+                    if (!ec) child_canonical = maybe;
+                }
+
+                std::string canonical_str = child_canonical.string();
+                if (visited_canonical.count(canonical_str)) {
+                    // Cycle detected — skip this directory.
+                    spdlog::warn(
+                        "Symlink cycle detected: '{}' resolves to "
+                        "already-visited '{}' — skipping",
+                        it->path().string(), canonical_str);
+                    continue;
+                }
+
+                visited_canonical.insert(canonical_str);
                 stack.push_back({it->path(), depth + 1});
             }
 

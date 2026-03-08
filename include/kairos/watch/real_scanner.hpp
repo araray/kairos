@@ -15,6 +15,7 @@
 #include <chrono>
 #include <optional>
 #include <regex>
+#include <unordered_set>
 
 namespace kairos::watch {
 
@@ -22,6 +23,16 @@ namespace kairos::watch {
 ///
 /// Thread safety: stateless after construction. Multiple threads may call
 /// scan() / stat_file() concurrently on different paths.
+///
+/// Symlink cycle detection (§12.10):
+///   When symlink_policy is Follow, the scanner tracks canonical paths
+///   visited during each scan traversal. If a resolved path is already
+///   in the set, the scanner skips it and logs a warning.
+///
+/// Hash computation (§12.6.3):
+///   Controlled by HashPolicy. Default (SizePlusMtime) computes hashes
+///   only when size or mtime differ from previous sample. The scanner
+///   can be configured per-scan via the hash_policy parameter.
 class RealFilesystemScanner : public IFilesystemScanner {
 public:
     /// Default constructor.
