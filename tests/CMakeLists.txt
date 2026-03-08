@@ -318,3 +318,30 @@ add_executable(test_config_reload
 )
 target_link_libraries(test_config_reload PRIVATE kairos_test_helpers)
 gtest_discover_tests(test_config_reload)
+
+# ── Phase 3 Batch 8: Pattern matching tests ──────────────────────────
+
+# Pattern regex matching in WatchEngine (§12.6.1)
+add_executable(test_pattern_matching
+    unit/watch/pattern_matching_test.cpp
+)
+target_link_libraries(test_pattern_matching PRIVATE kairos_test_helpers)
+gtest_discover_tests(test_pattern_matching)
+
+# ── Phase 3 Batch 8: Diagnostics endpoint tests ─────────────────────
+
+# get_recent_events ring buffer + get_status (§12.14)
+add_executable(test_diagnostics
+    unit/watch/diagnostics_test.cpp
+)
+target_link_libraries(test_diagnostics PRIVATE kairos_test_helpers)
+gtest_discover_tests(test_diagnostics)
+
+# ── Phase 3 Batch 8: End-to-end watch engine test ───────────────────
+
+# Real scanner + file mutations + pattern + hash + diagnostics
+add_executable(test_e2e_watch
+    integration/e2e_watch_test.cpp
+)
+target_link_libraries(test_e2e_watch PRIVATE kairos_test_helpers)
+gtest_discover_tests(test_e2e_watch)

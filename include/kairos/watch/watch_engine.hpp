@@ -103,6 +103,15 @@ public:
     /// Get status of all watch groups.
     [[nodiscard]] std::vector<WatchGroupStatus> get_status() const;
 
+    /// Get recent triggered events across all groups (for diagnostics/MCP).
+    /// Returns up to `limit` most recent events.
+    [[nodiscard]] std::vector<WatchTriggerResult> get_recent_events(
+        int limit = 50) const;
+
+    /// Get recent triggered events for a specific watch group.
+    [[nodiscard]] std::vector<WatchTriggerResult> get_recent_events(
+        const std::string& group_name, int limit = 50) const;
+
     /// Number of configured watch groups.
     [[nodiscard]] size_t group_count() const;
 
@@ -141,6 +150,14 @@ private:
     /// Computes hashes only for files where size/mtime changed vs previous.
     void apply_hashes(Sample& sample, const Sample& previous,
                       HashPolicy policy, std::stop_token stop);
+
+    /// Apply pattern regex matching per §12.6.1.
+    /// Reads file content (bounded by max_pattern_scan_bytes), applies
+    /// the watch group's pattern regex, and stores pattern_found.
+    /// Skips binary files (NUL byte in first 8KB) and files > threshold.
+    void apply_patterns(Sample& sample,
+                        const std::optional<std::string>& pattern,
+                        std::stop_token stop);
 
     /// Evaluate watch rules against a diff (with KEL evaluation).
     std::vector<WatchTriggerResult> evaluate_rules(
@@ -232,6 +249,23 @@ private:
 
     /// Whether native watcher is active.
     std::atomic<bool> native_watcher_active_{false};
+
+    // ── Recent events ring buffer (§12.14) ────────────────────────────
+    /// Stores the most recent N triggered events for diagnostics/MCP.
+    static constexpr size_t kRecentEventsCapacity = 200;
+    mutable std::mutex recent_events_mu_;
+    std::vector<WatchTriggerResult> recent_events_;  ///< Ring buffer.
+    size_t recent_events_head_ = 0;                  ///< Write position.
+    size_t recent_events_count_ = 0;                 ///< Current count.
+
+    /// Record a triggered event in the ring buffer.
+    void record_recent_event(const WatchTriggerResult& result);
+
+    // ── Pattern matching constants (§12.6.1) ──────────────────────────
+    /// Max file size to read for pattern matching (1 MB).
+    static constexpr int64_t kMaxPatternScanBytes = 1 * 1024 * 1024;
+    /// Number of bytes to probe for binary detection (NUL in first 8 KB).
+    static constexpr size_t kBinaryProbeBytes = 8192;
 
     // Thread.
     std::jthread thread_;

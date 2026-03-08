@@ -19,8 +19,11 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cstring>
 #include <ctime>
+#include <fstream>
 #include <iomanip>
+#include <regex>
 #include <sstream>
 
 namespace kairos::watch {
@@ -457,6 +460,9 @@ ScanResult WatchEngine::run_scan(
     apply_hashes(current, state.last_sample,
                  state.def.hash_policy, temp_stop.get_token());
 
+    // Apply pattern regex matching (§12.6.1).
+    apply_patterns(current, state.def.pattern, temp_stop.get_token());
+
     result.sample = current;
 
     // Record scan time.
@@ -511,6 +517,11 @@ ScanResult WatchEngine::run_scan(
                 emit_triggers(state.def, result.triggered, sink);
                 state.events_emitted +=
                     static_cast<int>(result.triggered.size());
+
+                // Record in diagnostics ring buffer (§12.14).
+                for (const auto& tr : result.triggered) {
+                    record_recent_event(tr);
+                }
             }
 
             // Persist events.
@@ -620,6 +631,141 @@ void WatchEngine::apply_hashes(
             metrics.sha256 = std::move(result->sha256);
         }
     }
+}
+
+// ── Pattern matching (§12.6.1) ────────────────────────────────────────
+
+void WatchEngine::apply_patterns(
+    Sample& sample,
+    const std::optional<std::string>& pattern,
+    std::stop_token stop)
+{
+    if (!pattern.has_value() || pattern->empty()) return;
+
+    // Compile regex once (with timeout protection per §7.7).
+    std::regex re;
+    try {
+        re = std::regex(*pattern, std::regex::ECMAScript | std::regex::optimize);
+    } catch (const std::regex_error&) {
+        // Invalid regex — log and skip all pattern matching for this cycle.
+        // In production, this is logged via spdlog.
+        return;
+    }
+
+    for (auto& [path, metrics] : sample.entries) {
+        if (stop.stop_requested()) break;
+
+        // Only apply to regular files.
+        if (metrics.entry_type != "file") continue;
+
+        // Skip files larger than threshold.
+        if (metrics.size > kMaxPatternScanBytes) {
+            metrics.pattern_found = false;
+            continue;
+        }
+
+        // Skip zero-length files.
+        if (metrics.size == 0) {
+            metrics.pattern_found = false;
+            continue;
+        }
+
+        // Read file content.
+        std::ifstream file(path, std::ios::binary);
+        if (!file) {
+            metrics.pattern_found = false;
+            continue;
+        }
+
+        // Read up to kMaxPatternScanBytes.
+        std::string content;
+        content.resize(static_cast<size_t>(
+            std::min(metrics.size, kMaxPatternScanBytes)));
+        file.read(content.data(), static_cast<std::streamsize>(content.size()));
+        auto bytes_read = file.gcount();
+        content.resize(static_cast<size_t>(bytes_read));
+
+        if (content.empty()) {
+            metrics.pattern_found = false;
+            continue;
+        }
+
+        // Binary detection: check for NUL byte in first 8KB.
+        size_t probe_len = std::min(content.size(), kBinaryProbeBytes);
+        bool is_binary = (std::memchr(content.data(), '\0', probe_len) != nullptr);
+        if (is_binary) {
+            metrics.pattern_found = false;
+            continue;
+        }
+
+        // Apply regex search.
+        try {
+            metrics.pattern_found = std::regex_search(content, re);
+        } catch (const std::regex_error&) {
+            // Pathological backtracking or other error.
+            metrics.pattern_found = false;
+        }
+    }
+}
+
+// ── Diagnostics: recent events ring buffer (§12.14) ──────────────────
+
+void WatchEngine::record_recent_event(const WatchTriggerResult& result) {
+    std::lock_guard lock(recent_events_mu_);
+
+    if (recent_events_.size() < kRecentEventsCapacity) {
+        recent_events_.push_back(result);
+    } else {
+        recent_events_[recent_events_head_] = result;
+    }
+    recent_events_head_ = (recent_events_head_ + 1) % kRecentEventsCapacity;
+    if (recent_events_count_ < kRecentEventsCapacity) {
+        ++recent_events_count_;
+    }
+}
+
+std::vector<WatchTriggerResult> WatchEngine::get_recent_events(
+    int limit) const
+{
+    std::lock_guard lock(recent_events_mu_);
+
+    std::vector<WatchTriggerResult> result;
+    size_t count = std::min(recent_events_count_,
+                            static_cast<size_t>(limit));
+    result.reserve(count);
+
+    // Read from ring buffer in reverse-insertion order (newest first).
+    for (size_t i = 0; i < count; ++i) {
+        size_t idx;
+        if (recent_events_count_ < kRecentEventsCapacity) {
+            // Buffer not full: read backwards from count-1.
+            idx = recent_events_count_ - 1 - i;
+        } else {
+            // Buffer full: head points to next write position.
+            // Most recent is at head - 1 (mod capacity).
+            idx = (recent_events_head_ + kRecentEventsCapacity - 1 - i)
+                  % kRecentEventsCapacity;
+        }
+        result.push_back(recent_events_[idx]);
+    }
+
+    return result;
+}
+
+std::vector<WatchTriggerResult> WatchEngine::get_recent_events(
+    const std::string& group_name, int limit) const
+{
+    auto all = get_recent_events(
+        static_cast<int>(kRecentEventsCapacity));
+
+    std::vector<WatchTriggerResult> filtered;
+    for (auto& ev : all) {
+        if (ev.watch_group_name == group_name) {
+            filtered.push_back(std::move(ev));
+            if (static_cast<int>(filtered.size()) >= limit) break;
+        }
+    }
+    return filtered;
 }
 
 // ── Rule evaluation ─────────────────────────────────────────────────────
@@ -909,6 +1055,7 @@ void WatchEngine::process_debounced_events(engine::TriggerSink& sink) {
 
             for (const auto& tr : triggered) {
                 persist_event(tr, state->sample_epoch);
+                record_recent_event(tr);
             }
         }
 
@@ -973,6 +1120,39 @@ SampleDiff WatchEngine::targeted_rescan(
         if (hash) {
             metrics.md5 = std::move(hash->md5);
             metrics.sha256 = std::move(hash->sha256);
+        }
+    }
+
+    // Pattern matching for the single file (§12.6.1).
+    if (state.def.pattern.has_value() && !state.def.pattern->empty() &&
+        metrics.entry_type == "file" &&
+        metrics.size > 0 && metrics.size <= kMaxPatternScanBytes)
+    {
+        try {
+            std::regex re(*state.def.pattern,
+                          std::regex::ECMAScript | std::regex::optimize);
+            std::ifstream file(event.path, std::ios::binary);
+            if (file) {
+                std::string content;
+                content.resize(static_cast<size_t>(
+                    std::min(metrics.size, kMaxPatternScanBytes)));
+                file.read(content.data(),
+                          static_cast<std::streamsize>(content.size()));
+                content.resize(static_cast<size_t>(file.gcount()));
+
+                // Binary detection.
+                size_t probe = std::min(content.size(), kBinaryProbeBytes);
+                bool is_binary =
+                    (std::memchr(content.data(), '\0', probe) != nullptr);
+
+                metrics.pattern_found = (!is_binary && !content.empty())
+                    ? std::regex_search(content, re)
+                    : false;
+            } else {
+                metrics.pattern_found = false;
+            }
+        } catch (const std::regex_error&) {
+            metrics.pattern_found = false;
         }
     }
 

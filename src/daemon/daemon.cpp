@@ -32,6 +32,7 @@
 #include "kairos/testing/fake_clock.hpp"
 #include "kairos/watch/real_scanner.hpp"
 #include "kairos/watch/watch_engine.hpp"
+#include "kairos/watch/file_watcher.hpp"
 
 #include <spdlog/spdlog.h>
 
@@ -277,12 +278,25 @@ int run_daemon(std::shared_ptr<const kairos::config::ConfigState> config) {
     // ── Step 15: Start Watch Engine thread ─────────────────────────
     watch::WatchEngineConfig watch_cfg;
     watch::RealFilesystemScanner real_scanner;  // Production scanner.
+
+    // Create native watcher backend (inotify/FSEvents/RDCW).
+    // Returns nullptr on unsupported platforms — WatchEngine handles
+    // the null case by using sample-only mode (§12.2, §27.2).
+    auto native_watcher = watch::create_native_watcher();
+    if (native_watcher) {
+        log->info("Native watcher backend: {}",
+                  native_watcher->platform_name());
+    } else {
+        log->info("No native watcher backend — using sample-only mode");
+    }
+
     watch::WatchEngine watch_engine(
         watch_cfg,
         watch::WatchEngine::Dependencies{
             .clock = &clock,
             .scanner = &real_scanner,
             .db_writer = &db_writer,
+            .native_watcher = native_watcher.get(),
         },
         registry->watch_groups());
 
