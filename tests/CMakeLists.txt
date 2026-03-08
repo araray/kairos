@@ -167,3 +167,28 @@ add_executable(test_pipeline
 )
 target_link_libraries(test_pipeline PRIVATE kairos_test_helpers)
 gtest_discover_tests(test_pipeline)
+
+# ── Phase 3 Batch 3: Watch engine tests ──────────────────────────────────
+
+# Sample+diff unit tests
+add_executable(test_watch_sample
+    unit/watch/sample_test.cpp
+)
+target_link_libraries(test_watch_sample PRIVATE kairos_test_helpers)
+gtest_discover_tests(test_watch_sample)
+
+# Watch engine component tests (FakeFilesystem + FakeClock)
+add_executable(test_watch_engine
+    unit/watch/watch_engine_test.cpp
+)
+target_link_libraries(test_watch_engine PRIVATE kairos_test_helpers)
+gtest_discover_tests(test_watch_engine)
+
+# ── Integration tests ────────────────────────────────────────────────────
+
+# End-to-end pipeline tests (schedule→run, watch→trigger)
+add_executable(test_integration
+    integration/integration_test.cpp
+)
+target_link_libraries(test_integration PRIVATE kairos_test_helpers)
+gtest_discover_tests(test_integration)

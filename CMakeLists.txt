@@ -52,6 +52,8 @@ add_library(kairos_core STATIC
     src/engine/event_types.cpp
     src/engine/scheduler.cpp
     src/engine/pipeline.cpp
+    src/watch/sample.cpp
+    src/watch/watch_engine.cpp
 )
 
 target_include_directories(kairos_core PUBLIC

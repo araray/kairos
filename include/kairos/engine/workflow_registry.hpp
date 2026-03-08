@@ -12,6 +12,7 @@
 
 #include "kairos/engine/dag.hpp"
 #include "kairos/engine/trigger_types.hpp"
+#include "kairos/watch/watch_group_def.hpp"
 
 #include <chrono>
 #include <filesystem>
@@ -74,11 +75,14 @@ public:
     /// @param workflows  Loaded workflow definitions (with pre-built DAGs).
     /// @param triggers   All trigger entries (for the scheduler).
     /// @param standalone_jobs  Standalone job definitions (not in workflows).
+    /// @param watch_groups  Watch group definitions (for the watch engine).
     WorkflowRegistry(
         std::vector<WorkflowDef> workflows,
         std::vector<TimerEntry> triggers,
-        std::vector<JobDef> standalone_jobs = {})
+        std::vector<JobDef> standalone_jobs = {},
+        std::vector<watch::WatchGroupDef> watch_groups = {})
         : triggers_(std::move(triggers))
+        , watch_groups_(std::move(watch_groups))
     {
         for (auto& wf : workflows) {
             std::string id = wf.workflow_id;
@@ -204,11 +208,25 @@ public:
         return name;
     }
 
+    // ── Watch group queries ──────────────────────────────────────
+
+    /// All watch group definitions (for the watch engine).
+    [[nodiscard]] const std::vector<watch::WatchGroupDef>&
+    watch_groups() const {
+        return watch_groups_;
+    }
+
+    /// Number of watch groups.
+    [[nodiscard]] size_t watch_group_count() const {
+        return watch_groups_.size();
+    }
+
 private:
     std::unordered_map<std::string, WorkflowDef> workflow_defs_;
     std::unordered_map<std::string, JobDef> standalone_jobs_;
     std::unordered_map<std::string, const JobDef*> job_defs_;
     std::vector<TimerEntry> triggers_;
+    std::vector<watch::WatchGroupDef> watch_groups_;
 };
 
 }  // namespace kairos::engine
