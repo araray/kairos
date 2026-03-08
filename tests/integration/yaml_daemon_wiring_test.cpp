@@ -78,8 +78,8 @@ triggers:
             result.errors[0].message);
 
     EXPECT_EQ(result.workflows.size(), 1);
-    EXPECT_EQ(result.workflows[0].id, "build");
-    EXPECT_EQ(result.workflows[0].name, "Build Pipeline");
+    EXPECT_EQ(result.workflows[0].workflow_id, "build");
+    EXPECT_EQ(result.workflows[0].workflow_name, "Build Pipeline");
 
     // Should have extracted triggers.
     EXPECT_GE(result.triggers.size(), 1);
@@ -222,7 +222,7 @@ jobs:
     // Reload should pick up the new file.
     auto result2 = load_workflows_dir(test_dir_ / "workflows");
     EXPECT_EQ(result2.workflows.size(), 1);
-    EXPECT_EQ(result2.workflows[0].id, "new_wf");
+    EXPECT_EQ(result2.workflows[0].workflow_id, "new_wf");
 }
 
 // ── Test: missing directory doesn't crash ───────────────────────────────
