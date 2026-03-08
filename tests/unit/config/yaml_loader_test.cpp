@@ -107,7 +107,7 @@ jobs:
     EXPECT_EQ(wf.dag.size(), 3u);
 
     // Topological sort should produce a valid order.
-    auto order = wf.dag.topological_sort();
+    auto order = wf.dag.topological_order();
     ASSERT_EQ(order.size(), 3u);
 
     // Build should come first.

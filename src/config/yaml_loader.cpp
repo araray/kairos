@@ -16,6 +16,7 @@
 
 #include <algorithm>
 #include <fstream>
+#include <iomanip>
 #include <regex>
 #include <sstream>
 #include <stdexcept>
@@ -496,9 +497,8 @@ YamlLoadResult parse_workflow_node(
         dag_nodes.push_back(std::move(dn));
     }
 
-    WorkflowDag dag;
     try {
-        dag = WorkflowDag::build(dag_nodes);
+        auto dag = WorkflowDag::build(dag_nodes);
 
         // Check for cycles (spec §6.7 step 5).
         auto cycle = dag.find_cycle();
@@ -512,27 +512,29 @@ YamlLoadResult parse_workflow_node(
                 "Cycle detected in job dependencies: " + cycle_str});
             return result;
         }
+
+        // ── Build workflow def ──────────────────────────────────
+        WorkflowDef wf{
+            wf_id,
+            wf_name,
+            std::move(jobs),
+            std::move(dag)
+        };
+
+        // ── Extract triggers ────────────────────────────────────
+        auto triggers = parse_triggers(
+            root["triggers"], wf.workflow_id, wf.workflow_name,
+            TriggerEvent::TargetKind::Workflow,
+            result.errors, file);
+
+        result.triggers = std::move(triggers);
+        result.workflows.push_back(std::move(wf));
+
     } catch (const std::exception& e) {
         result.errors.push_back({file, "jobs",
             std::string("DAG construction failed: ") + e.what()});
         return result;
     }
-
-    // ── Build workflow def ──────────────────────────────────────
-    WorkflowDef wf;
-    wf.workflow_id = wf_id;
-    wf.workflow_name = wf_name;
-    wf.jobs = std::move(jobs);
-    wf.dag = std::move(dag);
-
-    // ── Extract triggers ────────────────────────────────────────
-    auto triggers = parse_triggers(
-        root["triggers"], wf.workflow_id, wf.workflow_name,
-        TriggerEvent::TargetKind::Workflow,
-        result.errors, file);
-
-    result.triggers = std::move(triggers);
-    result.workflows.push_back(std::move(wf));
 
     return result;
 }

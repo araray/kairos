@@ -171,14 +171,14 @@ TEST(CronTriggerTest, InvalidExpressionThrows) {
     CronTrigger ct{"this is not a cron expression"};
 
     auto after = make_time(2026, 3, 7, 14, 0, 0);
-    EXPECT_THROW(ct.next_fire_after(after), std::runtime_error);
+    EXPECT_THROW((void)ct.next_fire_after(after), std::runtime_error);
 }
 
 TEST(CronTriggerTest, EmptyExpressionThrows) {
     CronTrigger ct{""};
 
     auto after = make_time(2026, 3, 7, 14, 0, 0);
-    EXPECT_THROW(ct.next_fire_after(after), std::runtime_error);
+    EXPECT_THROW((void)ct.next_fire_after(after), std::runtime_error);
 }
 
 // ═══════════════════════════════════════════════════════════════════════

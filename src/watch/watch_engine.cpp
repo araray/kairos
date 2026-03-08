@@ -63,16 +63,10 @@ kel::EvalContext build_watch_kel_context(
     ctx.variables["watch_group"] = kel::KelValue(group_name);
     ctx.variables["event"] = kel::KelValue(event_type);
 
-    // File metrics as a pseudo-object using a "file." prefix convention.
-    // We register member accessors for the "file" variable.
-    ctx.variables["file"] = kel::KelValue(std::string("file_obj"));
-    ctx.variables["prev_file"] = kel::KelValue(
-        prev_metrics ? std::string("prev_file_obj")
-                     : std::string(""));
-
-    // Direct variable bindings for common KEL expressions like
-    // "file.size > X" — we expose file_size, file_mtime, etc. as
-    // flat variables since KEL v1 doesn't support dot-access on maps.
+    // File metrics as flat variables for KEL expressions like
+    // "file_size > X", "file_type == 'file'", etc.
+    // KEL v1 doesn't support dot-access on maps; flat variables
+    // provide equivalent functionality per spec §12.11.
     ctx.variables["file_size"] = kel::KelValue(file_metrics.size);
     ctx.variables["file_type"] = kel::KelValue(file_metrics.entry_type);
     ctx.variables["file_path"] = kel::KelValue(file_metrics.path);
@@ -101,45 +95,6 @@ kel::EvalContext build_watch_kel_context(
                 kel::KelValue(*prev_metrics->pattern_found);
         }
     }
-
-    // Member resolver for "file.X" and "prev_file.X" syntax.
-    // The KEL evaluator calls members["file_obj.size"](file_obj_value).
-    auto make_member = [&](const FileMetrics& m) {
-        return [&m](const std::string& member_name) -> kel::KelValue {
-            if (member_name == "size") return kel::KelValue(m.size);
-            if (member_name == "path") return kel::KelValue(m.path);
-            if (member_name == "type") return kel::KelValue(m.entry_type);
-            if (member_name == "permissions") return kel::KelValue(m.permissions);
-            if (member_name == "pattern_found") {
-                return kel::KelValue(m.pattern_found.value_or(false));
-            }
-            if (member_name == "md5") {
-                return kel::KelValue(m.md5.value_or(""));
-            }
-            if (member_name == "sha256") {
-                return kel::KelValue(m.sha256.value_or(""));
-            }
-            return kel::KelValue(false);
-        };
-    };
-
-    // Register member resolvers.
-    auto file_resolver = make_member(file_metrics);
-    ctx.members["file_obj.size"] = [file_resolver](const kel::KelValue&) {
-        return file_resolver("size");
-    };
-    ctx.members["file_obj.path"] = [file_resolver](const kel::KelValue&) {
-        return file_resolver("path");
-    };
-    ctx.members["file_obj.type"] = [file_resolver](const kel::KelValue&) {
-        return file_resolver("type");
-    };
-    ctx.members["file_obj.permissions"] = [file_resolver](const kel::KelValue&) {
-        return file_resolver("permissions");
-    };
-    ctx.members["file_obj.pattern_found"] = [file_resolver](const kel::KelValue&) {
-        return file_resolver("pattern_found");
-    };
 
     return ctx;
 }

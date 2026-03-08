@@ -23,8 +23,19 @@ using namespace kairos::testing;
 
 // ── Helpers ─────────────────────────────────────────────────────────────
 
-/// Create a WatchEngine configured for testing with a FakeClock,
-/// FakeFilesystemScanner, and no DB writer.
+/// Create a FakeFileEntry with a given size.
+FakeFileEntry make_entry(std::uintmax_t size) {
+    FakeFileEntry e;
+    e.size = size;
+    e.mtime = std::chrono::system_clock::now();
+    return e;
+}
+
+/// A TriggerSink that accepts everything (returns true).
+TriggerSink make_null_sink() {
+    return [](TriggerEvent) { return true; };
+}
+
 class KelRulesTest : public ::testing::Test {
 protected:
     void SetUp() override {
@@ -33,7 +44,6 @@ protected:
         scanner_ = std::make_unique<FakeFilesystemScanner>(*fake_fs_);
     }
 
-    /// Build a WatchEngine with the given groups.
     std::unique_ptr<WatchEngine> make_engine(
         std::vector<WatchGroupDef> groups)
     {
@@ -49,7 +59,6 @@ protected:
             config, deps, std::move(groups));
     }
 
-    /// Build a WatchGroupDef with given rules.
     WatchGroupDef make_group(
         const std::string& name,
         const std::vector<std::string>& watch_items,
@@ -67,7 +76,6 @@ protected:
         return group;
     }
 
-    /// Build a WatchRuleDef.
     WatchRuleDef make_rule(
         const std::string& name,
         const std::string& condition,
@@ -80,18 +88,6 @@ protected:
         rule.event_types = std::move(event_types);
         rule.severity = severity;
         return rule;
-    }
-
-    /// Collect events by running scan_once twice (first = baseline).
-    std::vector<ScanResult> collect_events(WatchEngine& engine) {
-        // Null sink: collect nothing via trigger bus (we check ScanResult).
-        TriggerSink null_sink = [](TriggerEvent) {};
-
-        // First scan: baseline.
-        engine.scan_once(null_sink);
-
-        // Second scan: events from diff.
-        return engine.scan_once(null_sink);
     }
 
     std::unique_ptr<FakeClock> clock_;
@@ -110,14 +106,11 @@ TEST_F(KelRulesTest, ConditionTrue_AlwaysFires) {
 
     auto engine = make_engine({group});
 
-    // Baseline: empty filesystem.
-    // First scan establishes baseline.
-    TriggerSink null_sink = [](TriggerEvent) {};
-    engine->scan_once(null_sink);
+    auto sink = make_null_sink();
+    engine->scan_once(sink);
 
-    // Add a file and scan again.
-    fake_fs_->add_file("/data/new.txt", "content", 7);
-    auto results = engine->scan_once(null_sink);
+    fake_fs_->add_file("/data/new.txt", make_entry(7));
+    auto results = engine->scan_once(sink);
 
     ASSERT_EQ(results.size(), 1u);
     EXPECT_GE(results[0].triggered.size(), 1u);
@@ -135,11 +128,11 @@ TEST_F(KelRulesTest, ConditionFalse_NeverFires) {
 
     auto engine = make_engine({group});
 
-    TriggerSink null_sink = [](TriggerEvent) {};
-    engine->scan_once(null_sink);
+    auto sink = make_null_sink();
+    engine->scan_once(sink);
 
-    fake_fs_->add_file("/data/new.txt", "content", 7);
-    auto results = engine->scan_once(null_sink);
+    fake_fs_->add_file("/data/new.txt", make_entry(7));
+    auto results = engine->scan_once(sink);
 
     ASSERT_EQ(results.size(), 1u);
     EXPECT_EQ(results[0].triggered.size(), 0u);
@@ -156,24 +149,22 @@ TEST_F(KelRulesTest, FileSizeCondition_LargeFile) {
 
     auto engine = make_engine({group});
 
-    TriggerSink null_sink = [](TriggerEvent) {};
-    engine->scan_once(null_sink);
+    auto sink = make_null_sink();
+    engine->scan_once(sink);
 
-    // Add a small file (should NOT trigger).
-    fake_fs_->add_file("/data/small.txt", "hi", 2);
-    // Add a large file (SHOULD trigger).
-    fake_fs_->add_file("/data/big.txt", std::string(2000, 'X'), 2000);
+    // Small file — should NOT trigger.
+    fake_fs_->add_file("/data/small.txt", make_entry(2));
+    // Large file — SHOULD trigger.
+    fake_fs_->add_file("/data/big.txt", make_entry(2000));
 
-    auto results = engine->scan_once(null_sink);
+    auto results = engine->scan_once(sink);
 
     ASSERT_EQ(results.size(), 1u);
 
-    // Find triggered rules.
     int triggered_count = 0;
     for (const auto& tr : results[0].triggered) {
         if (tr.rule_name == "large_file") {
             ++triggered_count;
-            // Should be the big file.
             ASSERT_EQ(tr.affected_paths.size(), 1u);
             EXPECT_NE(tr.affected_paths[0].find("big.txt"),
                       std::string::npos);
@@ -189,14 +180,13 @@ TEST_F(KelRulesTest, FileSizeCondition_SmallFileOnly) {
 
     auto engine = make_engine({group});
 
-    TriggerSink null_sink = [](TriggerEvent) {};
-    engine->scan_once(null_sink);
+    auto sink = make_null_sink();
+    engine->scan_once(sink);
 
-    // Only small files — no triggers.
-    fake_fs_->add_file("/data/a.txt", "hello", 5);
-    fake_fs_->add_file("/data/b.txt", "world", 5);
+    fake_fs_->add_file("/data/a.txt", make_entry(5));
+    fake_fs_->add_file("/data/b.txt", make_entry(5));
 
-    auto results = engine->scan_once(null_sink);
+    auto results = engine->scan_once(sink);
     ASSERT_EQ(results.size(), 1u);
     EXPECT_EQ(results[0].triggered.size(), 0u);
 }
@@ -212,19 +202,14 @@ TEST_F(KelRulesTest, PatternFoundCondition) {
 
     auto engine = make_engine({group});
 
-    TriggerSink null_sink = [](TriggerEvent) {};
-    engine->scan_once(null_sink);
+    auto sink = make_null_sink();
+    engine->scan_once(sink);
 
-    // Add files. The FakeFilesystem doesn't set pattern_found by default,
-    // so both files should NOT trigger on creation.
-    // Pattern detection happens during scanning based on regex matching.
-    // For this test, we verify that the KEL evaluator correctly handles
-    // the boolean check even when pattern_found is false/absent.
-    fake_fs_->add_file("/data/normal.txt", "no errors here", 15);
+    // FakeFilesystem doesn't set pattern_found, so it defaults to false.
+    fake_fs_->add_file("/data/normal.txt", make_entry(15));
 
-    auto results = engine->scan_once(null_sink);
+    auto results = engine->scan_once(sink);
     ASSERT_EQ(results.size(), 1u);
-    // Should NOT trigger because file_pattern_found defaults to false.
     EXPECT_EQ(results[0].triggered.size(), 0u);
 }
 
@@ -234,19 +219,18 @@ TEST_F(KelRulesTest, PatternFoundCondition) {
 
 TEST_F(KelRulesTest, BooleanAndCondition) {
     auto group = make_group("test", {"/data"}, {
-        // Only fire for large files of type "file".
         make_rule("large_and_file",
                   "file_size > 100 and file_type == \"file\""),
     });
 
     auto engine = make_engine({group});
 
-    TriggerSink null_sink = [](TriggerEvent) {};
-    engine->scan_once(null_sink);
+    auto sink = make_null_sink();
+    engine->scan_once(sink);
 
-    fake_fs_->add_file("/data/big.txt", std::string(500, 'A'), 500);
+    fake_fs_->add_file("/data/big.txt", make_entry(500));
 
-    auto results = engine->scan_once(null_sink);
+    auto results = engine->scan_once(sink);
     ASSERT_EQ(results.size(), 1u);
     EXPECT_GE(results[0].triggered.size(), 1u);
 }
@@ -259,18 +243,17 @@ TEST_F(KelRulesTest, BooleanOrCondition) {
 
     auto engine = make_engine({group});
 
-    TriggerSink null_sink = [](TriggerEvent) {};
-    engine->scan_once(null_sink);
+    auto sink = make_null_sink();
+    engine->scan_once(sink);
 
     // Tiny file (size 2) — should trigger via "or file_size < 5".
-    fake_fs_->add_file("/data/tiny.txt", "ab", 2);
+    fake_fs_->add_file("/data/tiny.txt", make_entry(2));
     // Medium file (size 50) — should NOT trigger.
-    fake_fs_->add_file("/data/medium.txt", std::string(50, 'M'), 50);
+    fake_fs_->add_file("/data/medium.txt", make_entry(50));
 
-    auto results = engine->scan_once(null_sink);
+    auto results = engine->scan_once(sink);
     ASSERT_EQ(results.size(), 1u);
 
-    // Only the tiny file should trigger.
     int triggered_count = 0;
     for (const auto& tr : results[0].triggered) {
         if (tr.rule_name == "big_or_small") {
@@ -286,26 +269,21 @@ TEST_F(KelRulesTest, BooleanOrCondition) {
 
 TEST_F(KelRulesTest, EventTypeFilterWithKel) {
     auto group = make_group("test", {"/data"}, {
-        // Only fire on content_changed AND if the file is large.
         make_rule("big_change", "file_size > 100",
                   {"content_changed"}),
-        // Fire on any file_created, no KEL condition.
         make_rule("any_created", "true", {"file_created"}),
     });
 
     auto engine = make_engine({group});
 
-    TriggerSink null_sink = [](TriggerEvent) {};
-    engine->scan_once(null_sink);
+    auto sink = make_null_sink();
+    engine->scan_once(sink);
 
-    // Create a new file.
-    fake_fs_->add_file("/data/new.txt", "hello world", 11);
+    fake_fs_->add_file("/data/new.txt", make_entry(11));
 
-    auto results = engine->scan_once(null_sink);
+    auto results = engine->scan_once(sink);
     ASSERT_EQ(results.size(), 1u);
 
-    // "any_created" should fire (file_created event, condition=true).
-    // "big_change" should NOT fire (file_created, not content_changed).
     bool found_created = false;
     bool found_big_change = false;
     for (const auto& tr : results[0].triggered) {
@@ -327,14 +305,13 @@ TEST_F(KelRulesTest, InvalidKelExpression_DoesNotFire) {
 
     auto engine = make_engine({group});
 
-    TriggerSink null_sink = [](TriggerEvent) {};
-    engine->scan_once(null_sink);
+    auto sink = make_null_sink();
+    engine->scan_once(sink);
 
-    fake_fs_->add_file("/data/test.txt", "data", 4);
+    fake_fs_->add_file("/data/test.txt", make_entry(4));
 
-    auto results = engine->scan_once(null_sink);
+    auto results = engine->scan_once(sink);
     ASSERT_EQ(results.size(), 1u);
-    // Invalid KEL should not trigger (fails gracefully).
     EXPECT_EQ(results[0].triggered.size(), 0u);
 }
 
@@ -344,17 +321,17 @@ TEST_F(KelRulesTest, InvalidKelExpression_DoesNotFire) {
 
 TEST_F(KelRulesTest, EmptyCondition_AlwaysFires) {
     auto group = make_group("test", {"/data"}, {
-        make_rule("no_condition", ""),  // Empty condition.
+        make_rule("no_condition", ""),
     });
 
     auto engine = make_engine({group});
 
-    TriggerSink null_sink = [](TriggerEvent) {};
-    engine->scan_once(null_sink);
+    auto sink = make_null_sink();
+    engine->scan_once(sink);
 
-    fake_fs_->add_file("/data/test.txt", "data", 4);
+    fake_fs_->add_file("/data/test.txt", make_entry(4));
 
-    auto results = engine->scan_once(null_sink);
+    auto results = engine->scan_once(sink);
     ASSERT_EQ(results.size(), 1u);
     EXPECT_GE(results[0].triggered.size(), 1u);
 }
@@ -372,15 +349,14 @@ TEST_F(KelRulesTest, MultipleRules_OnlyMatchingFire) {
 
     auto engine = make_engine({group});
 
-    TriggerSink null_sink = [](TriggerEvent) {};
-    engine->scan_once(null_sink);
+    auto sink = make_null_sink();
+    engine->scan_once(sink);
 
-    fake_fs_->add_file("/data/test.txt", "hello", 5);
+    fake_fs_->add_file("/data/test.txt", make_entry(5));
 
-    auto results = engine->scan_once(null_sink);
+    auto results = engine->scan_once(sink);
     ASSERT_EQ(results.size(), 1u);
 
-    // "always" fires, "never" doesn't, "size_check" doesn't (5 < 50).
     bool found_always = false, found_never = false, found_size = false;
     for (const auto& tr : results[0].triggered) {
         if (tr.rule_name == "always") found_always = true;
