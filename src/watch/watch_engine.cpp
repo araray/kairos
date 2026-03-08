@@ -14,6 +14,7 @@
 #include "kairos/watch/watch_engine.hpp"
 #include "kairos/core/id_generator.hpp"
 #include "kairos/kel/evaluator.hpp"
+#include "kairos/kel/errors.hpp"
 
 #include <algorithm>
 #include <chrono>
