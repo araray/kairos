@@ -101,7 +101,7 @@ TEST_F(DiagnosticsTest, GetRecentEventsEmptyInitially) {
 
 TEST_F(DiagnosticsTest, GetRecentEventsAfterScans) {
     auto engine = make_engine();
-    engine::TriggerSink sink = [](engine::TriggerEvent) {};
+    engine::TriggerSink sink = [](engine::TriggerEvent) { return true; };
 
     // First scan (baseline — no events per EventWatcher parity).
     engine->scan_once(sink);
@@ -121,7 +121,7 @@ TEST_F(DiagnosticsTest, GetRecentEventsAfterScans) {
 
 TEST_F(DiagnosticsTest, GetRecentEventsNewestFirst) {
     auto engine = make_engine();
-    engine::TriggerSink sink = [](engine::TriggerEvent) {};
+    engine::TriggerSink sink = [](engine::TriggerEvent) { return true; };
 
     // Baseline.
     engine->scan_once(sink);
@@ -146,7 +146,7 @@ TEST_F(DiagnosticsTest, GetRecentEventsNewestFirst) {
 
 TEST_F(DiagnosticsTest, GetRecentEventsFilterByGroup) {
     auto engine = make_engine();
-    engine::TriggerSink sink = [](engine::TriggerEvent) {};
+    engine::TriggerSink sink = [](engine::TriggerEvent) { return true; };
 
     // Baseline.
     engine->scan_once(sink);
@@ -172,7 +172,7 @@ TEST_F(DiagnosticsTest, GetRecentEventsFilterByGroup) {
 
 TEST_F(DiagnosticsTest, GetRecentEventsLimitRespected) {
     auto engine = make_engine();
-    engine::TriggerSink sink = [](engine::TriggerEvent) {};
+    engine::TriggerSink sink = [](engine::TriggerEvent) { return true; };
 
     // Baseline.
     engine->scan_once(sink);
@@ -181,7 +181,7 @@ TEST_F(DiagnosticsTest, GetRecentEventsLimitRespected) {
     for (int i = 0; i < 5; ++i) {
         auto T = std::chrono::system_clock::now() + std::chrono::seconds(i + 1);
         fake_fs_.modify_file("/watched_a/file1.txt", {
-            .size = 100 + i * 10, .mtime = T, .is_directory = false});
+            .size = static_cast<std::uintmax_t>(100 + i * 10), .mtime = T, .is_directory = false});
         engine->scan_once(sink);
     }
 
@@ -194,7 +194,7 @@ TEST_F(DiagnosticsTest, GetRecentEventsLimitRespected) {
 
 TEST_F(DiagnosticsTest, ScanOnceReturnsCorrectStructure) {
     auto engine = make_engine();
-    engine::TriggerSink sink = [](engine::TriggerEvent) {};
+    engine::TriggerSink sink = [](engine::TriggerEvent) { return true; };
 
     // First scan.
     auto results = engine->scan_once(sink);
@@ -211,7 +211,7 @@ TEST_F(DiagnosticsTest, ScanOnceReturnsCorrectStructure) {
 
 TEST_F(DiagnosticsTest, ScanGroupReturnsResultForSpecificGroup) {
     auto engine = make_engine();
-    engine::TriggerSink sink = [](engine::TriggerEvent) {};
+    engine::TriggerSink sink = [](engine::TriggerEvent) { return true; };
 
     auto result = engine->scan_group("group_a", sink);
     EXPECT_FALSE(result.sample.empty());
@@ -219,7 +219,7 @@ TEST_F(DiagnosticsTest, ScanGroupReturnsResultForSpecificGroup) {
 
 TEST_F(DiagnosticsTest, ScanGroupUnknownReturnsEmpty) {
     auto engine = make_engine();
-    engine::TriggerSink sink = [](engine::TriggerEvent) {};
+    engine::TriggerSink sink = [](engine::TriggerEvent) { return true; };
 
     auto result = engine->scan_group("nonexistent_group", sink);
     EXPECT_TRUE(result.sample.empty());
@@ -247,7 +247,7 @@ TEST_F(DiagnosticsTest, GetStatusReportsAllGroups) {
 
 TEST_F(DiagnosticsTest, GetStatusUpdatesAfterScan) {
     auto engine = make_engine();
-    engine::TriggerSink sink = [](engine::TriggerEvent) {};
+    engine::TriggerSink sink = [](engine::TriggerEvent) { return true; };
 
     engine->scan_once(sink);
 

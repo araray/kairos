@@ -18,6 +18,7 @@
 #include "kairos/testing/fake_clock.hpp"
 #include "kairos/testing/fake_filesystem.hpp"
 #include "kairos/testing/fake_fs_scanner.hpp"
+#include "kairos/watch/real_scanner.hpp"
 #include "kairos/watch/watch_engine.hpp"
 
 #include <gtest/gtest.h>
@@ -68,18 +69,11 @@ protected:
     }
 
     /// Build a WatchEngine with the given pattern for temp_dir.
-    struct EngineSetup {
-        testing::FakeClock clock;
-        RealFilesystemScanner scanner;
-        WatchEngine* engine = nullptr;
-
-        std::unique_ptr<WatchEngine> engine_ptr;
-    };
-
-    EngineSetup make_engine(const std::optional<std::string>& pattern,
-                             HashPolicy hp = HashPolicy::MtimeOnly) {
-        EngineSetup s;
-
+    /// Clock and scanner are fixture members (non-movable).
+    std::unique_ptr<WatchEngine> make_engine(
+        const std::optional<std::string>& pattern,
+        HashPolicy hp = HashPolicy::MtimeOnly)
+    {
         WatchGroupDef group;
         group.group_id = "wg_test_pattern";
         group.group_name = "pattern_test";
@@ -92,16 +86,16 @@ protected:
 
         WatchEngineConfig cfg;
         WatchEngine::Dependencies deps{
-            .clock = &s.clock,
-            .scanner = &s.scanner,
+            .clock = &clock_,
+            .scanner = &scanner_,
         };
 
-        s.engine_ptr = std::make_unique<WatchEngine>(
+        return std::make_unique<WatchEngine>(
             cfg, deps, std::vector<WatchGroupDef>{group});
-        s.engine = s.engine_ptr.get();
-        return s;
     }
 
+    testing::FakeClock clock_;
+    RealFilesystemScanner scanner_;
     fs::path temp_dir_;
 };
 
@@ -111,10 +105,10 @@ TEST_F(PatternMatchingTest, PatternFoundInTextFile) {
     write_file("app.log", "2026-03-08 12:00:00 ERROR Something went wrong\n"
                            "2026-03-08 12:01:00 INFO All good\n");
 
-    auto setup = make_engine("ERROR");
-    engine::TriggerSink sink = [](engine::TriggerEvent) {};
+    auto engine = make_engine("ERROR");
+    engine::TriggerSink sink = [](engine::TriggerEvent) { return true; };
 
-    auto results = setup.engine->scan_once(sink);
+    auto results = engine->scan_once(sink);
     ASSERT_EQ(results.size(), 1u);
 
     auto& sample = results[0].sample;
@@ -132,10 +126,10 @@ TEST_F(PatternMatchingTest, PatternFoundInTextFile) {
 TEST_F(PatternMatchingTest, PatternNotFoundInTextFile) {
     write_file("clean.log", "2026-03-08 INFO Everything is fine\n");
 
-    auto setup = make_engine("CRITICAL");
-    engine::TriggerSink sink = [](engine::TriggerEvent) {};
+    auto engine = make_engine("CRITICAL");
+    engine::TriggerSink sink = [](engine::TriggerEvent) { return true; };
 
-    auto results = setup.engine->scan_once(sink);
+    auto results = engine->scan_once(sink);
     ASSERT_EQ(results.size(), 1u);
 
     for (const auto& [path, m] : results[0].sample.entries) {
@@ -149,10 +143,10 @@ TEST_F(PatternMatchingTest, PatternNotFoundInTextFile) {
 TEST_F(PatternMatchingTest, BinaryFileSkipped) {
     write_binary("program.exe", 4096);
 
-    auto setup = make_engine("ERROR");
-    engine::TriggerSink sink = [](engine::TriggerEvent) {};
+    auto engine = make_engine("ERROR");
+    engine::TriggerSink sink = [](engine::TriggerEvent) { return true; };
 
-    auto results = setup.engine->scan_once(sink);
+    auto results = engine->scan_once(sink);
     ASSERT_EQ(results.size(), 1u);
 
     for (const auto& [path, m] : results[0].sample.entries) {
@@ -176,10 +170,10 @@ TEST_F(PatternMatchingTest, LargeFileSkipped) {
         }
     }
 
-    auto setup = make_engine("ERROR");
-    engine::TriggerSink sink = [](engine::TriggerEvent) {};
+    auto engine = make_engine("ERROR");
+    engine::TriggerSink sink = [](engine::TriggerEvent) { return true; };
 
-    auto results = setup.engine->scan_once(sink);
+    auto results = engine->scan_once(sink);
     ASSERT_EQ(results.size(), 1u);
 
     for (const auto& [p, m] : results[0].sample.entries) {
@@ -194,10 +188,10 @@ TEST_F(PatternMatchingTest, LargeFileSkipped) {
 TEST_F(PatternMatchingTest, EmptyFileSkipped) {
     write_file("empty.log", "");
 
-    auto setup = make_engine("ERROR");
-    engine::TriggerSink sink = [](engine::TriggerEvent) {};
+    auto engine = make_engine("ERROR");
+    engine::TriggerSink sink = [](engine::TriggerEvent) { return true; };
 
-    auto results = setup.engine->scan_once(sink);
+    auto results = engine->scan_once(sink);
     ASSERT_EQ(results.size(), 1u);
 
     for (const auto& [p, m] : results[0].sample.entries) {
@@ -212,11 +206,11 @@ TEST_F(PatternMatchingTest, InvalidRegexHandledGracefully) {
     write_file("data.txt", "Some content with ERROR in it\n");
 
     // Invalid regex: unmatched parenthesis.
-    auto setup = make_engine("(ERROR");
-    engine::TriggerSink sink = [](engine::TriggerEvent) {};
+    auto engine = make_engine("(ERROR");
+    engine::TriggerSink sink = [](engine::TriggerEvent) { return true; };
 
     // Should not crash.
-    auto results = setup.engine->scan_once(sink);
+    auto results = engine->scan_once(sink);
     ASSERT_EQ(results.size(), 1u);
     // Pattern_found should be unset (no match attempted).
 }
@@ -224,10 +218,10 @@ TEST_F(PatternMatchingTest, InvalidRegexHandledGracefully) {
 TEST_F(PatternMatchingTest, NoPatternMeansNoScan) {
     write_file("data.txt", "ERROR content\n");
 
-    auto setup = make_engine(std::nullopt);
-    engine::TriggerSink sink = [](engine::TriggerEvent) {};
+    auto engine = make_engine(std::nullopt);
+    engine::TriggerSink sink = [](engine::TriggerEvent) { return true; };
 
-    auto results = setup.engine->scan_once(sink);
+    auto results = engine->scan_once(sink);
     ASSERT_EQ(results.size(), 1u);
 
     for (const auto& [p, m] : results[0].sample.entries) {
@@ -243,10 +237,10 @@ TEST_F(PatternMatchingTest, DirectoriesSkipped) {
     fs::create_directories(temp_dir_ / "subdir");
     write_file("subdir/file.txt", "ERROR in here\n");
 
-    auto setup = make_engine("ERROR");
-    engine::TriggerSink sink = [](engine::TriggerEvent) {};
+    auto engine = make_engine("ERROR");
+    engine::TriggerSink sink = [](engine::TriggerEvent) { return true; };
 
-    auto results = setup.engine->scan_once(sink);
+    auto results = engine->scan_once(sink);
     ASSERT_EQ(results.size(), 1u);
 
     for (const auto& [p, m] : results[0].sample.entries) {
@@ -261,10 +255,10 @@ TEST_F(PatternMatchingTest, DirectoriesSkipped) {
 TEST_F(PatternMatchingTest, RegexPatternWithAlternation) {
     write_file("multi.log", "2026-03-08 FATAL Something crashed\n");
 
-    auto setup = make_engine("ERROR|FATAL|CRITICAL");
-    engine::TriggerSink sink = [](engine::TriggerEvent) {};
+    auto engine = make_engine("ERROR|FATAL|CRITICAL");
+    engine::TriggerSink sink = [](engine::TriggerEvent) { return true; };
 
-    auto results = setup.engine->scan_once(sink);
+    auto results = engine->scan_once(sink);
     ASSERT_EQ(results.size(), 1u);
 
     for (const auto& [p, m] : results[0].sample.entries) {
@@ -279,18 +273,18 @@ TEST_F(PatternMatchingTest, RegexPatternWithAlternation) {
 TEST_F(PatternMatchingTest, PatternFoundChangeTriggersDiff) {
     write_file("watch.log", "INFO normal log line\n");
 
-    auto setup = make_engine("ERROR");
-    engine::TriggerSink sink = [](engine::TriggerEvent) {};
+    auto engine = make_engine("ERROR");
+    engine::TriggerSink sink = [](engine::TriggerEvent) { return true; };
 
     // First scan (baseline).
-    auto results1 = setup.engine->scan_once(sink);
+    auto results1 = engine->scan_once(sink);
     ASSERT_EQ(results1.size(), 1u);
 
     // Modify file to include pattern match.
     write_file("watch.log", "ERROR something broke\n");
 
     // Second scan — should detect pattern_found change.
-    auto results2 = setup.engine->scan_once(sink);
+    auto results2 = engine->scan_once(sink);
     ASSERT_EQ(results2.size(), 1u);
     auto& diff = results2[0].diff;
 

@@ -109,7 +109,7 @@ protected:
 
 TEST_F(E2EWatchTest, BaselineScanProducesNoEvents) {
     auto engine = make_engine();
-    engine::TriggerSink sink = [](engine::TriggerEvent) {};
+    engine::TriggerSink sink = [](engine::TriggerEvent) { return true; };
 
     auto results = engine->scan_once(sink);
     ASSERT_EQ(results.size(), 1u);
@@ -121,7 +121,7 @@ TEST_F(E2EWatchTest, BaselineScanProducesNoEvents) {
 
 TEST_F(E2EWatchTest, FileCreationDetected) {
     auto engine = make_engine();
-    engine::TriggerSink sink = [](engine::TriggerEvent) {};
+    engine::TriggerSink sink = [](engine::TriggerEvent) { return true; };
 
     // Baseline scan.
     engine->scan_once(sink);
@@ -151,7 +151,7 @@ TEST_F(E2EWatchTest, FileCreationDetected) {
 
 TEST_F(E2EWatchTest, FileModificationDetected) {
     auto engine = make_engine();
-    engine::TriggerSink sink = [](engine::TriggerEvent) {};
+    engine::TriggerSink sink = [](engine::TriggerEvent) { return true; };
 
     // Baseline scan.
     engine->scan_once(sink);
@@ -186,7 +186,7 @@ TEST_F(E2EWatchTest, FileModificationDetected) {
 
 TEST_F(E2EWatchTest, FileDeletionDetected) {
     auto engine = make_engine();
-    engine::TriggerSink sink = [](engine::TriggerEvent) {};
+    engine::TriggerSink sink = [](engine::TriggerEvent) { return true; };
 
     // Baseline scan.
     engine->scan_once(sink);
@@ -210,7 +210,7 @@ TEST_F(E2EWatchTest, FileDeletionDetected) {
 
 TEST_F(E2EWatchTest, PatternMatchingE2E) {
     auto engine = make_engine("ERROR|FATAL");
-    engine::TriggerSink sink = [](engine::TriggerEvent) {};
+    engine::TriggerSink sink = [](engine::TriggerEvent) { return true; };
 
     // Baseline scan.
     engine->scan_once(sink);
@@ -236,7 +236,7 @@ TEST_F(E2EWatchTest, PatternMatchingE2E) {
 
 TEST_F(E2EWatchTest, HashComputationE2E) {
     auto engine = make_engine(std::nullopt, HashPolicy::Full);
-    engine::TriggerSink sink = [](engine::TriggerEvent) {};
+    engine::TriggerSink sink = [](engine::TriggerEvent) { return true; };
 
     // First scan.
     auto results1 = engine->scan_once(sink);
@@ -275,7 +275,7 @@ TEST_F(E2EWatchTest, HashComputationE2E) {
 
 TEST_F(E2EWatchTest, SizePlusMtimeSkipsUnchangedHashes) {
     auto engine = make_engine(std::nullopt, HashPolicy::SizePlusMtime);
-    engine::TriggerSink sink = [](engine::TriggerEvent) {};
+    engine::TriggerSink sink = [](engine::TriggerEvent) { return true; };
 
     // First scan — hashes computed for all files.
     auto results1 = engine->scan_once(sink);
@@ -306,7 +306,7 @@ TEST_F(E2EWatchTest, SizePlusMtimeSkipsUnchangedHashes) {
 
 TEST_F(E2EWatchTest, MultipleFileOperationsInOneCycle) {
     auto engine = make_engine();
-    engine::TriggerSink sink = [](engine::TriggerEvent) {};
+    engine::TriggerSink sink = [](engine::TriggerEvent) { return true; };
 
     // Baseline.
     engine->scan_once(sink);
@@ -341,7 +341,7 @@ TEST_F(E2EWatchTest, MultipleFileOperationsInOneCycle) {
 
 TEST_F(E2EWatchTest, DiagnosticsWorkE2E) {
     auto engine = make_engine();
-    engine::TriggerSink sink = [](engine::TriggerEvent) {};
+    engine::TriggerSink sink = [](engine::TriggerEvent) { return true; };
 
     // Baseline.
     engine->scan_once(sink);
@@ -391,7 +391,7 @@ TEST_F(E2EWatchTest, ExcludeGlobsRespected) {
     auto engine = std::make_unique<WatchEngine>(
         cfg, deps, std::vector<WatchGroupDef>{group});
 
-    engine::TriggerSink sink = [](engine::TriggerEvent) {};
+    engine::TriggerSink sink = [](engine::TriggerEvent) { return true; };
 
     // Create files: one should be included, one excluded.
     write_text("included.txt", "data\n");
