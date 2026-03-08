@@ -10,6 +10,7 @@
 #include <spdlog/spdlog.h>
 
 #include <condition_variable>
+#include <future>
 #include <mutex>
 
 namespace kairos::engine {
@@ -387,11 +388,13 @@ RunStatus Pipeline::execute_job(const std::string& job_id, RunContext& ctx,
 
         auto proc_spec = build_process_spec(step, *job_def, ctx);
 
-        // Submit to runner pool and wait for completion callback.
-        std::mutex step_mu;
-        std::condition_variable step_cv;
-        std::atomic<bool> step_done{false};
-        exec::ProcessResult step_result;
+        // Submit to runner pool and wait for completion.
+        // Uses promise/future instead of CV+atomic: the shared state is
+        // heap-allocated, so it's safe even if the worker thread is still
+        // unwinding from set_value() when we destroy locals here.
+        // Wrapped in shared_ptr because std::function requires copyable callables.
+        auto step_promise = std::make_shared<std::promise<exec::ProcessResult>>();
+        auto step_future = step_promise->get_future();
 
         exec::WorkItem item;
         item.run_id = ctx.run_id;
@@ -399,10 +402,9 @@ RunStatus Pipeline::execute_job(const std::string& job_id, RunContext& ctx,
         item.step_id = step.step_id;
         item.correlation_id = ctx.correlation_id;
         item.process_spec = std::move(proc_spec);
-        item.on_complete = [&](const std::string&, exec::ProcessResult result) {
-            step_result = std::move(result);
-            step_done.store(true);
-            step_cv.notify_one();
+        item.on_complete = [step_promise](
+            const std::string&, exec::ProcessResult result) {
+            step_promise->set_value(std::move(result));
         };
 
         bool submitted = deps_.runner_pool ?
@@ -415,14 +417,8 @@ RunStatus Pipeline::execute_job(const std::string& job_id, RunContext& ctx,
             return RunStatus::Failure;
         }
 
-        {
-            std::unique_lock lock(step_mu);
-            step_cv.wait(lock, [&] {
-                return step_done.load() || stop.stop_requested();
-            });
-        }
-
-        if (stop.stop_requested() && !step_done.load()) return RunStatus::Cancelled;
+        // Block until the worker completes the step.
+        auto step_result = step_future.get();
 
         // Persist step.
         if (deps_.db_writer) {

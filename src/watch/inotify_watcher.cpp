@@ -18,6 +18,7 @@
 
 #include <cerrno>
 #include <cstring>
+#include <fcntl.h>
 #include <filesystem>
 #include <poll.h>
 #include <sys/inotify.h>
@@ -51,8 +52,9 @@ InotifyWatcher::InotifyWatcher() {
         throw std::runtime_error("Failed to create inotify instance");
     }
 
-    // Create self-pipe for waking poll().
-    if (pipe(stop_pipe_) < 0) {
+    // Create self-pipe for waking poll(). Must be non-blocking so the
+    // drain loop in run() terminates after consuming all pending bytes.
+    if (pipe2(stop_pipe_, O_NONBLOCK | O_CLOEXEC) < 0) {
         close(inotify_fd_);
         inotify_fd_ = -1;
         spdlog::error("pipe() failed: {} ({})",
