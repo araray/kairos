@@ -425,6 +425,13 @@ RunStatus Pipeline::execute_job(const std::string& job_id, RunContext& ctx,
         //   1. DB writer (log_chunks table, batched async)
         //   2. RunStream pub-sub (live followers: CLI, MCP, SSE)
         exec::OutputMultiplexer output_mux;
+
+        // Apply secret masking (§17.3): register secret values
+        // so all output chunks are redacted before reaching any sink.
+        if (!deps_.secret_values.empty()) {
+            output_mux.set_secret_values(deps_.secret_values);
+        }
+
         std::atomic<int64_t> chunk_index{0};
 
         // Sink 1: DB writer — persist log chunks.
@@ -569,14 +576,25 @@ exec::ProcessSpec Pipeline::build_process_spec(
     else if (!job.working_dir.empty()) spec.working_dir = job.working_dir;
     spec.timeout = step.timeout;
 
-    spec.environment = job.env;
-    for (const auto& [k, v] : step.env) spec.environment[k] = v;
-    spec.environment["KAIROS_RUN_ID"] = ctx.run_id;
-    spec.environment["KAIROS_JOB_ID"] = job.job_id;
-    spec.environment["KAIROS_STEP_ID"] = step.step_id;
-    spec.environment["KAIROS_WORKFLOW"] = ctx.workflow_name;
-    spec.environment["KAIROS_TRIGGER"] = ctx.trigger_type;
-    spec.environment["KAIROS_CORRELATION_ID"] = ctx.correlation_id;
+    // Build environment via the 7-layer EnvBuilder (§14.6).
+    exec::EnvBuilder builder;
+    builder.inherit_parent()
+           .add_job(job.env)
+           .add_step(step.env);
+
+    // Layer 6: Resolve ${{ secrets.key }} references (§17.1).
+    if (deps_.secret_resolver) {
+        builder.resolve_secrets(deps_.secret_resolver);
+    }
+
+    // Layer 7: Inject Kairos metadata variables.
+    builder.add_kairos_vars(
+        ctx.run_id, job.job_id, step.step_id,
+        ctx.workflow_id, ctx.trigger_type,
+        ctx.correlation_id,
+        "", "");  // data_dir and db_path filled by config
+
+    spec.environment = builder.build();
     return spec;
 }
 

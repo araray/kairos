@@ -36,6 +36,7 @@
 #include "kairos/persist/migration.hpp"
 #include "kairos/persist/query_reader.hpp"
 #include "kairos/platform/platform.hpp"
+#include "kairos/security/secret_store.hpp"
 #include "kairos/testing/fake_clock.hpp"
 #include "kairos/watch/real_scanner.hpp"
 #include "kairos/watch/watch_engine.hpp"
@@ -47,8 +48,11 @@
 
 #include <spdlog/spdlog.h>
 
+#include <algorithm>
 #include <chrono>
 #include <condition_variable>
+#include <cstdlib>
+#include <fstream>
 #include <mutex>
 #include <stop_token>
 #include <thread>
@@ -249,6 +253,60 @@ int run_daemon(std::shared_ptr<const kairos::config::ConfigState> config) {
     // ── Step 6: Load workflow/watch-group definitions ──────────────
     auto registry = load_registry_from_yaml(config, log);
 
+    // ── Step 6.5: Load SecretStore (§17.1) ────────────────────────
+    security::SecretStore secret_store;
+    bool vault_enabled = config->global.get<bool>(
+        "kairos.vault.enabled", false);
+    if (vault_enabled) {
+        std::string vault_file = config->global.get<std::string>(
+            "kairos.vault.file", "");
+        std::string password_env = config->global.get<std::string>(
+            "kairos.vault.password_env", "KAIROS_VAULT_PASSWORD");
+        std::string password_file = config->global.get<std::string>(
+            "kairos.vault.password_file", "");
+
+        // Resolve password: password_file takes precedence over env var.
+        std::string vault_password;
+        if (!password_file.empty()) {
+            std::ifstream pw_stream(password_file);
+            if (!pw_stream.is_open()) {
+                log->error("Cannot open vault password file: {}",
+                           password_file);
+                return 1;
+            }
+            std::getline(pw_stream, vault_password);
+            // Trim trailing whitespace/newline from password.
+            while (!vault_password.empty() &&
+                   (vault_password.back() == '\n' ||
+                    vault_password.back() == '\r' ||
+                    vault_password.back() == ' ')) {
+                vault_password.pop_back();
+            }
+        } else {
+            const char* pw = std::getenv(password_env.c_str());
+            if (!pw || pw[0] == '\0') {
+                log->error("Vault enabled but {} env var is empty/unset",
+                           password_env);
+                return 1;
+            }
+            vault_password = pw;
+        }
+
+        try {
+            secret_store.load_vault(vault_file, vault_password);
+            // Secure-clear password from our local variable.
+            volatile char* p = vault_password.data();
+            for (std::size_t i = 0; i < vault_password.size(); ++i) {
+                p[i] = '\0';
+            }
+            vault_password.clear();
+            log->info("Vault loaded: {} secrets", secret_store.size());
+        } catch (const std::exception& e) {
+            log->error("Failed to load vault: {}", e.what());
+            return 1;
+        }
+    }
+
     // ── Step 7: Create shared stop source ──────────────────────────
     std::stop_source stop_source;
     auto stop_token = stop_source.get_token();
@@ -293,6 +351,21 @@ int run_daemon(std::shared_ptr<const kairos::config::ConfigState> config) {
     log->debug("CancelRegistry created");
 
     // ── Step 13: Start Pipeline thread ─────────────────────────────
+    // Prepare secret resolver and masking values (§17.1, §17.3).
+    auto secret_resolver = secret_store.is_loaded()
+        ? secret_store.make_resolver()
+        : exec::EnvBuilder::SecretResolver{};
+
+    std::vector<std::string> secret_values;
+    if (secret_store.is_loaded()) {
+        secret_values = secret_store.values();
+        // Sort longest-first to prevent partial matches (§17.3).
+        std::sort(secret_values.begin(), secret_values.end(),
+            [](const std::string& a, const std::string& b) {
+                return a.size() > b.size();
+            });
+    }
+
     engine::PipelineConfig pipeline_cfg;
     engine::Pipeline pipeline(pipeline_cfg, engine::Pipeline::Dependencies{
         .clock = &clock,
@@ -304,6 +377,8 @@ int run_daemon(std::shared_ptr<const kairos::config::ConfigState> config) {
         .query_reader = &query_reader,
         .run_stream = &run_stream,
         .cancel_registry = &cancel_registry,
+        .secret_resolver = secret_resolver,
+        .secret_values = secret_values,
     });
     pipeline.start(stop_token);
     log->info("Pipeline thread started");
@@ -542,6 +617,19 @@ int run_daemon(std::shared_ptr<const kairos::config::ConfigState> config) {
         "kairos.telemetry.metrics_retention_days", 7);
     auto last_metrics_prune = std::chrono::steady_clock::now();
 
+    // ── Retention auto-prune config (§16.8) ──────────────────────
+    int retention_days = config->global.get<int>(
+        "kairos.persistence.retention_days", 90);
+    int prune_interval_hours = config->global.get<int>(
+        "kairos.persistence.prune_interval_hours", 24);
+    int max_samples_per_group = config->global.get<int>(
+        "kairos.persistence.max_samples_per_group", 1000);
+    auto last_retention_prune = std::chrono::steady_clock::now();
+    double prune_interval_s = static_cast<double>(prune_interval_hours) * 3600.0;
+    log->info("Retention auto-prune: every {}h, keep {}d of runs, "
+              "{}  samples/group",
+              prune_interval_hours, retention_days, max_samples_per_group);
+
     // ── Step 18: Main loop ─────────────────────────────────────────
     while (!stop_token.stop_requested()) {
         auto now = std::chrono::steady_clock::now();
@@ -592,6 +680,44 @@ int run_daemon(std::shared_ptr<const kairos::config::ConfigState> config) {
                 last_metrics_prune = now;
                 log->debug("Enqueued metrics snapshot prune "
                            "(retention: {} days)", metrics_retention_days);
+            }
+        }
+
+        // Retention auto-prune: runs, watch samples, watch events (§16.8).
+        // Triggered every prune_interval_hours.
+        {
+            auto prune_elapsed = std::chrono::duration<double>(
+                now - last_retention_prune).count();
+            if (prune_elapsed >= prune_interval_s && retention_days > 0) {
+                // 1. Prune old runs (CASCADE deletes run_jobs, run_steps,
+                //    log_chunks via ON DELETE CASCADE).
+                std::string cutoff_date =
+                    "datetime('now', '-" + std::to_string(retention_days) +
+                    " days')";
+                db_writer.enqueue(persist::PruneOlderThan{
+                    .cutoff_date = cutoff_date,
+                });
+
+                // 2. Prune old watch events.
+                // Uses the same cutoff as runs.
+                // (PruneOlderThan handles both runs and watch_events.)
+
+                // 3. Prune old watch samples (keep max N per group).
+                auto watch_groups = registry->watch_groups();
+                for (const auto& wg : watch_groups) {
+                    db_writer.enqueue(persist::PruneWatchSamples{
+                        .watch_group = wg.group_name,
+                        .max_samples = max_samples_per_group,
+                    });
+                }
+
+                last_retention_prune = now;
+                log->info("Retention auto-prune enqueued: "
+                          "runs older than {}d, "
+                          "{} watch groups (max {} samples each)",
+                          retention_days,
+                          watch_groups.size(),
+                          max_samples_per_group);
             }
         }
 

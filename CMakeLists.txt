@@ -165,6 +165,15 @@ if(KAIROS_OTEL)
     )
 endif()
 
+# ── Optional: Ansible Vault support (KAIROS_VAULT=ON) ─────────────────────
+if(KAIROS_VAULT)
+    target_sources(kairos_core PRIVATE src/security/secret_store.cpp)
+    target_compile_definitions(kairos_core PUBLIC KAIROS_VAULT)
+    target_link_libraries(kairos_core PUBLIC OpenSSL::SSL OpenSSL::Crypto)
+else()
+    target_sources(kairos_core PRIVATE src/security/secret_store_stub.cpp)
+endif()
+
 # ── Tests ──────────────────────────────────────────────────────────────────
 if(KAIROS_BUILD_TESTS)
     enable_testing()

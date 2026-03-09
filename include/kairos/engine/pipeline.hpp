@@ -16,6 +16,7 @@
 #include "kairos/engine/trigger_event.hpp"
 #include "kairos/engine/trigger_types.hpp"
 #include "kairos/engine/workflow_registry.hpp"
+#include "kairos/exec/env_builder.hpp"
 #include "kairos/exec/output_sink.hpp"
 #include "kairos/exec/runner_pool.hpp"
 #include "kairos/kel/evaluator.hpp"
@@ -141,6 +142,14 @@ public:
         persist::QueryReader* query_reader = nullptr;
         exec::RunStream* run_stream = nullptr;
         CancelRegistry* cancel_registry = nullptr;
+
+        /// Secret resolver for ${{ secrets.key }} substitution (§17.1).
+        /// If null, secret references are left unresolved.
+        exec::EnvBuilder::SecretResolver secret_resolver;
+
+        /// Pre-sorted secret values for output masking (§17.3).
+        /// Populated from SecretStore::values(), sorted longest-first.
+        std::vector<std::string> secret_values;
     };
 
     explicit Pipeline(PipelineConfig config, Dependencies deps);

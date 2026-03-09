@@ -109,6 +109,14 @@ endif()
 
 # ── Optional: OpenTelemetry tracing ────────────────────────────────────
 if(KAIROS_OTEL)
+
+# ── Optional: Ansible Vault support (OpenSSL) ─────────────────────────
+if(KAIROS_VAULT)
+    find_package(OpenSSL REQUIRED)
+    message(STATUS "OpenSSL found: ${OPENSSL_VERSION}")
+endif()
+
+
     # The OTel C++ SDK is heavy (protobuf, gRPC for OTLP).
     # We use find_package so users can install it system-wide,
     # or set CMAKE_PREFIX_PATH to a local build.

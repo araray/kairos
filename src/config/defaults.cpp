@@ -63,6 +63,8 @@ confy::Value build_kairos_defaults() {
                 {"batch_size",         100},
                 {"flush_interval_ms",  1000},
                 {"wal_mode",           true},
+                {"prune_interval_hours", 24},
+                {"max_samples_per_group", 1000},
             }},
 
             // ─── MCP ─────────────────────────────────────────────────
@@ -90,6 +92,14 @@ confy::Value build_kairos_defaults() {
                 {"cors_enabled",       false},
                 {"cors_origins",       "*"},
                 {"read_timeout_s",     30},
+            }},
+
+            // ─── Vault / Secrets (§17) ────────────────────────────────
+            {"vault", {
+                {"enabled",            false},
+                {"file",               ""},           // encrypted vault path
+                {"password_env",       "KAIROS_VAULT_PASSWORD"},
+                {"password_file",      ""},           // alt to password_env
             }},
 
             // ─── Daemon ───────────────────────────────────────────────

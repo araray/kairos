@@ -113,6 +113,34 @@ std::vector<ValidationError> validate_config(const confy::Config& cfg) {
         }
     } catch (...) {}
 
+    // ─── Prune interval ──────────────────────────────────────────────
+    check_positive_int(cfg, "kairos.persistence.prune_interval_hours", errors);
+    check_positive_int(cfg, "kairos.persistence.max_samples_per_group", errors);
+
+    // ─── Vault cross-key consistency (§17.1) ─────────────────────────
+    try {
+        bool vault_enabled = cfg.get<bool>("kairos.vault.enabled", false);
+        if (vault_enabled) {
+            std::string vault_file = cfg.get<std::string>(
+                "kairos.vault.file", "");
+            if (vault_file.empty()) {
+                errors.push_back({"kairos.vault.file",
+                    "must be set when kairos.vault.enabled=true",
+                    "", -1});
+            }
+            // password_env and password_file are mutually exclusive.
+            std::string pw_file = cfg.get<std::string>(
+                "kairos.vault.password_file", "");
+            std::string pw_env = cfg.get<std::string>(
+                "kairos.vault.password_env", "KAIROS_VAULT_PASSWORD");
+            if (!pw_file.empty() && pw_env != "KAIROS_VAULT_PASSWORD") {
+                errors.push_back({"kairos.vault.password_file",
+                    "password_file and non-default password_env are "
+                    "mutually exclusive", "", -1});
+            }
+        }
+    } catch (...) {}
+
     return errors;
 }
 

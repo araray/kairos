@@ -627,3 +627,27 @@ if(KAIROS_OTEL)
     )
 endif()
 gtest_discover_tests(test_otel_tracer)
+
+# ══════════════════════════════════════════════════════════════════════════
+# Phase 5 Batch 1: SecretStore + Retention auto-prune
+# ══════════════════════════════════════════════════════════════════════════
+
+# ── SecretStore tests (SecureString, load_from_map, resolver, masking) ──
+
+add_executable(test_secret_store
+    unit/security/secret_store_test.cpp
+)
+target_link_libraries(test_secret_store PRIVATE kairos_test_helpers)
+if(KAIROS_VAULT)
+    target_compile_definitions(test_secret_store PRIVATE KAIROS_VAULT)
+    target_link_libraries(test_secret_store PRIVATE OpenSSL::SSL OpenSSL::Crypto)
+endif()
+gtest_discover_tests(test_secret_store)
+
+# ── Retention auto-prune tests (PruneOlderThan, PruneWatchSamples) ─────
+
+add_executable(test_retention_auto_prune
+    unit/persist/retention_auto_prune_test.cpp
+)
+target_link_libraries(test_retention_auto_prune PRIVATE kairos_test_helpers)
+gtest_discover_tests(test_retention_auto_prune)
