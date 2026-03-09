@@ -422,6 +422,12 @@ int run_daemon(std::shared_ptr<const kairos::config::ConfigState> config) {
         "kairos.telemetry.metrics_snapshot_interval_seconds", 60);
     auto last_snapshot = std::chrono::steady_clock::now();
 
+    // Metrics snapshot pruning interval — prune old snapshots
+    // periodically. Default: 7 days retention (§16.8).
+    int metrics_retention_days = config->global.get<int>(
+        "kairos.telemetry.metrics_retention_days", 7);
+    auto last_metrics_prune = std::chrono::steady_clock::now();
+
     // ── Step 18: Main loop ─────────────────────────────────────────
     while (!stop_token.stop_requested()) {
         auto now = std::chrono::steady_clock::now();
@@ -457,6 +463,21 @@ int run_daemon(std::shared_ptr<const kairos::config::ConfigState> config) {
                 last_snapshot = now;
                 log->trace("Metrics snapshot persisted ({} entries)",
                            entries.size());
+            }
+        }
+
+        // Periodic metrics snapshot pruning (§16.8).
+        // Run once per hour — prune snapshots older than retention_days.
+        {
+            auto prune_elapsed = std::chrono::duration<double>(
+                now - last_metrics_prune).count();
+            if (prune_elapsed >= 3600.0 && metrics_retention_days > 0) {
+                db_writer.enqueue(persist::PruneMetricsSnapshots{
+                    .retention_days = metrics_retention_days,
+                });
+                last_metrics_prune = now;
+                log->debug("Enqueued metrics snapshot prune "
+                           "(retention: {} days)", metrics_retention_days);
             }
         }
 

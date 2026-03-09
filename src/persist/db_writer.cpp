@@ -360,6 +360,19 @@ void DBWriter::execute_request(const DBWriteRequest& req) {
             }
             spdlog::trace("Batch-inserted {} metrics snapshot entries",
                           r.entries.size());
+
+        } else if constexpr (std::is_same_v<T, PruneMetricsSnapshots>) {
+            // Prune metrics snapshots older than retention_days (§16.8).
+            // Default: 7 days (hardcoded in spec).
+            SQLite::Statement prune(db_,
+                "DELETE FROM metrics_snapshots "
+                "WHERE recorded_at < datetime('now', '-' || ? || ' days')");
+            prune.bind(1, r.retention_days);
+            int deleted = prune.exec();
+            if (deleted > 0) {
+                spdlog::info("Pruned {} metrics snapshot rows older than {} days",
+                             deleted, r.retention_days);
+            }
         }
     }, req);
 }

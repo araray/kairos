@@ -169,6 +169,31 @@ public:
         return it != standalone_jobs_.end() ? &it->second : nullptr;
     }
 
+    /// Get a standalone job definition by name.
+    [[nodiscard]] const JobDef* standalone_job_by_name(
+        const std::string& name) const
+    {
+        for (const auto& [id, sj] : standalone_jobs_) {
+            if (sj.job_name == name) return &sj;
+        }
+        return nullptr;
+    }
+
+    /// Get all standalone job definitions as a vector (for CLI listing).
+    [[nodiscard]] std::vector<const JobDef*> standalone_jobs() const {
+        std::vector<const JobDef*> result;
+        result.reserve(standalone_jobs_.size());
+        for (const auto& [id, sj] : standalone_jobs_) {
+            result.push_back(&sj);
+        }
+        return result;
+    }
+
+    /// Number of standalone jobs.
+    [[nodiscard]] size_t standalone_job_count() const {
+        return standalone_jobs_.size();
+    }
+
     // ── Trigger queries ──────────────────────────────────────────
 
     /// All trigger entries (for the scheduler's timer heap).

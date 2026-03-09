@@ -183,6 +183,12 @@ struct BatchInsertMetricsSnapshots {
     std::vector<InsertMetricsSnapshot> entries;
 };
 
+/// Prune metrics snapshots older than a cutoff date.
+/// Spec reference: §16.8 (retention policy: metrics snapshots older than 7 days).
+struct PruneMetricsSnapshots {
+    int retention_days = 7;              ///< Delete snapshots older than this many days.
+};
+
 /// Union of all write request types.
 using DBWriteRequest = std::variant<
     InsertRun, UpdateRunComplete,
@@ -193,7 +199,8 @@ using DBWriteRequest = std::variant<
     InsertWatchSample, InsertWatchEvent,
     BatchInsertWatchSamples, PruneWatchSamples,
     PruneOlderThan,
-    InsertMetricsSnapshot, BatchInsertMetricsSnapshots
+    InsertMetricsSnapshot, BatchInsertMetricsSnapshots,
+    PruneMetricsSnapshots
 >;
 
 // ── DB Writer ────────────────────────────────────────────────────────────

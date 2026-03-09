@@ -436,3 +436,21 @@ add_executable(test_metrics_snapshot
 )
 target_link_libraries(test_metrics_snapshot PRIVATE kairos_test_helpers)
 gtest_discover_tests(test_metrics_snapshot)
+
+# ── Phase 3 Batch 13: CLI Table helper tests ───────────────────
+
+# Table renderer, format_duration, truncate, status_icon, ANSI handling
+add_executable(test_cli_table
+    unit/cli/table_test.cpp
+)
+target_link_libraries(test_cli_table PRIVATE kairos_test_helpers)
+gtest_discover_tests(test_cli_table)
+
+# ── Phase 3 Batch 13: Metrics pruning + standalone_jobs tests ──
+
+# PruneMetricsSnapshots handler, WorkflowRegistry::standalone_jobs()
+add_executable(test_metrics_pruning
+    unit/persist/metrics_pruning_test.cpp
+)
+target_link_libraries(test_metrics_pruning PRIVATE kairos_test_helpers)
+gtest_discover_tests(test_metrics_pruning)
