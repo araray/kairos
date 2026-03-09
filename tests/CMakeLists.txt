@@ -546,3 +546,30 @@ if(KAIROS_HTTP)
     target_link_libraries(test_http_server PRIVATE httplib::httplib)
 endif()
 gtest_discover_tests(test_http_server)
+
+# ── Phase 4 Batch 2: CancelRegistry tests ──────────────────────
+
+# Per-run cancellation, CombinedStopToken, concurrent cancel
+add_executable(test_cancel_registry
+    unit/engine/cancel_registry_test.cpp
+)
+target_link_libraries(test_cancel_registry PRIVATE kairos_test_helpers)
+gtest_discover_tests(test_cancel_registry)
+
+# ── Phase 4 Batch 2: MCP → RunStream wiring tests ──────────────
+
+# start_log_follow subscription, base64 notifications, close_run
+add_executable(test_mcp_log_follow_wiring
+    unit/mcp/log_follow_wiring_test.cpp
+)
+target_link_libraries(test_mcp_log_follow_wiring PRIVATE kairos_test_helpers)
+gtest_discover_tests(test_mcp_log_follow_wiring)
+
+# ── Phase 4 Batch 2: RunStream on_close callback tests ─────────
+
+# on_close fires, unsubscribe, multiple callbacks, exception safety
+add_executable(test_run_stream_close
+    unit/exec/run_stream_close_test.cpp
+)
+target_link_libraries(test_run_stream_close PRIVATE kairos_test_helpers)
+gtest_discover_tests(test_run_stream_close)

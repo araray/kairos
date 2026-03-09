@@ -110,6 +110,35 @@ void RunnerPool::worker_loop(std::stop_token stop, std::size_t worker_id) {
             proc->set_output_callback(item.output_callback);
         }
 
+        // ── Build effective stop token ──────────────────────────────
+        // If the WorkItem carries a per-run cancel_token (from
+        // CancelRegistry, §23.10), merge it with the global stop
+        // so that either cancelling the single run OR shutting down
+        // the daemon will kill this process.
+        //
+        // Without cancel_token: use global stop as before.
+        std::stop_source merged_source;
+        std::stop_token effective_stop = stop;
+
+        // Optional stop_callbacks — must outlive proc->wait().
+        // Using lambdas that capture merged_source by reference.
+        auto fire = [&merged_source]() { merged_source.request_stop(); };
+        using CbType = std::stop_callback<decltype(fire)>;
+        std::optional<CbType> global_cb;
+        std::optional<CbType> cancel_cb;
+
+        if (item.cancel_token.has_value()) {
+            // Check if either is already stopped.
+            if (stop.stop_requested() ||
+                item.cancel_token->stop_requested()) {
+                merged_source.request_stop();
+            } else {
+                global_cb.emplace(stop, fire);
+                cancel_cb.emplace(*item.cancel_token, fire);
+            }
+            effective_stop = merged_source.get_token();
+        }
+
         // Spawn.
         ProcessResult result;
         if (!proc->spawn(item.process_spec)) {
@@ -118,8 +147,8 @@ void RunnerPool::worker_loop(std::stop_token stop, std::size_t worker_id) {
                          worker_id, item.step_id,
                          result.termination_reason);
         } else {
-            // Wait for completion (with stop_token for cancellation).
-            result = proc->wait(stop);
+            // Wait for completion (with effective stop token).
+            result = proc->wait(effective_stop);
 
             if (result.success()) {
                 spdlog::debug(

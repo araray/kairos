@@ -19,6 +19,7 @@
 #include "kairos/config/yaml_loader.hpp"
 #include "kairos/core/id_generator.hpp"
 #include "kairos/core/version.hpp"
+#include "kairos/engine/cancel_registry.hpp"
 #include "kairos/engine/pipeline.hpp"
 #include "kairos/engine/scheduler.hpp"
 #include "kairos/engine/trigger_event.hpp"
@@ -281,6 +282,10 @@ int run_daemon(std::shared_ptr<const kairos::config::ConfigState> config) {
     exec::RunStream run_stream;
     log->debug("RunStream pub-sub created");
 
+    // ── Step 12.6: Create CancelRegistry (per-run cancel, §23.10) ─
+    engine::CancelRegistry cancel_registry;
+    log->debug("CancelRegistry created");
+
     // ── Step 13: Start Pipeline thread ─────────────────────────────
     engine::PipelineConfig pipeline_cfg;
     engine::Pipeline pipeline(pipeline_cfg, engine::Pipeline::Dependencies{
@@ -292,6 +297,7 @@ int run_daemon(std::shared_ptr<const kairos::config::ConfigState> config) {
         .db_writer = &db_writer,
         .query_reader = &query_reader,
         .run_stream = &run_stream,
+        .cancel_registry = &cancel_registry,
     });
     pipeline.start(stop_token);
     log->info("Pipeline thread started");
@@ -372,6 +378,7 @@ int run_daemon(std::shared_ptr<const kairos::config::ConfigState> config) {
         mcp::McpHandler::Dependencies mcp_deps;
         mcp_deps.watch_engine = &watch_engine;
         mcp_deps.metrics = &metrics_registry;
+        mcp_deps.run_stream = &run_stream;
         mcp_deps.server_info.name = "kairos";
         mcp_deps.server_info.version = std::string(kairos::kVersion);
 
@@ -573,12 +580,18 @@ int run_daemon(std::shared_ptr<const kairos::config::ConfigState> config) {
             switch (cmd.type) {
                 case daemon::Command::Type::Cancel:
                     log->info("Command: cancel run '{}'", cmd.run_id);
-                    // The CLI already marked the run as CANCELLED in the DB.
-                    // The daemon acknowledges the cancel. Process termination
-                    // of in-flight jobs is handled by the pipeline checking
-                    // run status on each iteration.
-                    // TODO(Phase 4): Wire per-run stop_source for immediate
-                    // process kill on cancel.
+                    // Request cancellation of the in-flight run via
+                    // CancelRegistry. This fires the per-run stop_token,
+                    // which propagates to ProcessHandle::wait() in the
+                    // runner pool → soft-then-hard kill of child processes.
+                    if (cancel_registry.cancel(cmd.run_id)) {
+                        log->info("Run '{}' cancel signal sent — "
+                                  "processes will be terminated",
+                                  cmd.run_id);
+                    } else {
+                        log->info("Run '{}' not active (already "
+                                  "completed or unknown)", cmd.run_id);
+                    }
                     break;
                 case daemon::Command::Type::Reload:
                     log->info("Command: config reload (via CLI)");

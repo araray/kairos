@@ -10,6 +10,7 @@
 // ╚════════════════════════════════════════════════════════════════════════════╝
 #pragma once
 
+#include "kairos/engine/cancel_registry.hpp"
 #include "kairos/engine/dag.hpp"
 #include "kairos/engine/execution_plan.hpp"
 #include "kairos/engine/trigger_event.hpp"
@@ -75,6 +76,10 @@ struct RunContext {
     /// Captured once at run start for deterministic condition evaluation.
     std::chrono::system_clock::time_point now;
 
+    /// Per-run cancel token (from CancelRegistry, §23.10).
+    /// Stored here so execute_job can set it on each WorkItem.
+    std::stop_token cancel_token;
+
     /// Status of each job in this run.
     struct JobStatus {
         RunStatus status = RunStatus::Evaluating;
@@ -135,6 +140,7 @@ public:
         persist::DBWriter* db_writer = nullptr;
         persist::QueryReader* query_reader = nullptr;
         exec::RunStream* run_stream = nullptr;
+        CancelRegistry* cancel_registry = nullptr;
     };
 
     explicit Pipeline(PipelineConfig config, Dependencies deps);

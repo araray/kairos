@@ -54,6 +54,7 @@ add_library(kairos_core STATIC
     src/engine/event_types.cpp
     src/engine/scheduler.cpp
     src/engine/pipeline.cpp
+    src/engine/cancel_registry.cpp
     src/watch/sample.cpp
     src/watch/watch_engine.cpp
     src/watch/real_scanner.cpp

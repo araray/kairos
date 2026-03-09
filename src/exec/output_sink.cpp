@@ -99,6 +99,16 @@ RunStream::SubscriberId RunStream::subscribe(
     return id;
 }
 
+RunStream::SubscriberId RunStream::on_close(
+    const std::string& run_id,
+    std::function<void(const std::string&)> cb)
+{
+    std::lock_guard lock(mutex_);
+    auto id = next_id_++;
+    close_callbacks_[run_id].emplace_back(id, std::move(cb));
+    return id;
+}
+
 void RunStream::unsubscribe(SubscriberId id) {
     std::lock_guard lock(mutex_);
     for (auto& [run_id, subs] : subscribers_) {
@@ -106,6 +116,12 @@ void RunStream::unsubscribe(SubscriberId id) {
             std::remove_if(subs.begin(), subs.end(),
                 [id](const auto& p) { return p.first == id; }),
             subs.end());
+    }
+    for (auto& [run_id, cbs] : close_callbacks_) {
+        cbs.erase(
+            std::remove_if(cbs.begin(), cbs.end(),
+                [id](const auto& p) { return p.first == id; }),
+            cbs.end());
     }
 }
 
@@ -133,8 +149,30 @@ void RunStream::publish(
 }
 
 void RunStream::close_run(const std::string& run_id) {
-    std::lock_guard lock(mutex_);
-    subscribers_.erase(run_id);
+    // Collect close callbacks under lock, then invoke outside lock
+    // to avoid deadlocks if callbacks call back into RunStream.
+    std::vector<std::function<void(const std::string&)>> to_invoke;
+    {
+        std::lock_guard lock(mutex_);
+        auto it = close_callbacks_.find(run_id);
+        if (it != close_callbacks_.end()) {
+            to_invoke.reserve(it->second.size());
+            for (auto& [id, cb] : it->second) {
+                to_invoke.push_back(std::move(cb));
+            }
+            close_callbacks_.erase(it);
+        }
+        subscribers_.erase(run_id);
+    }
+
+    // Invoke close callbacks outside the lock.
+    for (const auto& cb : to_invoke) {
+        try {
+            cb(run_id);
+        } catch (const std::exception& e) {
+            spdlog::warn("RunStream: close callback threw: {}", e.what());
+        }
+    }
 }
 
 std::size_t RunStream::active_run_count() const {

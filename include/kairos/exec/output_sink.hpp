@@ -112,6 +112,17 @@ public:
     /// @return A subscriber ID for unsubscribe().
     SubscriberId subscribe(const std::string& run_id, Callback cb);
 
+    /// Subscribe to run completion. The callback is invoked when
+    /// close_run() is called for this run_id (after all output has
+    /// been delivered). Used by MCP (§22.7) and SSE (§26.4) to emit
+    /// "run_complete" notifications.
+    ///
+    /// @param run_id  The run ID to watch.
+    /// @param cb      Callback invoked with (run_id) on close.
+    /// @return A subscriber ID (shares namespace with subscribe()).
+    SubscriberId on_close(const std::string& run_id,
+                          std::function<void(const std::string&)> cb);
+
     /// Unsubscribe a specific subscriber.
     /// Thread-safe. No-op if the subscriber doesn't exist.
     void unsubscribe(SubscriberId id);
@@ -143,6 +154,9 @@ private:
     mutable std::mutex mutex_;
     std::unordered_map<std::string,
         std::vector<std::pair<SubscriberId, Callback>>> subscribers_;
+    std::unordered_map<std::string,
+        std::vector<std::pair<SubscriberId,
+            std::function<void(const std::string&)>>>> close_callbacks_;
     SubscriberId next_id_ = 0;
 };
 

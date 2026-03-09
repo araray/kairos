@@ -14,6 +14,7 @@
 #pragma once
 
 #include "kairos/mcp/transport.hpp"
+#include "kairos/exec/output_sink.hpp"
 #include "kairos/observability/metrics.hpp"
 #include "kairos/watch/watch_engine.hpp"
 
@@ -52,6 +53,11 @@ public:
         watch::WatchEngine* watch_engine = nullptr;
         metrics::MetricsRegistry* metrics = nullptr;
         StdioTransport* transport = nullptr;
+
+        /// RunStream for live log following (§22.7).
+        /// When follow=true, start_log_follow subscribes to this stream
+        /// and emits base64-encoded chunks as notifications.
+        exec::RunStream* run_stream = nullptr;
 
         /// Config reload callback. Returns true on success.
         /// On failure, populates the error vector.

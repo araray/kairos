@@ -49,7 +49,7 @@ static std::string render_dashboard(const HttpDependencies& deps) {
     int hours = static_cast<int>(uptime / 3600);
     int mins = static_cast<int>((uptime - hours * 3600) / 60);
 
-    auto runs = deps.reader ? deps.reader->query_recent_runs(10) : 
+    auto runs = deps.reader ? deps.reader->query_recent_runs(10) :
         std::vector<persist::QueryReader::RunSummary>{};
 
     auto stats = deps.reader ? deps.reader->query_run_stats() :
@@ -122,8 +122,8 @@ static std::string render_dashboard(const HttpDependencies& deps) {
       </div>
       <div class="col-md-3">
         <div class="card p-3 text-center">
-          <div class="stat-value" style="color:)html" + 
-            (stats.failures_today > 0 ? "#ff6b6b" : "#00d4ff") + R"html(">)html" + 
+          <div class="stat-value" style="color:)html" +
+            (stats.failures_today > 0 ? "#ff6b6b" : "#00d4ff") + R"html(">)html" +
             std::to_string(stats.failures_today) + R"html(</div>
           <div class="stat-label">Failures Today</div>
         </div>
@@ -450,7 +450,7 @@ struct HttpServer::Impl {
                 set_cors(res);
             });
 
-        // ── SSE: Log stream ────────────────────────────────────
+        // ── SSE: Log stream (push-based via RunStream) ────────────
         svr.Get(R"(/sse/logs/([^/]+))",
             [this](const httplib::Request& req, httplib::Response& res) {
                 auto run_id = req.matches[1].str();
@@ -468,57 +468,170 @@ struct HttpServer::Impl {
                         std::size_t /*offset*/,
                         httplib::DataSink& sink) -> bool
                     {
-                        // Poll-based SSE streaming (§26.4).
-                        // Future optimization: subscribe to RunStream
-                        // for push notifications.
-                        int64_t last_id = 0;
-                        int idle_count = 0;
-                        constexpr int max_idle = 600;  // 5 min at 500ms.
+                        // ── Push-based SSE via RunStream (§26.4) ──────
+                        // Subscribe to RunStream for live output.
+                        // Output chunks are written to the SSE sink
+                        // as they arrive from the ProcessHandle.
+                        //
+                        // Synchronization: the subscriber callback runs
+                        // on the ProcessHandle reader thread. We use a
+                        // mutex + condition_variable to safely pass
+                        // chunks to the SSE thread (this lambda).
 
-                        while (idle_count < max_idle) {
-                            if (!deps.reader) break;
+                        struct SharedState {
+                            std::mutex mu;
+                            std::condition_variable cv;
+                            std::vector<std::string> pending;
+                            bool closed = false;
+                        };
+                        auto state = std::make_shared<SharedState>();
 
-                            auto chunks = deps.reader->get_log_chunks(
-                                run_id, last_id, 100);
+                        // Subscribe to output chunks.
+                        exec::RunStream::SubscriberId sub_id = 0;
+                        exec::RunStream::SubscriberId close_id = 0;
 
-                            if (chunks.empty()) {
-                                // Check if run is still active.
-                                auto run = deps.reader->get_run_summary(
-                                    run_id);
-                                if (run && run->status != "RUNNING") {
-                                    // Send completion event.
+                        if (deps.run_stream) {
+                            sub_id = deps.run_stream->subscribe(run_id,
+                                [state](const std::string& /*rid*/,
+                                        const std::string& job_id,
+                                        const std::string& /*step_id*/,
+                                        std::string_view chunk,
+                                        bool is_stderr) {
+                                    nlohmann::json j;
+                                    j["job_id"] = job_id;
+                                    j["stream"] = is_stderr ? "stderr"
+                                                            : "stdout";
+                                    j["content"] = std::string(chunk);
                                     std::string event =
-                                        "event: complete\n"
-                                        "data: {\"status\":\"" +
-                                        run->status + "\"}\n\n";
-                                    if (!sink.write(event.data(),
-                                                    event.size()))
-                                        return false;
-                                    return false;  // Close stream.
-                                }
-                                ++idle_count;
-                            } else {
-                                idle_count = 0;
-                            }
+                                        "data: " + j.dump() + "\n\n";
 
-                            for (const auto& c : chunks) {
-                                json j;
-                                j["id"] = c.id;
-                                j["job_id"] = c.job_id;
-                                j["stream"] = c.stream;
-                                j["content"] = c.content;
-                                std::string event =
-                                    "data: " + j.dump() + "\n\n";
-                                if (!sink.write(event.data(),
-                                                event.size()))
-                                    return false;
-                                last_id = std::max(last_id, c.id);
-                            }
+                                    std::lock_guard lock(state->mu);
+                                    state->pending.push_back(
+                                        std::move(event));
+                                    state->cv.notify_one();
+                                });
 
-                            std::this_thread::sleep_for(
-                                std::chrono::milliseconds(500));
+                            // Subscribe to run completion.
+                            close_id = deps.run_stream->on_close(run_id,
+                                [state](const std::string& /*rid*/) {
+                                    std::lock_guard lock(state->mu);
+                                    state->closed = true;
+                                    state->cv.notify_one();
+                                });
                         }
-                        return false;  // Close stream on timeout.
+
+                        // If RunStream is not available, fall back to
+                        // poll-based mode (same as v1 behavior).
+                        if (!deps.run_stream) {
+                            int64_t last_id = 0;
+                            int idle_count = 0;
+                            constexpr int max_idle = 600;
+
+                            while (idle_count < max_idle) {
+                                if (!deps.reader) break;
+                                auto chunks =
+                                    deps.reader->get_log_chunks(
+                                        run_id, last_id, 100);
+                                if (chunks.empty()) {
+                                    auto run =
+                                        deps.reader->get_run_summary(
+                                            run_id);
+                                    if (run &&
+                                        run->status != "RUNNING") {
+                                        std::string event =
+                                            "event: complete\n"
+                                            "data: {\"status\":\"" +
+                                            run->status + "\"}\n\n";
+                                        sink.write(event.data(),
+                                                   event.size());
+                                        return false;
+                                    }
+                                    ++idle_count;
+                                } else {
+                                    idle_count = 0;
+                                }
+                                for (const auto& c : chunks) {
+                                    nlohmann::json j;
+                                    j["id"] = c.id;
+                                    j["job_id"] = c.job_id;
+                                    j["stream"] = c.stream;
+                                    j["content"] = c.content;
+                                    std::string ev =
+                                        "data: " + j.dump() + "\n\n";
+                                    if (!sink.write(ev.data(),
+                                                    ev.size()))
+                                        return false;
+                                    last_id = std::max(last_id, c.id);
+                                }
+                                std::this_thread::sleep_for(
+                                    std::chrono::milliseconds(500));
+                            }
+                            return false;
+                        }
+
+                        // Push-based main loop: wait for chunks from
+                        // RunStream or close signal.
+                        constexpr auto timeout = std::chrono::minutes(5);
+                        auto deadline =
+                            std::chrono::steady_clock::now() + timeout;
+
+                        while (true) {
+                            std::vector<std::string> batch;
+                            bool done = false;
+
+                            {
+                                std::unique_lock lock(state->mu);
+                                state->cv.wait_for(lock,
+                                    std::chrono::milliseconds(500),
+                                    [&state] {
+                                        return !state->pending.empty()
+                                            || state->closed;
+                                    });
+
+                                batch = std::move(state->pending);
+                                state->pending.clear();
+                                done = state->closed;
+                            }
+
+                            // Write buffered chunks.
+                            for (const auto& event : batch) {
+                                if (!sink.write(event.data(),
+                                                event.size())) {
+                                    // Client disconnected.
+                                    deps.run_stream->unsubscribe(sub_id);
+                                    deps.run_stream->unsubscribe(
+                                        close_id);
+                                    return false;
+                                }
+                            }
+
+                            if (done) {
+                                // Emit completion event.
+                                std::string status = "completed";
+                                if (deps.reader) {
+                                    auto run =
+                                        deps.reader->get_run_summary(
+                                            run_id);
+                                    if (run) status = run->status;
+                                }
+                                std::string event =
+                                    "event: complete\n"
+                                    "data: {\"status\":\"" +
+                                    status + "\"}\n\n";
+                                sink.write(event.data(), event.size());
+                                return false;
+                            }
+
+                            // Timeout check.
+                            if (std::chrono::steady_clock::now() >
+                                deadline) {
+                                deps.run_stream->unsubscribe(sub_id);
+                                deps.run_stream->unsubscribe(close_id);
+                                return false;
+                            }
+                        }
+
+                        return false;
                     }
                 );
             });

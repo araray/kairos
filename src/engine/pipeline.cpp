@@ -101,12 +101,33 @@ RunStatus Pipeline::process_event(const TriggerEvent& event,
 
     if (deps_.active_runs) deps_.active_runs->increment(event.target_id);
 
+    // ── Per-run cancellation (§23.10) ─────────────────────────────
+    // Register this run with the CancelRegistry to get a per-run
+    // stop_token. Create a CombinedStopToken that fires when either
+    // the global stop OR the per-run cancel fires.
+    std::stop_token run_cancel_token;
+    if (deps_.cancel_registry) {
+        run_cancel_token = deps_.cancel_registry->register_run(ctx.run_id);
+    }
+
+    // Build combined stop token: fires on global shutdown OR per-run cancel.
+    CombinedStopToken combined;
+    std::stop_token effective_stop = stop;
+    if (deps_.cancel_registry) {
+        combined.arm(stop, run_cancel_token);
+        effective_stop = combined.token();
+    }
+
+    // Store cancel token for WorkItems (runner pool uses it too).
+    ctx.cancel_token = deps_.cancel_registry ? run_cancel_token
+                                              : std::stop_token{};
+
     spdlog::info("Run {} starting for workflow '{}' (trigger: {})",
                  ctx.run_id, ctx.workflow_name, ctx.trigger_type);
 
     persist_run_start(ctx);
 
-    auto status = execute_run(*dag_opt, ctx, stop);
+    auto status = execute_run(*dag_opt, ctx, effective_stop);
     ctx.run_status = status;
 
     persist_run_complete(ctx);
@@ -115,6 +136,11 @@ RunStatus Pipeline::process_event(const TriggerEvent& event,
     // Any live followers (CLI --follow, MCP, SSE) will see
     // the stream end and can check the final run status.
     if (deps_.run_stream) deps_.run_stream->close_run(ctx.run_id);
+
+    // Unregister from CancelRegistry (cleanup).
+    if (deps_.cancel_registry) {
+        deps_.cancel_registry->unregister_run(ctx.run_id);
+    }
 
     if (deps_.active_runs) deps_.active_runs->decrement(event.target_id);
 
@@ -443,6 +469,12 @@ RunStatus Pipeline::execute_job(const std::string& job_id, RunContext& ctx,
         item.correlation_id = ctx.correlation_id;
         item.process_spec = std::move(proc_spec);
         item.output_callback = exec::make_output_callback(output_mux);
+        // Per-run cancel token (§23.10): the runner pool will merge
+        // this with the global stop token so that cancelling a single
+        // run kills only that run's processes.
+        if (ctx.cancel_token.stop_possible()) {
+            item.cancel_token = ctx.cancel_token;
+        }
         item.on_complete = [step_promise](
             const std::string&, exec::ProcessResult result) {
             step_promise->set_value(std::move(result));

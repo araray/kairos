@@ -398,19 +398,48 @@ void McpHandler::start_log_follow(
     const std::string& run_id,
     std::stop_token stop)
 {
-    // In Phase 4, this will subscribe to the Pipeline's RunStream
-    // and emit log chunks as they arrive. For v1 (Phase 3), the
-    // method is implemented but relies on SQLite polling (same
-    // approach as CLI follow mode per §23.8).
-    //
-    // When the Pipeline produces a RunStream (§14.7), this method
-    // will be updated to use direct subscription instead of polling.
-    //
-    // For now, log a diagnostic and return — the full follow
-    // implementation requires RunStream which is Phase 4 scope.
-    spdlog::debug("MCP log follow requested for run={} (polling "
-                  "not yet wired — requires RunStream from Phase 4)",
-                  run_id);
+    // ── RunStream-based log following (§22.7) ─────────────────────
+    // Subscribe to the RunStream for this run_id. Each output chunk
+    // is base64-encoded and emitted as a JSON-RPC notification.
+    // When the run completes (close_run), emit run_complete.
+
+    if (!deps_.run_stream) {
+        spdlog::debug("MCP log follow: RunStream not available for "
+                      "run '{}'", run_id);
+        return;
+    }
+
+    if (!deps_.transport) {
+        spdlog::debug("MCP log follow: no transport for run '{}'",
+                      run_id);
+        return;
+    }
+
+    spdlog::info("MCP log follow: subscribing to run '{}'", run_id);
+
+    // Subscribe to output chunks.
+    // The callback runs on the ProcessHandle's reader thread.
+    deps_.run_stream->subscribe(run_id,
+        [this](const std::string& rid,
+               const std::string& job_id,
+               const std::string& /*step_id*/,
+               std::string_view chunk,
+               bool is_stderr) {
+            emit_log_chunk(rid, job_id,
+                           is_stderr ? "stderr" : "stdout",
+                           std::string(chunk));
+        });
+
+    // Subscribe to run completion.
+    // Invoked by Pipeline when the run finishes (via close_run).
+    deps_.run_stream->on_close(run_id,
+        [this](const std::string& rid) {
+            spdlog::debug("MCP log follow: run '{}' completed", rid);
+            // We don't have the exact status and duration here.
+            // Emit with "completed" — the client can query the
+            // actual status via kairos.getRunDetail if needed.
+            emit_run_complete(rid, "completed", 0);
+        });
 }
 
 // ── Helper: wrap tool result ───────────────────────────────────────────────

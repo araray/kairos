@@ -15,6 +15,7 @@
 
 #include <chrono>
 #include <functional>
+#include <optional>
 #include <stop_token>
 #include <string>
 #include <thread>
@@ -46,6 +47,13 @@ struct WorkItem {
     /// Optional output streaming callback.
     /// If set, attached to the ProcessHandle before spawn.
     OutputCallback output_callback;
+
+    /// Optional per-run stop token for individual run cancellation.
+    /// When present, the worker merges this with the global stop token
+    /// so that cancelling a single run kills only that run's processes
+    /// without stopping the entire daemon.
+    /// See CancelRegistry (§23.10) for the cancellation flow.
+    std::optional<std::stop_token> cancel_token;
 };
 
 // ── Runner pool ──────────────────────────────────────────────────────────
