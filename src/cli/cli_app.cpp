@@ -1968,7 +1968,7 @@ int run(int argc, char** argv) {
                                 ctx, std::chrono::system_clock::now());
 
                             kel::EvalLimits limits;
-                            auto result = kel::evaluate(
+                            auto result = kel::eval_expression(
                                 *dag_node.condition_expr, ctx, limits);
 
                             if (result.is_bool()) {
