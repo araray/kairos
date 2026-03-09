@@ -458,7 +458,12 @@ int run(int argc, char** argv) {
 
         observability::initialize_logging(log_cfg);
 
-        return daemon::run_daemon(cfg);
+        int rc = daemon::run_daemon(cfg);
+        // Shutdown logging AFTER run_daemon() returns — all its stack
+        // locals (including InotifyWatcher whose destructor logs) are
+        // now destroyed, so it's safe to tear down spdlog.
+        observability::shutdown_logging();
+        return rc;
     }
 
     // ── watches list ──────────────────────────────────────────────

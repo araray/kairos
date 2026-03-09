@@ -588,7 +588,13 @@ int run_daemon(std::shared_ptr<const kairos::config::ConfigState> config) {
     //    Their destructors would then access freed memory → segfault.
 
     log->info("Kairos stopped");
-    observability::shutdown_logging();
+
+    // NOTE: Do NOT call observability::shutdown_logging() here!
+    // Stack-allocated objects (InotifyWatcher, WatchEngine, etc.) have
+    // destructors that call spdlog::debug(). If we shut down spdlog
+    // before those destructors run, the default logger is null → segfault.
+    // shutdown_logging() is called by the CLI layer after run_daemon()
+    // returns and all locals have been destroyed.
 
     return 0;
 }
