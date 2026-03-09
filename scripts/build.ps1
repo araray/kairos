@@ -187,7 +187,7 @@ switch ($Profile)
     { $BuildType = "Debug"; $EnableAsan = "ON"; $EnableTests = "ON"
     }
     "full"
-    { $BuildType = "Release"; $EnableHttp = "ON"; $EnableVault = "ON"; $EnableTests = "ON"
+    { $BuildType = "Release"; $EnableHttp = "ON"; $EnableOtel = "ON"; $EnableVault = "ON"; $EnableTests = "ON"
     }
 }
 
