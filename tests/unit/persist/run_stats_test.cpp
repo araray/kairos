@@ -56,9 +56,11 @@ protected:
 
         std::string sql =
             "INSERT INTO runs (run_id, target_type, target_id, "
-            "target_name, trigger_type, status, created_at) "
+            "target_name, trigger_type, trigger_id, correlation_id, "
+            "status, start_ts, created_at) "
             "VALUES ('" + run_id + "', 'workflow', 'wfl-test', "
-            "'test', 'manual', '" + status + "', " + ts + ")";
+            "'test', 'manual', 'trg-test', 'corr-test', "
+            "'" + status + "', " + ts + ", " + ts + ")";
         db_->exec(sql);
     }
 
