@@ -121,7 +121,7 @@ static std::unique_ptr<SQLite::Database> make_test_db() {
             created_at TEXT NOT NULL DEFAULT (datetime('now'))
         );
 
-        CREATE TABLE IF NOT EXISTS run_jobs (
+        CREATE TABLE IF NOT EXISTS job_runs (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             run_id TEXT NOT NULL,
             job_id TEXT NOT NULL,
@@ -136,7 +136,7 @@ static std::unique_ptr<SQLite::Database> make_test_db() {
             FOREIGN KEY(run_id) REFERENCES runs(run_id)
         );
 
-        CREATE TABLE IF NOT EXISTS run_steps (
+        CREATE TABLE IF NOT EXISTS step_runs (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             run_id TEXT NOT NULL,
             job_id TEXT NOT NULL,
@@ -226,7 +226,7 @@ static void seed_test_runs(SQLite::Database& db) {
 
     // Job runs for run-001.
     db.exec(R"SQL(
-        INSERT INTO run_jobs (run_id, job_id, job_name, status,
+        INSERT INTO job_runs (run_id, job_id, job_name, status,
                               exit_code, start_ts, end_ts, duration_ms,
                               condition_result)
         VALUES ('run-001', 'job-setup', 'setup', 'SUCCESS', 0,
@@ -236,7 +236,7 @@ static void seed_test_runs(SQLite::Database& db) {
 
     // Step runs for run-001.
     db.exec(R"SQL(
-        INSERT INTO run_steps (run_id, job_id, step_id, step_name,
+        INSERT INTO step_runs (run_id, job_id, step_id, step_name,
                                status, exit_code, start_ts, end_ts,
                                duration_ms, command)
         VALUES ('run-001', 'job-setup', 'stp-001', 'echo-hello',
@@ -317,20 +317,21 @@ protected:
 // ═══════════════════════════════════════════════════════════════════════════
 
 TEST_F(McpToolsTest, Dispatch_AllToolsResolvable) {
+    // Pair: tool name → minimum args (json::object() for no args).
     std::vector<std::pair<std::string, json>> tools = {
-        {"kairos.listWorkflows", {}},
+        {"kairos.listWorkflows", json::object()},
         {"kairos.getWorkflow", {{"workflow_id", "wfl-abc123"}}},
         {"kairos.runWorkflow", {{"workflow_id", "wfl-abc123"}}},
-        {"kairos.listJobs", {}},
+        {"kairos.listJobs", json::object()},
         {"kairos.runJob", {{"job_id", "job-backup"}}},
-        {"kairos.queryRuns", {}},
+        {"kairos.queryRuns", json::object()},
         {"kairos.getRunDetail", {{"run_id", "run-001"}}},
         {"kairos.getRunLogs", {{"run_id", "run-001"}}},
         {"kairos.getStepOutput", {{"run_id", "run-001"},
                                   {"step_id", "stp-001"}}},
         {"kairos.explainPlan", {{"workflow_id", "wfl-abc123"}}},
-        {"kairos.reloadConfig", {}},
-        {"kairos.getMetrics", {}},
+        {"kairos.reloadConfig", json::object()},
+        {"kairos.getMetrics", json::object()},
     };
 
     for (const auto& [name, args] : tools) {
@@ -833,9 +834,11 @@ TEST_F(McpToolsTest, UpdateRegistry_ReflectsNewWorkflows) {
 TEST_F(McpToolsTest, ToolsList_Contains14Tools) {
     auto result = handler_->dispatch("tools/list", {}, 1);
     auto tools = result["tools"];
-    EXPECT_EQ(tools.size(), 14u);
 
-    // Check each expected tool name is present.
+    // 14 tools from spec §22.4 + 1 additional (watchScanOnce) = 15.
+    EXPECT_EQ(tools.size(), 15u);
+
+    // Verify all expected tool names are present.
     std::vector<std::string> expected_tools = {
         "kairos.listWorkflows", "kairos.getWorkflow",
         "kairos.runWorkflow",   "kairos.listJobs",
@@ -844,28 +847,10 @@ TEST_F(McpToolsTest, ToolsList_Contains14Tools) {
         "kairos.getStepOutput", "kairos.listWatchGroups",
         "kairos.getEvents",     "kairos.watchScanOnce",
         "kairos.reloadConfig",  "kairos.explainPlan",
+        "kairos.getMetrics",
     };
 
-    // Note: getMetrics is the 15th — wait, let me count.
-    // Actually 15 tools. Let me re-check.
-    // listWorkflows, getWorkflow, runWorkflow, listJobs, runJob,
-    // queryRuns, getRunDetail, getRunLogs, getStepOutput,
-    // listWatchGroups, getEvents, watchScanOnce, reloadConfig,
-    // explainPlan, getMetrics = 15!
-    //
-    // But spec §22.4 says 14. getMetrics is the 14th (watchScanOnce
-    // was added as an extra diagnostic). Actually, looking at the
-    // spec table, there are exactly 14 tools listed. Let me verify
-    // the count from the build_tool_schemas function.
-    // The schemas list: listWorkflows(1), getWorkflow(2),
-    // runWorkflow(3), listJobs(4), runJob(5), queryRuns(6),
-    // getRunDetail(7), getRunLogs(8), getStepOutput(9),
-    // listWatchGroups(10), getEvents(11), watchScanOnce(12),
-    // reloadConfig(13), explainPlan(14), getMetrics(15) = 15!
-    //
-    // The spec says 14 but we have 15 (watchScanOnce is extra).
-    // This is fine — more tools than spec requires.
-    EXPECT_GE(tools.size(), 14u);
+    EXPECT_EQ(tools.size(), expected_tools.size());
 }
 
 TEST_F(McpToolsTest, ToolsList_AllHaveInputSchema) {

@@ -127,6 +127,10 @@ json McpHandler::handle_tools_call(const json& params) {
     }
     auto tool_name = params.at("name").get<std::string>();
     auto arguments = params.value("arguments", json::object());
+    // Guard: if arguments was explicitly null, default to empty object.
+    if (arguments.is_null()) {
+        arguments = json::object();
+    }
 
     // Tool dispatch table — all 14 tools fully wired.
     static const std::unordered_map<
