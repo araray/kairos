@@ -235,6 +235,16 @@ public:
     /// Serialize all metrics as JSON.
     [[nodiscard]] std::string to_json() const;
 
+    /// Create a vector of metric snapshot entries for persistence (§20.5).
+    /// Returns one entry per counter/gauge + one per histogram (sum value).
+    struct SnapshotEntry {
+        std::string metric_name;
+        std::string metric_type;     ///< "counter", "gauge", "histogram"
+        double value = 0.0;
+        std::string labels_json;     ///< JSON object of label key-values
+    };
+    [[nodiscard]] std::vector<SnapshotEntry> snapshot_entries() const;
+
     /// @return Total number of registered instruments.
     [[nodiscard]] std::size_t instrument_count() const;
 

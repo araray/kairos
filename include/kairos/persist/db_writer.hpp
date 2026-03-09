@@ -170,6 +170,19 @@ struct PruneOlderThan {
     std::string cutoff_date;        ///< ISO-8601
 };
 
+/// Insert a metrics snapshot (periodic persistence per §20.5).
+struct InsertMetricsSnapshot {
+    std::string metric_name;
+    std::string metric_type;        ///< "counter", "gauge", "histogram"
+    double value = 0.0;
+    std::string labels_json;        ///< JSON object of label key-values (empty if no labels)
+};
+
+/// Batch insert of all metrics in one transaction (one snapshot epoch).
+struct BatchInsertMetricsSnapshots {
+    std::vector<InsertMetricsSnapshot> entries;
+};
+
 /// Union of all write request types.
 using DBWriteRequest = std::variant<
     InsertRun, UpdateRunComplete,
@@ -179,7 +192,8 @@ using DBWriteRequest = std::variant<
     InsertTriggerHistory,
     InsertWatchSample, InsertWatchEvent,
     BatchInsertWatchSamples, PruneWatchSamples,
-    PruneOlderThan
+    PruneOlderThan,
+    InsertMetricsSnapshot, BatchInsertMetricsSnapshots
 >;
 
 // ── DB Writer ────────────────────────────────────────────────────────────
@@ -245,6 +259,7 @@ private:
     std::unique_ptr<SQLite::Statement> stmt_insert_trigger_;
     std::unique_ptr<SQLite::Statement> stmt_insert_watch_sample_;
     std::unique_ptr<SQLite::Statement> stmt_insert_watch_event_;
+    std::unique_ptr<SQLite::Statement> stmt_insert_metrics_snapshot_;
 };
 
 }  // namespace kairos::persist

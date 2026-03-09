@@ -417,3 +417,22 @@ add_executable(test_watch_scan_spans
 )
 target_link_libraries(test_watch_scan_spans PRIVATE kairos_test_helpers)
 gtest_discover_tests(test_watch_scan_spans)
+
+# ── Phase 3 Batch 12: QueryReader CLI query tests ───────────────
+
+# query_recent_runs, get_run_detail, get_log_chunks, get_run_summary,
+# query_metrics_snapshots
+add_executable(test_query_reader_cli
+    unit/persist/query_reader_cli_test.cpp
+)
+target_link_libraries(test_query_reader_cli PRIVATE kairos_test_helpers)
+gtest_discover_tests(test_query_reader_cli)
+
+# ── Phase 3 Batch 12: Metrics snapshot persistence tests ────────
+
+# snapshot_entries, InsertMetricsSnapshot, BatchInsertMetricsSnapshots
+add_executable(test_metrics_snapshot
+    unit/persist/metrics_snapshot_test.cpp
+)
+target_link_libraries(test_metrics_snapshot PRIVATE kairos_test_helpers)
+gtest_discover_tests(test_metrics_snapshot)

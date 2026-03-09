@@ -7,9 +7,15 @@
 #include "kairos/config/config_store.hpp"
 #include "kairos/config/yaml_loader.hpp"
 #include "kairos/core/exit_codes.hpp"
+#include "kairos/core/id_generator.hpp"
 #include "kairos/core/version.hpp"
 #include "kairos/daemon/daemon.hpp"
+#include "kairos/engine/pipeline.hpp"
+#include "kairos/engine/trigger_event.hpp"
+#include "kairos/engine/trigger_types.hpp"
 #include "kairos/engine/workflow_registry.hpp"
+#include "kairos/exec/process_handle.hpp"
+#include "kairos/exec/runner_pool.hpp"
 #include "kairos/mcp/handler.hpp"
 #include "kairos/mcp/transport.hpp"
 #include "kairos/observability/logging.hpp"
@@ -31,6 +37,7 @@
 #include <fstream>
 #include <iostream>
 #include <string>
+#include <thread>
 #include <unordered_map>
 
 #ifndef _WIN32
@@ -242,11 +249,73 @@ int run(int argc, char** argv) {
     auto* config_validate = cmd_config->add_subcommand("validate",
         "Validate configuration files");
 
+    // ── runs ───────────────────────────────────────────────────────
+    auto* cmd_runs = app.add_subcommand("runs",
+        "Query run history");
+    cmd_runs->require_subcommand(1);
+
+    auto* runs_list = cmd_runs->add_subcommand("list",
+        "List recent runs");
+    int runs_limit = 20;
+    std::string runs_status;
+    std::string runs_workflow;
+    std::string runs_since;
+    runs_list->add_option("-n,--limit", runs_limit,
+        "Max runs to show (default 20)");
+    runs_list->add_option("--status", runs_status,
+        "Filter by status (SUCCESS|FAILURE|RUNNING|CANCELLED)");
+    runs_list->add_option("--workflow", runs_workflow,
+        "Filter by workflow name (substring match)");
+    runs_list->add_option("--since", runs_since,
+        "Only runs after this ISO-8601 timestamp");
+
+    auto* runs_show = cmd_runs->add_subcommand("show",
+        "Show run detail with jobs and steps");
+    std::string runs_show_id;
+    runs_show->add_option("run_id", runs_show_id,
+        "Run ID")->required();
+
+    auto* runs_cancel = cmd_runs->add_subcommand("cancel",
+        "Cancel a running run")->disabled();
+    (void)runs_cancel;
+
+    // ── logs ──────────────────────────────────────────────────────
+    auto* cmd_logs = app.add_subcommand("logs",
+        "View logs for a run");
+    std::string logs_run_id;
+    bool logs_follow = false;
+    cmd_logs->add_option("run_id", logs_run_id,
+        "Run ID")->required();
+    cmd_logs->add_flag("-f,--follow", logs_follow,
+        "Follow log output (poll until run completes)");
+
+    // ── workflows ────────────────────────────────────────────────
+    auto* cmd_workflows = app.add_subcommand("workflows",
+        "Manage workflows");
+    cmd_workflows->require_subcommand(1);
+
+    auto* workflows_list = cmd_workflows->add_subcommand("list",
+        "List all workflows");
+
+    auto* workflows_show = cmd_workflows->add_subcommand("show",
+        "Show workflow detail")->disabled();
+    (void)workflows_show;
+
+    auto* workflows_run = cmd_workflows->add_subcommand("run",
+        "Trigger a workflow run");
+    std::string workflows_run_id;
+    bool workflows_run_follow = false;
+    workflows_run->add_option("id", workflows_run_id,
+        "Workflow ID or name")->required();
+    workflows_run->add_flag("-f,--follow", workflows_run_follow,
+        "Follow log output until completion");
+
+    auto* workflows_explain = cmd_workflows->add_subcommand("explain",
+        "Explain execution plan")->disabled();
+    (void)workflows_explain;
+
     // ── Future subcommand stubs ──────────────────────────────────
-    app.add_subcommand("workflows", "Manage workflows")->disabled();
     app.add_subcommand("jobs", "Manage jobs")->disabled();
-    app.add_subcommand("runs", "Query run history")->disabled();
-    app.add_subcommand("logs", "View/follow logs")->disabled();
     app.add_subcommand("explain", "Explain execution plan")->disabled();
     app.add_subcommand("stop", "Stop the daemon")->disabled();
     app.add_subcommand("prune", "Prune old records")->disabled();
@@ -963,6 +1032,511 @@ int run(int argc, char** argv) {
             }
             return static_cast<int>(ExitCode::kConfigError);
         }
+    }
+
+    // ── runs list ────────────────────────────────────────────────
+    if (runs_list->parsed()) {
+        setup_logging(log_level, json_output, false);
+
+        auto cfg = load_config_or_die(config_path, {});
+        if (!cfg) return static_cast<int>(ExitCode::kConfigError);
+
+        try {
+            auto db = persist::open_database(cfg->db_path);
+            persist::QueryReader reader(*db);
+
+            auto runs = reader.query_recent_runs(
+                runs_limit, runs_status, runs_workflow, runs_since);
+
+            if (json_output) {
+                json arr = json::array();
+                for (const auto& r : runs) {
+                    arr.push_back({
+                        {"run_id", r.run_id},
+                        {"target_type", r.target_type},
+                        {"target_name", r.target_name},
+                        {"trigger_type", r.trigger_type},
+                        {"status", r.status},
+                        {"exit_code", r.exit_code},
+                        {"started_at", r.start_ts},
+                        {"finished_at", r.end_ts},
+                        {"duration_ms", r.duration_ms}
+                    });
+                }
+                std::cout << json(arr).dump(2) << "\n";
+            } else {
+                if (runs.empty()) {
+                    std::cout << "No runs found.\n";
+                } else {
+                    // Human-friendly table output (§23.4).
+                    auto format_duration = [](int64_t ms) -> std::string {
+                        if (ms <= 0) return "--";
+                        if (ms < 1000) return fmt::format("{}ms", ms);
+                        if (ms < 60000)
+                            return fmt::format("{:.1f}s", ms / 1000.0);
+                        return fmt::format("{:.1f}m", ms / 60000.0);
+                    };
+
+                    auto status_indicator = [](const std::string& s) -> std::string {
+                        if (s == "SUCCESS") return "[ok]";
+                        if (s == "FAILURE") return "[!!]";
+                        if (s == "RUNNING") return "[>>]";
+                        if (s == "CANCELLED") return "[--]";
+                        return "[??]";
+                    };
+
+                    // Truncate run_id for display (first 12 chars).
+                    auto short_id = [](const std::string& id) -> std::string {
+                        return id.size() > 12 ? id.substr(0, 12) : id;
+                    };
+
+                    std::cout << fmt::format(
+                        "{:<14} {:<20} {:<9} {:<8} {:<20} {}\n",
+                        "RUN ID", "WORKFLOW", "STATUS", "TRIGGER",
+                        "STARTED", "DURATION");
+                    std::cout << std::string(90, '-') << "\n";
+
+                    for (const auto& r : runs) {
+                        std::cout << fmt::format(
+                            "{:<14} {:<20} {} {:<6} {:<8} {:<20} {}\n",
+                            short_id(r.run_id),
+                            r.target_name.size() > 20
+                                ? r.target_name.substr(0, 18) + ".."
+                                : r.target_name,
+                            status_indicator(r.status),
+                            r.status.size() > 6
+                                ? r.status.substr(0, 6)
+                                : r.status,
+                            r.trigger_type,
+                            r.start_ts.size() > 19
+                                ? r.start_ts.substr(0, 19)
+                                : r.start_ts,
+                            format_duration(r.duration_ms));
+                    }
+                    std::cout << "\n" << runs.size() << " run(s)\n";
+                }
+            }
+        } catch (const std::exception& e) {
+            std::cerr << "Failed to query runs: " << e.what()
+                      << "\nRun 'kairos init-db' first if the "
+                      << "database does not exist.\n";
+            return 1;
+        }
+        return 0;
+    }
+
+    // ── runs show ────────────────────────────────────────────────
+    if (runs_show->parsed()) {
+        setup_logging(log_level, json_output, false);
+
+        auto cfg = load_config_or_die(config_path, {});
+        if (!cfg) return static_cast<int>(ExitCode::kConfigError);
+
+        try {
+            auto db = persist::open_database(cfg->db_path);
+            persist::QueryReader reader(*db);
+
+            auto detail = reader.get_run_detail(runs_show_id);
+            if (!detail) {
+                if (json_output) {
+                    std::cout << json{
+                        {"error", "Run not found"},
+                        {"run_id", runs_show_id}
+                    }.dump(2) << "\n";
+                } else {
+                    std::cerr << "Run '" << runs_show_id
+                              << "' not found.\n";
+                }
+                return static_cast<int>(ExitCode::kNotFound);
+            }
+
+            if (json_output) {
+                json jobs_arr = json::array();
+                for (const auto& j : detail->jobs) {
+                    json steps_arr = json::array();
+                    for (const auto& s : j.steps) {
+                        steps_arr.push_back({
+                            {"step_id", s.step_id},
+                            {"step_name", s.step_name},
+                            {"status", s.status},
+                            {"exit_code", s.exit_code},
+                            {"started_at", s.start_ts},
+                            {"finished_at", s.end_ts},
+                            {"duration_ms", s.duration_ms},
+                            {"command", s.command}
+                        });
+                    }
+                    jobs_arr.push_back({
+                        {"job_id", j.job_id},
+                        {"job_name", j.job_name},
+                        {"status", j.status},
+                        {"exit_code", j.exit_code},
+                        {"started_at", j.start_ts},
+                        {"finished_at", j.end_ts},
+                        {"duration_ms", j.duration_ms},
+                        {"condition_result", j.condition_result},
+                        {"steps", steps_arr}
+                    });
+                }
+                std::cout << json{
+                    {"run_id", detail->run.run_id},
+                    {"target_type", detail->run.target_type},
+                    {"target_name", detail->run.target_name},
+                    {"trigger_type", detail->run.trigger_type},
+                    {"status", detail->run.status},
+                    {"exit_code", detail->run.exit_code},
+                    {"started_at", detail->run.start_ts},
+                    {"finished_at", detail->run.end_ts},
+                    {"duration_ms", detail->run.duration_ms},
+                    {"jobs", jobs_arr}
+                }.dump(2) << "\n";
+            } else {
+                auto format_duration = [](int64_t ms) -> std::string {
+                    if (ms <= 0) return "--";
+                    if (ms < 1000) return fmt::format("{}ms", ms);
+                    if (ms < 60000)
+                        return fmt::format("{:.1f}s", ms / 1000.0);
+                    return fmt::format("{:.1f}m", ms / 60000.0);
+                };
+
+                const auto& r = detail->run;
+                std::cout << "\n  Run: " << r.run_id << "\n";
+                std::cout << "  Workflow: " << r.target_name
+                          << " (" << r.target_id << ")\n";
+                std::cout << "  Status: " << r.status
+                          << "  Exit: " << r.exit_code << "\n";
+                std::cout << "  Trigger: " << r.trigger_type << "\n";
+                std::cout << "  Started: " << r.start_ts << "\n";
+                if (!r.end_ts.empty()) {
+                    std::cout << "  Finished: " << r.end_ts
+                              << "  Duration: "
+                              << format_duration(r.duration_ms) << "\n";
+                }
+
+                if (!detail->jobs.empty()) {
+                    std::cout << "\n  Jobs (" << detail->jobs.size()
+                              << "):\n";
+                    for (const auto& j : detail->jobs) {
+                        std::string indicator =
+                            j.status == "SUCCESS" ? "[ok]" :
+                            j.status == "FAILURE" ? "[!!]" :
+                            j.status == "SKIPPED" ? "[--]" : "[>>]";
+                        std::cout << "    " << indicator << " "
+                                  << j.job_name << " — "
+                                  << j.status << " ("
+                                  << format_duration(j.duration_ms)
+                                  << ")\n";
+
+                        for (const auto& s : j.steps) {
+                            std::string s_ind =
+                                s.status == "SUCCESS" ? " ok " :
+                                s.status == "FAILURE" ? " !! " : " >> ";
+                            std::cout << "        [" << s_ind << "] "
+                                      << s.step_name << " — "
+                                      << s.status << " (exit "
+                                      << s.exit_code << ", "
+                                      << format_duration(s.duration_ms)
+                                      << ")\n";
+                        }
+                    }
+                }
+                std::cout << "\n";
+            }
+        } catch (const std::exception& e) {
+            std::cerr << "Failed to get run detail: " << e.what() << "\n";
+            return 1;
+        }
+        return 0;
+    }
+
+    // ── logs ─────────────────────────────────────────────────────
+    if (cmd_logs->parsed()) {
+        setup_logging(log_level, json_output, false);
+
+        auto cfg = load_config_or_die(config_path, {});
+        if (!cfg) return static_cast<int>(ExitCode::kConfigError);
+
+        try {
+            auto db = persist::open_database(cfg->db_path);
+            persist::QueryReader reader(*db);
+
+            // Verify run exists.
+            auto run_opt = reader.get_run_summary(logs_run_id);
+            if (!run_opt) {
+                if (json_output) {
+                    std::cout << json{
+                        {"error", "Run not found"},
+                        {"run_id", logs_run_id}
+                    }.dump(2) << "\n";
+                } else {
+                    std::cerr << "Run '" << logs_run_id
+                              << "' not found.\n";
+                }
+                return static_cast<int>(ExitCode::kNotFound);
+            }
+
+            int64_t cursor = 0;
+
+            // Fetch and display log chunks.
+            auto render_chunk = [&json_output](
+                const persist::QueryReader::LogChunk& chunk)
+            {
+                if (json_output) {
+                    std::cout << json{
+                        {"id", chunk.id},
+                        {"job_id", chunk.job_id},
+                        {"step_id", chunk.step_id},
+                        {"stream", chunk.stream},
+                        {"content", chunk.content},
+                        {"timestamp", chunk.created_at}
+                    }.dump() << "\n";
+                } else {
+                    // Human output: prefix with stream indicator.
+                    std::string prefix =
+                        chunk.stream == "stderr" ? "ERR| " : "   | ";
+                    std::cout << prefix << chunk.content;
+                    // Add newline if content doesn't end with one.
+                    if (!chunk.content.empty() &&
+                        chunk.content.back() != '\n') {
+                        std::cout << "\n";
+                    }
+                }
+            };
+
+            // Initial fetch.
+            auto chunks = reader.get_log_chunks(logs_run_id, cursor);
+            for (const auto& c : chunks) {
+                render_chunk(c);
+                cursor = std::max(cursor, c.id);
+            }
+
+            if (!logs_follow) {
+                if (chunks.empty() && !json_output) {
+                    std::cout << "(no log output for run "
+                              << logs_run_id << ")\n";
+                }
+                return 0;
+            }
+
+            // Follow mode: poll at 200ms until run completes (§23.8).
+            while (true) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(200));
+
+                auto new_chunks = reader.get_log_chunks(
+                    logs_run_id, cursor, 100);
+                for (const auto& c : new_chunks) {
+                    render_chunk(c);
+                    cursor = std::max(cursor, c.id);
+                }
+
+                // Check if run is still active.
+                auto current = reader.get_run_summary(logs_run_id);
+                if (current &&
+                    current->status != "RUNNING" &&
+                    current->status != "PENDING") {
+                    // Final drain.
+                    auto final_chunks = reader.get_log_chunks(
+                        logs_run_id, cursor, 1000);
+                    for (const auto& c : final_chunks) {
+                        render_chunk(c);
+                    }
+                    if (!json_output) {
+                        std::cout << "\n--- Run " << current->status
+                                  << " (exit " << current->exit_code
+                                  << ") ---\n";
+                    }
+                    break;
+                }
+            }
+        } catch (const std::exception& e) {
+            std::cerr << "Failed to get logs: " << e.what() << "\n";
+            return 1;
+        }
+        return 0;
+    }
+
+    // ── workflows list ───────────────────────────────────────────
+    if (workflows_list->parsed()) {
+        setup_logging(log_level, json_output, false);
+
+        auto cfg = load_config_or_die(config_path, {});
+        if (!cfg) return static_cast<int>(ExitCode::kConfigError);
+
+        auto registry = load_registry_from_yaml(
+            cfg, spdlog::default_logger());
+
+        const auto& workflows = registry->workflows();
+
+        if (json_output) {
+            json arr = json::array();
+            for (const auto* wf : workflows) {
+                json jobs_arr = json::array();
+                for (const auto& j : wf->jobs) {
+                    jobs_arr.push_back(j.job_name);
+                }
+                arr.push_back({
+                    {"id", wf->workflow_id},
+                    {"name", wf->workflow_name},
+                    {"job_count", static_cast<int>(wf->jobs.size())},
+                    {"jobs", jobs_arr}
+                });
+            }
+            std::cout << json(arr).dump(2) << "\n";
+        } else {
+            if (workflows.empty()) {
+                std::cout << "No workflows configured.\n";
+            } else {
+                std::cout << fmt::format("{:<30} {:<12} {}\n",
+                    "WORKFLOW", "ID", "JOBS");
+                std::cout << std::string(70, '-') << "\n";
+                for (const auto* wf : workflows) {
+                    std::string jobs;
+                    for (size_t i = 0; i < wf->jobs.size(); ++i) {
+                        if (i > 0) jobs += ", ";
+                        jobs += wf->jobs[i].job_name;
+                    }
+                    std::cout << fmt::format("{:<30} {:<12} {}\n",
+                        wf->workflow_name,
+                        wf->workflow_id.size() > 12
+                            ? wf->workflow_id.substr(0, 12)
+                            : wf->workflow_id,
+                        jobs);
+                }
+            }
+        }
+        return 0;
+    }
+
+    // ── workflows run ────────────────────────────────────────────
+    if (workflows_run->parsed()) {
+        setup_logging(log_level, json_output, false);
+
+        auto cfg = load_config_or_die(config_path, {});
+        if (!cfg) return static_cast<int>(ExitCode::kConfigError);
+
+        auto registry = load_registry_from_yaml(
+            cfg, spdlog::default_logger());
+
+        // Find the workflow by ID or name.
+        const engine::WorkflowDef* found_wf = nullptr;
+        for (const auto* wf : registry->workflows()) {
+            if (wf->workflow_id == workflows_run_id ||
+                wf->workflow_name == workflows_run_id) {
+                found_wf = wf;
+                break;
+            }
+        }
+
+        if (!found_wf) {
+            if (json_output) {
+                std::cout << json{
+                    {"error", "Workflow not found"},
+                    {"id", workflows_run_id}
+                }.dump(2) << "\n";
+            } else {
+                std::cerr << "Workflow '" << workflows_run_id
+                          << "' not found.\n";
+            }
+            return static_cast<int>(ExitCode::kNotFound);
+        }
+
+        // Open the database.
+        std::unique_ptr<SQLite::Database> db;
+        try {
+            db = persist::open_database(cfg->db_path);
+        } catch (const std::exception& e) {
+            std::cerr << "Failed to open database: " << e.what()
+                      << "\nRun 'kairos init-db' first.\n";
+            return 1;
+        }
+
+        // Create standalone pipeline dependencies (§23.10).
+        SystemClockSource clock;
+        persist::DBWriterConfig db_writer_cfg;
+        persist::DBWriter db_writer(*db, db_writer_cfg);
+
+        std::stop_source stop_source;
+        auto stop_token = stop_source.get_token();
+
+        db_writer.start(stop_token);
+
+        exec::RunnerPoolConfig pool_cfg{
+            .worker_count = 4,
+            .queue_capacity = 256,
+        };
+        exec::RunnerPool runner_pool(pool_cfg);
+        runner_pool.set_process_handle_factory([]() {
+            return exec::create_process_handle();
+        });
+        runner_pool.start(stop_token);
+
+        engine::TriggerBus trigger_bus(64);
+        persist::QueryReader query_reader(*db);
+        engine::ActiveRunTracker active_runs;
+
+        engine::PipelineConfig pipeline_cfg;
+        engine::Pipeline pipeline(pipeline_cfg, engine::Pipeline::Dependencies{
+            .clock = &clock,
+            .trigger_bus = &trigger_bus,
+            .runner_pool = &runner_pool,
+            .registry = registry,
+            .active_runs = &active_runs,
+            .db_writer = &db_writer,
+            .query_reader = &query_reader,
+        });
+
+        // Create a manual trigger event for this workflow.
+        auto correlation_id = core::generate_correlation_id();
+        auto event = engine::TriggerEvent::make_manual_run(
+            found_wf->workflow_id,
+            engine::TriggerEvent::TargetKind::Workflow,
+            correlation_id, "cli");
+
+        // Execute synchronously via the pipeline.
+        auto status = pipeline.process_event(event, stop_token);
+
+        // Get the run ID from the database (most recent run
+        // with this correlation ID).
+        std::string run_id;
+        try {
+            SQLite::Statement q(*db,
+                "SELECT run_id FROM runs WHERE correlation_id = ? "
+                "ORDER BY start_ts DESC LIMIT 1");
+            q.bind(1, correlation_id);
+            if (q.executeStep()) {
+                run_id = q.getColumn(0).getString();
+            }
+        } catch (...) {}
+
+        // Flush DB writer to persist results.
+        stop_source.request_stop();
+        db_writer.flush();
+        runner_pool.shutdown();
+
+        if (json_output) {
+            std::cout << json{
+                {"run_id", run_id},
+                {"status", std::string(engine::run_status_to_string(status))},
+                {"workflow", found_wf->workflow_name}
+            }.dump(2) << "\n";
+        } else {
+            std::string status_str(engine::run_status_to_string(status));
+            std::string indicator =
+                status == engine::RunStatus::Success ? "[ok]" :
+                status == engine::RunStatus::Failure ? "[!!]" : "[--]";
+
+            std::cout << indicator << " Workflow '" << found_wf->workflow_name
+                      << "' completed: " << status_str << "\n";
+            if (!run_id.empty()) {
+                std::cout << "  Run ID: " << run_id << "\n";
+                std::cout << "  View details: kairos runs show "
+                          << run_id << "\n";
+                std::cout << "  View logs: kairos logs "
+                          << run_id << "\n";
+            }
+        }
+
+        return status == engine::RunStatus::Success ? 0 : 1;
     }
 
     // ── mcp ───────────────────────────────────────────────────────

@@ -143,6 +143,16 @@ public:
         return workflow_defs_.size();
     }
 
+    /// Get all workflow definitions as a vector (for CLI listing).
+    [[nodiscard]] std::vector<const WorkflowDef*> workflows() const {
+        std::vector<const WorkflowDef*> result;
+        result.reserve(workflow_defs_.size());
+        for (const auto& [id, wf] : workflow_defs_) {
+            result.push_back(&wf);
+        }
+        return result;
+    }
+
     // ── Job queries ──────────────────────────────────────────────
 
     /// Get a job definition by ID (from any workflow or standalone).

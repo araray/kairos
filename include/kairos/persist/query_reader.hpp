@@ -173,6 +173,110 @@ public:
     [[nodiscard]] static int64_t query_db_size(
         const std::filesystem::path& db_path);
 
+    // ── CLI run history queries (§16.6, §23.2) ──────────────────
+
+    /// A summary record for one run (used by `runs list` and `runs show`).
+    struct RunSummary {
+        std::string run_id;
+        std::string target_type;       ///< "workflow" or "job"
+        std::string target_id;
+        std::string target_name;
+        std::string trigger_type;
+        std::string status;
+        int exit_code = 0;
+        std::string start_ts;
+        std::string end_ts;
+        int64_t duration_ms = 0;
+    };
+
+    /// Query recent runs with optional filters.
+    /// @param limit          Max number of results.
+    /// @param status_filter  Filter by status (empty = all).
+    /// @param target_filter  Filter by target_name (empty = all).
+    /// @param since          Only runs started after this ISO-8601 timestamp.
+    [[nodiscard]] std::vector<RunSummary> query_recent_runs(
+        int limit = 20,
+        const std::string& status_filter = "",
+        const std::string& target_filter = "",
+        const std::string& since = "") const;
+
+    /// Get a single run summary by run_id.
+    [[nodiscard]] std::optional<RunSummary> get_run_summary(
+        const std::string& run_id) const;
+
+    /// Full run detail with jobs and steps (§16.6).
+    struct StepDetail {
+        std::string step_id;
+        std::string step_name;
+        std::string status;
+        int exit_code = 0;
+        std::string start_ts;
+        std::string end_ts;
+        int64_t duration_ms = 0;
+        std::string command;
+    };
+
+    struct JobDetail {
+        std::string job_id;
+        std::string job_name;
+        std::string status;
+        int exit_code = 0;
+        std::string start_ts;
+        std::string end_ts;
+        int64_t duration_ms = 0;
+        std::string condition_result;
+        std::vector<StepDetail> steps;
+    };
+
+    struct RunDetail {
+        RunSummary run;
+        std::vector<JobDetail> jobs;
+    };
+
+    /// Get full run detail including jobs and steps.
+    [[nodiscard]] std::optional<RunDetail> get_run_detail(
+        const std::string& run_id) const;
+
+    // ── Log chunk queries (§23.8) ───────────────────────────────
+
+    /// A log chunk record.
+    struct LogChunk {
+        int64_t id = 0;              ///< Row ID (used as sequence/cursor).
+        std::string run_id;
+        std::string job_id;
+        std::string step_id;
+        std::string stream;          ///< "stdout" or "stderr"
+        int64_t chunk_index = 0;
+        std::string content;
+        std::string created_at;
+    };
+
+    /// Get log chunks for a run, after a given cursor (row ID).
+    /// Used by `kairos logs --follow` polling loop.
+    /// @param run_id    The run to get logs for.
+    /// @param after_id  Only return chunks with id > after_id (cursor).
+    /// @param limit     Max chunks to return.
+    [[nodiscard]] std::vector<LogChunk> get_log_chunks(
+        const std::string& run_id,
+        int64_t after_id = 0,
+        int limit = 100) const;
+
+    // ── Metrics snapshot queries (§20.5) ────────────────────────
+
+    /// A metrics snapshot row.
+    struct MetricsSnapshotRow {
+        std::string metric_name;
+        std::string metric_type;
+        double value = 0.0;
+        std::string labels_json;
+        std::string created_at;
+    };
+
+    /// Query recent metrics snapshots for `kairos status --history`.
+    /// @param limit  Number of snapshot epochs to return.
+    [[nodiscard]] std::vector<MetricsSnapshotRow> query_metrics_snapshots(
+        int limit = 10) const;
+
 private:
     SQLite::Database& db_;
 };

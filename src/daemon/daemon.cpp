@@ -417,6 +417,11 @@ int run_daemon(std::shared_ptr<const kairos::config::ConfigState> config) {
 
     auto uptime_start = std::chrono::steady_clock::now();
 
+    // Metrics snapshot interval (§20.5).
+    int snapshot_interval_s = config->global.get<int>(
+        "kairos.telemetry.metrics_snapshot_interval_seconds", 60);
+    auto last_snapshot = std::chrono::steady_clock::now();
+
     // ── Step 18: Main loop ─────────────────────────────────────────
     while (!stop_token.stop_requested()) {
         auto now = std::chrono::steady_clock::now();
@@ -431,6 +436,29 @@ int run_daemon(std::shared_ptr<const kairos::config::ConfigState> config) {
             static_cast<double>(trigger_bus.size()));
         gauge_watch_groups->set(
             static_cast<double>(watch_engine.group_count()));
+
+        // Periodic metrics snapshot to SQLite (§20.5).
+        if (snapshot_interval_s > 0) {
+            auto elapsed = std::chrono::duration<double>(
+                now - last_snapshot).count();
+            if (elapsed >= static_cast<double>(snapshot_interval_s)) {
+                auto entries = metrics_registry.snapshot_entries();
+                persist::BatchInsertMetricsSnapshots batch;
+                batch.entries.reserve(entries.size());
+                for (auto& e : entries) {
+                    batch.entries.push_back({
+                        .metric_name = std::move(e.metric_name),
+                        .metric_type = std::move(e.metric_type),
+                        .value = e.value,
+                        .labels_json = std::move(e.labels_json),
+                    });
+                }
+                db_writer.enqueue(std::move(batch));
+                last_snapshot = now;
+                log->trace("Metrics snapshot persisted ({} entries)",
+                           entries.size());
+            }
+        }
 
         // Check for reload.
         if (platform::g_reload_requested.exchange(false)) {

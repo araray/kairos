@@ -82,6 +82,10 @@ void DBWriter::prepare_statements() {
         "INSERT INTO watch_events (watch_group, event_type, file_path, "
         "rule_name, details_json, action_taken, created_at) "
         "VALUES (?, ?, ?, ?, ?, ?, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))");
+
+    stmt_insert_metrics_snapshot_ = std::make_unique<SQLite::Statement>(db_,
+        "INSERT INTO metrics_snapshots (metric_name, metric_type, value, "
+        "labels_json) VALUES (?, ?, ?, ?)");
 }
 
 void DBWriter::start(std::stop_token stop) {
@@ -334,6 +338,28 @@ void DBWriter::execute_request(const DBWriteRequest& req) {
                                  deleted, r.watch_group, r.max_epochs);
                 }
             }
+
+        } else if constexpr (std::is_same_v<T, InsertMetricsSnapshot>) {
+            // Single metric snapshot row (§20.5).
+            stmt_insert_metrics_snapshot_->reset();
+            stmt_insert_metrics_snapshot_->bind(1, r.metric_name);
+            stmt_insert_metrics_snapshot_->bind(2, r.metric_type);
+            stmt_insert_metrics_snapshot_->bind(3, r.value);
+            stmt_insert_metrics_snapshot_->bind(4, r.labels_json);
+            stmt_insert_metrics_snapshot_->exec();
+
+        } else if constexpr (std::is_same_v<T, BatchInsertMetricsSnapshots>) {
+            // Batch insert all metric values as a snapshot epoch (§20.5).
+            for (const auto& entry : r.entries) {
+                stmt_insert_metrics_snapshot_->reset();
+                stmt_insert_metrics_snapshot_->bind(1, entry.metric_name);
+                stmt_insert_metrics_snapshot_->bind(2, entry.metric_type);
+                stmt_insert_metrics_snapshot_->bind(3, entry.value);
+                stmt_insert_metrics_snapshot_->bind(4, entry.labels_json);
+                stmt_insert_metrics_snapshot_->exec();
+            }
+            spdlog::trace("Batch-inserted {} metrics snapshot entries",
+                          r.entries.size());
         }
     }, req);
 }

@@ -573,4 +573,216 @@ int64_t QueryReader::query_db_size(
     return static_cast<int64_t>(sz);
 }
 
+// ── CLI run history queries ───────────────────────────────────────────
+
+std::vector<QueryReader::RunSummary> QueryReader::query_recent_runs(
+    int limit,
+    const std::string& status_filter,
+    const std::string& target_filter,
+    const std::string& since) const
+{
+    std::vector<RunSummary> results;
+
+    // Build dynamic SQL with optional WHERE clauses.
+    std::string sql =
+        "SELECT run_id, target_type, target_id, target_name, "
+        "trigger_type, status, COALESCE(exit_code, 0), "
+        "start_ts, COALESCE(end_ts, ''), COALESCE(duration_ms, 0) "
+        "FROM runs WHERE 1=1 ";
+
+    if (!status_filter.empty()) {
+        sql += "AND status = ? ";
+    }
+    if (!target_filter.empty()) {
+        sql += "AND target_name LIKE ? ";
+    }
+    if (!since.empty()) {
+        sql += "AND start_ts >= ? ";
+    }
+    sql += "ORDER BY start_ts DESC LIMIT ?";
+
+    SQLite::Statement query(db_, sql);
+
+    int bind_idx = 1;
+    if (!status_filter.empty()) {
+        query.bind(bind_idx++, status_filter);
+    }
+    if (!target_filter.empty()) {
+        query.bind(bind_idx++, "%" + target_filter + "%");
+    }
+    if (!since.empty()) {
+        query.bind(bind_idx++, since);
+    }
+    query.bind(bind_idx, limit);
+
+    while (query.executeStep()) {
+        RunSummary r;
+        r.run_id       = query.getColumn(0).getString();
+        r.target_type  = query.getColumn(1).getString();
+        r.target_id    = query.getColumn(2).getString();
+        r.target_name  = query.getColumn(3).getString();
+        r.trigger_type = query.getColumn(4).getString();
+        r.status       = query.getColumn(5).getString();
+        r.exit_code    = query.getColumn(6).getInt();
+        r.start_ts     = query.getColumn(7).getString();
+        r.end_ts       = query.getColumn(8).getString();
+        r.duration_ms  = query.getColumn(9).getInt64();
+        results.push_back(std::move(r));
+    }
+
+    return results;
+}
+
+std::optional<QueryReader::RunSummary> QueryReader::get_run_summary(
+    const std::string& run_id) const
+{
+    SQLite::Statement query(db_,
+        "SELECT run_id, target_type, target_id, target_name, "
+        "trigger_type, status, COALESCE(exit_code, 0), "
+        "start_ts, COALESCE(end_ts, ''), COALESCE(duration_ms, 0) "
+        "FROM runs WHERE run_id = ?");
+    query.bind(1, run_id);
+
+    if (query.executeStep()) {
+        RunSummary r;
+        r.run_id       = query.getColumn(0).getString();
+        r.target_type  = query.getColumn(1).getString();
+        r.target_id    = query.getColumn(2).getString();
+        r.target_name  = query.getColumn(3).getString();
+        r.trigger_type = query.getColumn(4).getString();
+        r.status       = query.getColumn(5).getString();
+        r.exit_code    = query.getColumn(6).getInt();
+        r.start_ts     = query.getColumn(7).getString();
+        r.end_ts       = query.getColumn(8).getString();
+        r.duration_ms  = query.getColumn(9).getInt64();
+        return r;
+    }
+    return std::nullopt;
+}
+
+std::optional<QueryReader::RunDetail> QueryReader::get_run_detail(
+    const std::string& run_id) const
+{
+    // Get the run summary first.
+    auto run_opt = get_run_summary(run_id);
+    if (!run_opt) return std::nullopt;
+
+    RunDetail detail;
+    detail.run = std::move(*run_opt);
+
+    // Fetch jobs for this run.
+    SQLite::Statement job_query(db_,
+        "SELECT job_id, job_name, status, COALESCE(exit_code, 0), "
+        "COALESCE(start_ts, ''), COALESCE(end_ts, ''), "
+        "COALESCE(duration_ms, 0), COALESCE(condition_result, '') "
+        "FROM job_runs WHERE run_id = ? "
+        "ORDER BY start_ts ASC");
+    job_query.bind(1, run_id);
+
+    while (job_query.executeStep()) {
+        JobDetail job;
+        job.job_id           = job_query.getColumn(0).getString();
+        job.job_name         = job_query.getColumn(1).getString();
+        job.status           = job_query.getColumn(2).getString();
+        job.exit_code        = job_query.getColumn(3).getInt();
+        job.start_ts         = job_query.getColumn(4).getString();
+        job.end_ts           = job_query.getColumn(5).getString();
+        job.duration_ms      = job_query.getColumn(6).getInt64();
+        job.condition_result = job_query.getColumn(7).getString();
+
+        // Fetch steps for this job.
+        SQLite::Statement step_query(db_,
+            "SELECT step_id, step_name, status, COALESCE(exit_code, 0), "
+            "COALESCE(start_ts, ''), COALESCE(end_ts, ''), "
+            "COALESCE(duration_ms, 0), COALESCE(command, '') "
+            "FROM step_runs WHERE run_id = ? AND job_id = ? "
+            "ORDER BY start_ts ASC");
+        step_query.bind(1, run_id);
+        step_query.bind(2, job.job_id);
+
+        while (step_query.executeStep()) {
+            StepDetail step;
+            step.step_id     = step_query.getColumn(0).getString();
+            step.step_name   = step_query.getColumn(1).getString();
+            step.status      = step_query.getColumn(2).getString();
+            step.exit_code   = step_query.getColumn(3).getInt();
+            step.start_ts    = step_query.getColumn(4).getString();
+            step.end_ts      = step_query.getColumn(5).getString();
+            step.duration_ms = step_query.getColumn(6).getInt64();
+            step.command     = step_query.getColumn(7).getString();
+            job.steps.push_back(std::move(step));
+        }
+
+        detail.jobs.push_back(std::move(job));
+    }
+
+    return detail;
+}
+
+// ── Log chunk queries ─────────────────────────────────────────────────
+
+std::vector<QueryReader::LogChunk> QueryReader::get_log_chunks(
+    const std::string& run_id,
+    int64_t after_id,
+    int limit) const
+{
+    std::vector<LogChunk> results;
+
+    SQLite::Statement query(db_,
+        "SELECT id, run_id, job_id, step_id, stream, chunk_index, "
+        "content, created_at "
+        "FROM log_chunks WHERE run_id = ? AND id > ? "
+        "ORDER BY id ASC LIMIT ?");
+    query.bind(1, run_id);
+    query.bind(2, after_id);
+    query.bind(3, limit);
+
+    while (query.executeStep()) {
+        LogChunk chunk;
+        chunk.id          = query.getColumn(0).getInt64();
+        chunk.run_id      = query.getColumn(1).getString();
+        chunk.job_id      = query.getColumn(2).getString();
+        chunk.step_id     = query.getColumn(3).getString();
+        chunk.stream      = query.getColumn(4).getString();
+        chunk.chunk_index = query.getColumn(5).getInt64();
+        chunk.content     = query.getColumn(6).getString();
+        chunk.created_at  = query.getColumn(7).getString();
+        results.push_back(std::move(chunk));
+    }
+
+    return results;
+}
+
+// ── Metrics snapshot queries ──────────────────────────────────────────
+
+std::vector<QueryReader::MetricsSnapshotRow> QueryReader::query_metrics_snapshots(
+    int limit) const
+{
+    std::vector<MetricsSnapshotRow> results;
+
+    // Get the most recent `limit` snapshot epochs (distinct created_at values)
+    // and return all entries in those epochs.
+    SQLite::Statement query(db_,
+        "SELECT metric_name, metric_type, value, "
+        "COALESCE(labels_json, ''), created_at "
+        "FROM metrics_snapshots "
+        "WHERE created_at IN ("
+        "  SELECT DISTINCT created_at FROM metrics_snapshots "
+        "  ORDER BY created_at DESC LIMIT ?"
+        ") ORDER BY created_at DESC, metric_name ASC");
+    query.bind(1, limit);
+
+    while (query.executeStep()) {
+        MetricsSnapshotRow row;
+        row.metric_name = query.getColumn(0).getString();
+        row.metric_type = query.getColumn(1).getString();
+        row.value       = query.getColumn(2).getDouble();
+        row.labels_json = query.getColumn(3).getString();
+        row.created_at  = query.getColumn(4).getString();
+        results.push_back(std::move(row));
+    }
+
+    return results;
+}
+
 }  // namespace kairos::persist

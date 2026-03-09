@@ -205,4 +205,53 @@ std::string MetricsRegistry::to_json() const {
     return out.str();
 }
 
+// ── Metrics snapshot for persistence ────────────────────────────────────
+
+static std::string labels_to_json_string(const Labels& labels) {
+    if (labels.empty()) return {};
+    std::string result = "{";
+    for (std::size_t i = 0; i < labels.size(); ++i) {
+        if (i > 0) result += ',';
+        result += "\"" + labels[i].first + "\":\"" + labels[i].second + "\"";
+    }
+    result += '}';
+    return result;
+}
+
+std::vector<MetricsRegistry::SnapshotEntry>
+MetricsRegistry::snapshot_entries() const {
+    std::lock_guard lock(mutex_);
+    std::vector<SnapshotEntry> entries;
+    entries.reserve(counters_.size() + gauges_.size() + histograms_.size());
+
+    for (const auto& c : counters_) {
+        entries.push_back({
+            .metric_name = c->name(),
+            .metric_type = "counter",
+            .value = static_cast<double>(c->value()),
+            .labels_json = labels_to_json_string(c->labels()),
+        });
+    }
+
+    for (const auto& g : gauges_) {
+        entries.push_back({
+            .metric_name = g->name(),
+            .metric_type = "gauge",
+            .value = g->value(),
+            .labels_json = labels_to_json_string(g->labels()),
+        });
+    }
+
+    for (const auto& h : histograms_) {
+        entries.push_back({
+            .metric_name = h->name(),
+            .metric_type = "histogram",
+            .value = h->sum(),
+            .labels_json = labels_to_json_string(h->labels()),
+        });
+    }
+
+    return entries;
+}
+
 }  // namespace kairos::metrics
