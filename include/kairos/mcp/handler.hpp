@@ -126,6 +126,10 @@ private:
     /// Wrap a tool result in the MCP content array format.
     static json wrap_tool_result(const json& result);
 
+public:
+    // ── Log streaming (§22.7) ───────────────────────────────────────
+    // Public: called by start_log_follow thread and testable.
+
     /// Emit a base64-encoded log chunk notification.
     /// @param run_id   Run identifier.
     /// @param job_id   Job identifier (empty for run-level logs).
@@ -144,6 +148,7 @@ private:
                            const std::string& status,
                            int64_t duration_ms);
 
+private:
     Dependencies deps_;
     bool initialized_ = false;
 };

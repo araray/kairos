@@ -299,7 +299,19 @@ int run_daemon(std::shared_ptr<const kairos::config::ConfigState> config) {
     scheduler.start(stop_token, sched_sink);
     log->info("Scheduler thread started");
 
-    // ── Step 15: Start Watch Engine thread ─────────────────────────
+    // ── Step 15: Create tracer ───────────────────────────────────
+    // NullTracer by default; OTelTracer when KAIROS_OTEL=ON and
+    // kairos.otel.enabled=true in config.
+    // Must be created before WatchEngine which uses it.
+    bool otel_enabled = config->global.get<bool>(
+        "kairos.otel.enabled", false);
+    std::string otel_endpoint = config->global.get<std::string>(
+        "kairos.otel.endpoint", "localhost:4317");
+    auto tracer = observability::create_tracer(
+        otel_enabled, otel_endpoint, "kairos");
+    log->debug("Tracer initialized (otel={})", otel_enabled);
+
+    // ── Step 15.2: Start Watch Engine thread ──────────────────────
     watch::WatchEngineConfig watch_cfg;
     watch::RealFilesystemScanner real_scanner;  // Production scanner.
 
@@ -330,17 +342,6 @@ int run_daemon(std::shared_ptr<const kairos::config::ConfigState> config) {
     };
     watch_engine.start(stop_token, watch_sink);
     log->info("Watch engine started ({} groups)", watch_engine.group_count());
-
-    // ── Step 15.5: Create tracer ───────────────────────────────────
-    // NullTracer by default; OTelTracer when KAIROS_OTEL=ON and
-    // kairos.otel.enabled=true in config.
-    bool otel_enabled = config->global.get<bool>(
-        "kairos.otel.enabled", false);
-    std::string otel_endpoint = config->global.get<std::string>(
-        "kairos.otel.endpoint", "localhost:4317");
-    auto tracer = observability::create_tracer(
-        otel_enabled, otel_endpoint, "kairos");
-    log->debug("Tracer initialized (otel={})", otel_enabled);
 
     // ── Step 15.7: Start MCP server thread (if enabled) ───────────
     // The MCP server runs on a dedicated thread (Thread N+3 per §3.3).

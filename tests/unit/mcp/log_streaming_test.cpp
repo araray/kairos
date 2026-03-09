@@ -24,9 +24,34 @@ using json = nlohmann::json;
 
 namespace {
 
+// ── Helper: parse the first notification line from output ────────────────
+
+/// StdioTransport writes compact JSON + '\n' to the output stream.
+/// This helper extracts the first complete JSON line from an ostringstream.
+json parse_first_notification(std::ostringstream& out) {
+    std::istringstream iss(out.str());
+    std::string line;
+    if (std::getline(iss, line) && !line.empty()) {
+        return json::parse(line);
+    }
+    return json{};
+}
+
+/// Count and collect all notifications from the output stream.
+std::vector<json> parse_all_notifications(std::ostringstream& out) {
+    std::vector<json> result;
+    std::istringstream iss(out.str());
+    std::string line;
+    while (std::getline(iss, line)) {
+        if (!line.empty()) {
+            result.push_back(json::parse(line));
+        }
+    }
+    return result;
+}
+
 // ── Test fixture ─────────────────────────────────────────────────────────
 
-/// Capture output from StdioTransport into a stringstream.
 class LogStreamingTest : public ::testing::Test {
 protected:
     void SetUp() override {
@@ -39,7 +64,6 @@ protected:
         std::unique_ptr<kairos::mcp::McpHandler>,
         std::unique_ptr<kairos::mcp::StdioTransport>
     > make_handler() {
-        // Create transport with fake I/O.
         auto transport = std::make_unique<kairos::mcp::StdioTransport>(
             [](const std::string&, const json&, const json&) -> json {
                 return json::object();
@@ -65,28 +89,18 @@ protected:
 
 // ── Base64 encoding tests (RFC 4648 test vectors) ────────────────────────
 
-// We test base64 indirectly via emit_log_chunk which encodes the data.
-// The base64 encoder is internal to handler.cpp, so we verify through
-// the notification output.
-
 TEST_F(LogStreamingTest, EmitLogChunkEncodesBase64) {
     auto [handler, transport] = make_handler();
 
-    // Emit a log chunk. The data "Hello\nWorld" contains a newline
-    // which is why base64 encoding is needed (§22.7).
     handler->emit_log_chunk("run-abc", "build", "stdout", "Hello\nWorld");
 
-    // Parse the notification from output.
-    std::string line;
-    std::getline(out_, line);
-    auto notification = json::parse(line);
+    auto notification = parse_first_notification(out_);
 
     EXPECT_EQ(notification["jsonrpc"], "2.0");
     EXPECT_EQ(notification["method"], "notifications/log_chunk");
     EXPECT_EQ(notification["params"]["run_id"], "run-abc");
     EXPECT_EQ(notification["params"]["job_id"], "build");
     EXPECT_EQ(notification["params"]["stream"], "stdout");
-
     // "Hello\nWorld" base64 = "SGVsbG8KV29ybGQ="
     EXPECT_EQ(notification["params"]["data"], "SGVsbG8KV29ybGQ=");
 }
@@ -96,82 +110,48 @@ TEST_F(LogStreamingTest, EmitLogChunkEmptyData) {
 
     handler->emit_log_chunk("run-xyz", "", "stderr", "");
 
-    std::string line;
-    std::getline(out_, line);
-    auto notification = json::parse(line);
+    auto notification = parse_first_notification(out_);
 
     EXPECT_EQ(notification["params"]["run_id"], "run-xyz");
     EXPECT_EQ(notification["params"]["stream"], "stderr");
-    EXPECT_EQ(notification["params"]["data"], "");  // Empty → empty base64.
-
-    // job_id should not be present when empty.
+    EXPECT_EQ(notification["params"]["data"], "");
     EXPECT_FALSE(notification["params"].contains("job_id"));
 }
 
 TEST_F(LogStreamingTest, EmitLogChunkBase64RFC4648Vector_f) {
-    // RFC 4648 § 10: "f" → "Zg=="
     auto [handler, transport] = make_handler();
     handler->emit_log_chunk("r", "", "stdout", "f");
-
-    std::string line;
-    std::getline(out_, line);
-    auto notification = json::parse(line);
-    EXPECT_EQ(notification["params"]["data"], "Zg==");
+    EXPECT_EQ(parse_first_notification(out_)["params"]["data"], "Zg==");
 }
 
 TEST_F(LogStreamingTest, EmitLogChunkBase64RFC4648Vector_fo) {
-    // "fo" → "Zm8="
     auto [handler, transport] = make_handler();
     handler->emit_log_chunk("r", "", "stdout", "fo");
-
-    std::string line;
-    std::getline(out_, line);
-    auto notification = json::parse(line);
-    EXPECT_EQ(notification["params"]["data"], "Zm8=");
+    EXPECT_EQ(parse_first_notification(out_)["params"]["data"], "Zm8=");
 }
 
 TEST_F(LogStreamingTest, EmitLogChunkBase64RFC4648Vector_foo) {
-    // "foo" → "Zm9v"
     auto [handler, transport] = make_handler();
     handler->emit_log_chunk("r", "", "stdout", "foo");
-
-    std::string line;
-    std::getline(out_, line);
-    auto notification = json::parse(line);
-    EXPECT_EQ(notification["params"]["data"], "Zm9v");
+    EXPECT_EQ(parse_first_notification(out_)["params"]["data"], "Zm9v");
 }
 
 TEST_F(LogStreamingTest, EmitLogChunkBase64RFC4648Vector_foob) {
-    // "foob" → "Zm9vYg=="
     auto [handler, transport] = make_handler();
     handler->emit_log_chunk("r", "", "stdout", "foob");
-
-    std::string line;
-    std::getline(out_, line);
-    auto notification = json::parse(line);
-    EXPECT_EQ(notification["params"]["data"], "Zm9vYg==");
+    EXPECT_EQ(parse_first_notification(out_)["params"]["data"], "Zm9vYg==");
 }
 
 TEST_F(LogStreamingTest, EmitLogChunkBase64RFC4648Vector_fooba) {
-    // "fooba" → "Zm9vYmE="
     auto [handler, transport] = make_handler();
     handler->emit_log_chunk("r", "", "stdout", "fooba");
-
-    std::string line;
-    std::getline(out_, line);
-    auto notification = json::parse(line);
-    EXPECT_EQ(notification["params"]["data"], "Zm9vYmE=");
+    EXPECT_EQ(parse_first_notification(out_)["params"]["data"], "Zm9vYmE=");
 }
 
 TEST_F(LogStreamingTest, EmitLogChunkBase64RFC4648Vector_foobar) {
-    // "foobar" → "Zm9vYmFy"
     auto [handler, transport] = make_handler();
     handler->emit_log_chunk("r", "", "stdout", "foobar");
-
-    std::string line;
-    std::getline(out_, line);
-    auto notification = json::parse(line);
-    EXPECT_EQ(notification["params"]["data"], "Zm9vYmFy");
+    EXPECT_EQ(parse_first_notification(out_)["params"]["data"], "Zm9vYmFy");
 }
 
 // ── Run complete notification ────────────────────────────────────────────
@@ -181,17 +161,13 @@ TEST_F(LogStreamingTest, EmitRunComplete) {
 
     handler->emit_run_complete("run-abc", "success", 4523);
 
-    std::string line;
-    std::getline(out_, line);
-    auto notification = json::parse(line);
+    auto notification = parse_first_notification(out_);
 
     EXPECT_EQ(notification["jsonrpc"], "2.0");
     EXPECT_EQ(notification["method"], "notifications/run_complete");
     EXPECT_EQ(notification["params"]["run_id"], "run-abc");
     EXPECT_EQ(notification["params"]["status"], "success");
     EXPECT_EQ(notification["params"]["duration_ms"], 4523);
-
-    // Notifications have no "id" field.
     EXPECT_FALSE(notification.contains("id"));
 }
 
@@ -200,10 +176,7 @@ TEST_F(LogStreamingTest, EmitRunCompleteFailure) {
 
     handler->emit_run_complete("run-xyz", "failure", 125);
 
-    std::string line;
-    std::getline(out_, line);
-    auto notification = json::parse(line);
-
+    auto notification = parse_first_notification(out_);
     EXPECT_EQ(notification["params"]["status"], "failure");
     EXPECT_EQ(notification["params"]["duration_ms"], 125);
 }
@@ -218,10 +191,7 @@ TEST_F(LogStreamingTest, InitializeIncludesNotificationCapabilities) {
     ASSERT_TRUE(result.contains("capabilities"));
     auto caps = result["capabilities"];
 
-    // Logging capability per §22.7.
     EXPECT_TRUE(caps.contains("logging"));
-
-    // Notification types supported.
     EXPECT_TRUE(caps.contains("notifications"));
     EXPECT_TRUE(caps["notifications"]["log_chunk"]);
     EXPECT_TRUE(caps["notifications"]["run_complete"]);
@@ -231,9 +201,6 @@ TEST_F(LogStreamingTest, InitializeIncludesNotificationCapabilities) {
 
 TEST_F(LogStreamingTest, StartLogFollowIsCallable) {
     auto [handler, transport] = make_handler();
-
-    // start_log_follow should not throw in v1 (it's a stub that
-    // logs a diagnostic). Just verify it doesn't crash.
     EXPECT_NO_THROW(handler->start_log_follow("run-123"));
 }
 
@@ -241,12 +208,11 @@ TEST_F(LogStreamingTest, StartLogFollowIsCallable) {
 
 TEST_F(LogStreamingTest, EmitWithNullTransportIsNoop) {
     kairos::mcp::McpHandler::Dependencies deps;
-    deps.transport = nullptr;  // No transport.
+    deps.transport = nullptr;
     deps.server_info.name = "test";
 
     kairos::mcp::McpHandler handler(std::move(deps));
 
-    // Should not crash or throw.
     EXPECT_NO_THROW(handler.emit_log_chunk("r", "j", "stdout", "data"));
     EXPECT_NO_THROW(handler.emit_run_complete("r", "success", 100));
 }
@@ -261,15 +227,11 @@ TEST_F(LogStreamingTest, MultipleChunksEmitSeparateNotifications) {
     handler->emit_log_chunk("r1", "build", "stderr", "error1");
     handler->emit_run_complete("r1", "failure", 1000);
 
-    // Read all 4 notifications.
-    std::string line;
-    int count = 0;
-    while (std::getline(out_, line)) {
-        auto n = json::parse(line);
+    auto notifications = parse_all_notifications(out_);
+    EXPECT_EQ(notifications.size(), 4u);
+    for (const auto& n : notifications) {
         EXPECT_EQ(n["jsonrpc"], "2.0");
-        ++count;
     }
-    EXPECT_EQ(count, 4);
 }
 
 // ── No embedded newlines in notification frame ───────────────────────────
@@ -277,13 +239,12 @@ TEST_F(LogStreamingTest, MultipleChunksEmitSeparateNotifications) {
 TEST_F(LogStreamingTest, NotificationHasNoEmbeddedNewlines) {
     auto [handler, transport] = make_handler();
 
-    // Emit data with lots of newlines.
     std::string multiline = "line1\nline2\nline3\n\nline5\n";
     handler->emit_log_chunk("r", "j", "stdout", multiline);
 
     std::string raw = out_.str();
 
-    // The entire notification should be one line.
+    // One trailing newline only (the frame delimiter).
     auto newline_count = std::count(raw.begin(), raw.end(), '\n');
     EXPECT_EQ(newline_count, 1)
         << "Notification frame must be a single line (no embedded newlines)";

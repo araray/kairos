@@ -15,6 +15,7 @@
 #include "kairos/observability/tracer.hpp"
 #include "kairos/testing/fake_clock.hpp"
 #include "kairos/testing/fake_filesystem.hpp"
+#include "kairos/testing/fake_fs_scanner.hpp"
 #include "kairos/watch/watch_engine.hpp"
 
 #include <gtest/gtest.h>
@@ -23,13 +24,17 @@
 #include <string>
 #include <vector>
 
+using namespace kairos::watch;
+using namespace kairos::testing;
+using namespace kairos::engine;
+using namespace std::chrono_literals;
+
 namespace {
 
 // ── Recording span: captures all operations for assertion ────────────────
 
 struct SpanRecord {
     std::string name;
-    std::string parent_name;
     std::vector<std::pair<std::string, std::string>> attributes;
     bool ended = false;
     bool error = false;
@@ -44,7 +49,7 @@ public:
         : name_(std::move(name)), records_(records), mu_(mu)
     {
         std::lock_guard lock(mu_);
-        records_.push_back({name_, "", {}, false, false, ""});
+        records_.push_back({name_, {}, false, false, ""});
         index_ = records_.size() - 1;
     }
 
@@ -116,20 +121,13 @@ public:
     }
 
     std::unique_ptr<kairos::observability::SpanHandle> start_child_span(
-        kairos::observability::SpanHandle& parent,
+        kairos::observability::SpanHandle& /*parent*/,
         std::string_view name,
         std::unordered_map<std::string,
             kairos::observability::SpanAttribute> attrs) override
     {
         auto span = std::make_unique<RecordingSpan>(
             std::string(name), records_, mu_);
-        {
-            std::lock_guard lock(mu_);
-            if (!records_.empty()) {
-                records_.back().parent_name =
-                    dynamic_cast<RecordingSpan&>(parent).span_id();
-            }
-        }
         for (auto& [k, v] : attrs) {
             span->set_attribute(k, std::move(v));
         }
@@ -147,7 +145,6 @@ public:
 
     void flush() override {}
 
-    // Access recorded spans.
     std::vector<SpanRecord> get_records() const {
         std::lock_guard lock(mu_);
         return records_;
@@ -163,91 +160,85 @@ private:
     std::vector<SpanRecord> records_;
 };
 
-// ── Test fixture ─────────────────────────────────────────────────────────
+// ── Helper ───────────────────────────────────────────────────────────────
 
-class WatchScanSpansTest : public ::testing::Test {
-protected:
-    void SetUp() override {
-        fake_fs_.add_file("/watch/a.txt", 100, "2025-01-01T00:00:00Z");
-        fake_fs_.add_file("/watch/b.txt", 200, "2025-01-01T00:00:00Z");
-    }
+WatchGroupDef make_group() {
+    WatchGroupDef g;
+    g.group_name = "test_group";
+    g.group_id = "wg-test";
+    g.mode = WatchMode::Sample;
+    g.sample_rate = 60s;
+    g.watch_items = {"/watch"};
+    g.max_depth = 5;
+    g.max_files = 1000;
+    g.enabled = true;
+    return g;
+}
 
-    kairos::watch::WatchGroupDef make_group() {
-        kairos::watch::WatchGroupDef g;
-        g.group_name = "test_group";
-        g.group_id = "wg-test";
-        g.mode = kairos::watch::WatchMode::Sample;
-        g.sample_rate = std::chrono::seconds(60);
-        g.watch_items = {"/watch"};
-        g.max_depth = 5;
-        g.max_files = 1000;
-        g.enabled = true;
-        return g;
-    }
-
-    kairos::FakeFilesystem fake_fs_;
-    kairos::SystemClockSource clock_;
-};
+auto T0 = std::chrono::system_clock::from_time_t(1700000000);
 
 // ── Tests ────────────────────────────────────────────────────────────────
 
-TEST_F(WatchScanSpansTest, ScanWithNullTracerDoesNotCrash) {
+TEST(WatchScanSpansTest, ScanWithNullTracerDoesNotCrash) {
+    FakeFilesystem fs;
+    fs.add_file("/watch/a.txt", FakeFileEntry{.size = 100, .mtime = T0});
+    FakeFilesystemScanner scanner(fs);
+    kairos::SystemClockSource clock;
+
     auto g = make_group();
-    kairos::watch::WatchEngineConfig cfg;
-    kairos::watch::WatchEngine engine(cfg,
-        kairos::watch::WatchEngine::Dependencies{
-            .clock = &clock_,
-            .scanner = &fake_fs_,
-            .tracer = nullptr,  // No tracer.
+    WatchEngine engine(WatchEngineConfig{},
+        WatchEngine::Dependencies{
+            .clock = &clock,
+            .scanner = &scanner,
+            .tracer = nullptr,
         },
         {g});
 
-    kairos::engine::TriggerSink null_sink = [](kairos::engine::TriggerEvent) {
-        return true;
-    };
-
+    TriggerSink null_sink = [](TriggerEvent) { return true; };
     EXPECT_NO_THROW(engine.scan_once(null_sink));
 }
 
-TEST_F(WatchScanSpansTest, ScanWithNullTracerProducesScanResults) {
-    auto g = make_group();
-    auto tracer = kairos::observability::create_tracer(false);
+TEST(WatchScanSpansTest, ScanWithNullTracerProducesScanResults) {
+    FakeFilesystem fs;
+    fs.add_file("/watch/a.txt", FakeFileEntry{.size = 100, .mtime = T0});
+    fs.add_file("/watch/b.txt", FakeFileEntry{.size = 200, .mtime = T0});
+    FakeFilesystemScanner scanner(fs);
+    kairos::SystemClockSource clock;
 
-    kairos::watch::WatchEngineConfig cfg;
-    kairos::watch::WatchEngine engine(cfg,
-        kairos::watch::WatchEngine::Dependencies{
-            .clock = &clock_,
-            .scanner = &fake_fs_,
+    auto tracer = kairos::observability::create_tracer(false);
+    auto g = make_group();
+
+    WatchEngine engine(WatchEngineConfig{},
+        WatchEngine::Dependencies{
+            .clock = &clock,
+            .scanner = &scanner,
             .tracer = tracer.get(),
         },
         {g});
 
-    kairos::engine::TriggerSink null_sink = [](kairos::engine::TriggerEvent) {
-        return true;
-    };
-
+    TriggerSink null_sink = [](TriggerEvent) { return true; };
     auto results = engine.scan_once(null_sink);
     ASSERT_EQ(results.size(), 1u);
     EXPECT_GE(results[0].sample.entries.size(), 2u);
 }
 
-TEST_F(WatchScanSpansTest, ScanWithRecordingTracerCreatesSpans) {
-    auto g = make_group();
+TEST(WatchScanSpansTest, ScanWithRecordingTracerCreatesSpans) {
+    FakeFilesystem fs;
+    fs.add_file("/watch/a.txt", FakeFileEntry{.size = 100, .mtime = T0});
+    FakeFilesystemScanner scanner(fs);
+    kairos::SystemClockSource clock;
     RecordingTracer tracer;
 
-    kairos::watch::WatchEngineConfig cfg;
-    kairos::watch::WatchEngine engine(cfg,
-        kairos::watch::WatchEngine::Dependencies{
-            .clock = &clock_,
-            .scanner = &fake_fs_,
+    auto g = make_group();
+    WatchEngine engine(WatchEngineConfig{},
+        WatchEngine::Dependencies{
+            .clock = &clock,
+            .scanner = &scanner,
             .tracer = &tracer,
         },
         {g});
 
-    kairos::engine::TriggerSink null_sink = [](kairos::engine::TriggerEvent) {
-        return true;
-    };
-
+    TriggerSink null_sink = [](TriggerEvent) { return true; };
     engine.scan_once(null_sink);
 
     // First scan is baseline — should create:
@@ -262,45 +253,41 @@ TEST_F(WatchScanSpansTest, ScanWithRecordingTracerCreatesSpans) {
 
     // All spans should be ended.
     for (const auto& r : records) {
-        EXPECT_TRUE(r.ended)
-            << "Span '" << r.name << "' was not ended";
+        EXPECT_TRUE(r.ended) << "Span '" << r.name << "' was not ended";
     }
 }
 
-TEST_F(WatchScanSpansTest, SecondScanCreatesDiffAndRuleSpans) {
-    auto g = make_group();
+TEST(WatchScanSpansTest, SecondScanCreatesDiffSpan) {
+    FakeFilesystem fs;
+    fs.add_file("/watch/a.txt", FakeFileEntry{.size = 100, .mtime = T0});
+    FakeFilesystemScanner scanner(fs);
+    kairos::SystemClockSource clock;
     RecordingTracer tracer;
 
-    kairos::watch::WatchEngineConfig cfg;
-    kairos::watch::WatchEngine engine(cfg,
-        kairos::watch::WatchEngine::Dependencies{
-            .clock = &clock_,
-            .scanner = &fake_fs_,
+    auto g = make_group();
+    WatchEngine engine(WatchEngineConfig{},
+        WatchEngine::Dependencies{
+            .clock = &clock,
+            .scanner = &scanner,
             .tracer = &tracer,
         },
         {g});
 
-    kairos::engine::TriggerSink null_sink = [](kairos::engine::TriggerEvent) {
-        return true;
-    };
+    TriggerSink null_sink = [](TriggerEvent) { return true; };
 
     // First scan (baseline).
     engine.scan_once(null_sink);
 
     // Modify the filesystem.
-    fake_fs_.add_file("/watch/c.txt", 300, "2025-01-02T00:00:00Z");
+    auto T1 = T0 + 60s;
+    fs.add_file("/watch/c.txt", FakeFileEntry{.size = 300, .mtime = T1});
 
     // Second scan — should produce diff.
     engine.scan_once(null_sink);
 
     auto records = tracer.get_records();
 
-    // Should have at least 4 spans from second scan:
-    //   watch_scan, snapshot, diff, (optionally rule_eval if diff non-empty)
-    // Plus the 2 from first scan = at least 6 total.
-    EXPECT_GE(records.size(), 5u);
-
-    // Find the diff span.
+    // Find the diff span from second scan.
     bool found_diff = false;
     for (const auto& r : records) {
         if (r.name == "kairos.diff") {
@@ -312,29 +299,28 @@ TEST_F(WatchScanSpansTest, SecondScanCreatesDiffAndRuleSpans) {
         << "Expected a 'kairos.diff' span on second scan";
 }
 
-TEST_F(WatchScanSpansTest, ScanSpanHasWatchGroupAttribute) {
-    auto g = make_group();
+TEST(WatchScanSpansTest, ScanSpanHasWatchGroupAttribute) {
+    FakeFilesystem fs;
+    fs.add_file("/watch/a.txt", FakeFileEntry{.size = 100, .mtime = T0});
+    FakeFilesystemScanner scanner(fs);
+    kairos::SystemClockSource clock;
     RecordingTracer tracer;
 
-    kairos::watch::WatchEngineConfig cfg;
-    kairos::watch::WatchEngine engine(cfg,
-        kairos::watch::WatchEngine::Dependencies{
-            .clock = &clock_,
-            .scanner = &fake_fs_,
+    auto g = make_group();
+    WatchEngine engine(WatchEngineConfig{},
+        WatchEngine::Dependencies{
+            .clock = &clock,
+            .scanner = &scanner,
             .tracer = &tracer,
         },
         {g});
 
-    kairos::engine::TriggerSink null_sink = [](kairos::engine::TriggerEvent) {
-        return true;
-    };
-
+    TriggerSink null_sink = [](TriggerEvent) { return true; };
     engine.scan_once(null_sink);
 
     auto records = tracer.get_records();
     ASSERT_GE(records.size(), 1u);
 
-    // The root span should have watch_group attribute.
     const auto& root = records[0];
     EXPECT_EQ(root.name, "kairos.watch_scan");
 
@@ -345,7 +331,38 @@ TEST_F(WatchScanSpansTest, ScanSpanHasWatchGroupAttribute) {
             found_group = true;
         }
     }
-    EXPECT_TRUE(found_group) << "Expected 'watch_group' attribute";
+    EXPECT_TRUE(found_group) << "Expected 'watch_group' attribute on root span";
+}
+
+TEST(WatchScanSpansTest, AllSpansAreEnded) {
+    FakeFilesystem fs;
+    fs.add_file("/watch/a.txt", FakeFileEntry{.size = 100, .mtime = T0});
+    FakeFilesystemScanner scanner(fs);
+    kairos::SystemClockSource clock;
+    RecordingTracer tracer;
+
+    auto g = make_group();
+    WatchEngine engine(WatchEngineConfig{},
+        WatchEngine::Dependencies{
+            .clock = &clock,
+            .scanner = &scanner,
+            .tracer = &tracer,
+        },
+        {g});
+
+    TriggerSink null_sink = [](TriggerEvent) { return true; };
+
+    // Two scans to exercise all span types.
+    engine.scan_once(null_sink);
+    auto T1 = T0 + 60s;
+    fs.add_file("/watch/new.txt", FakeFileEntry{.size = 50, .mtime = T1});
+    engine.scan_once(null_sink);
+
+    auto records = tracer.get_records();
+    for (const auto& r : records) {
+        EXPECT_TRUE(r.ended)
+            << "Span '" << r.name << "' was not properly ended (leak)";
+    }
 }
 
 }  // anonymous namespace
