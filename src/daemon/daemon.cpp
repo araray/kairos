@@ -206,6 +206,27 @@ int run_daemon(std::shared_ptr<const kairos::config::ConfigState> config) {
 
     // ── Step 4: Initialize metrics ─────────────────────────────────
     metrics::MetricsRegistry metrics_registry;
+
+    // Register daemon health metrics (§20.3.6).
+    auto* gauge_uptime = metrics_registry.register_gauge(
+        "kairos_uptime_seconds", "Seconds since daemon start");
+    auto* gauge_active_runs = metrics_registry.register_gauge(
+        "kairos_runs_active", "Currently executing runs");
+    auto* gauge_pipeline_depth = metrics_registry.register_gauge(
+        "kairos_pipeline_queue_depth",
+        "Trigger events waiting in the pipeline queue");
+    auto* counter_reloads_ok = metrics_registry.register_counter(
+        "kairos_config_reloads_total",
+        "Configuration reload attempts",
+        {{"result", "success"}});
+    auto* counter_reloads_fail = metrics_registry.register_counter(
+        "kairos_config_reloads_total",
+        "Configuration reload attempts",
+        {{"result", "failure"}});
+    auto* gauge_watch_groups = metrics_registry.register_gauge(
+        "kairos_watch_groups_active",
+        "Number of watch groups currently monitored");
+
     log->debug("Metrics registry initialized");
 
     // ── Step 5: Create clock source ────────────────────────────────
@@ -300,6 +321,7 @@ int run_daemon(std::shared_ptr<const kairos::config::ConfigState> config) {
             .scanner = &real_scanner,
             .db_writer = &db_writer,
             .native_watcher = native_watcher.get(),
+            .tracer = tracer.get(),
         },
         registry->watch_groups());
 
@@ -399,13 +421,26 @@ int run_daemon(std::shared_ptr<const kairos::config::ConfigState> config) {
         auto now = std::chrono::steady_clock::now();
         double uptime_s = std::chrono::duration<double>(
             now - uptime_start).count();
-        (void)uptime_s;  // Metrics wiring deferred to Phase 4.
+
+        // Update daemon health gauges (§20.3.6).
+        gauge_uptime->set(uptime_s);
+        gauge_active_runs->set(
+            static_cast<double>(active_runs.total_active()));
+        gauge_pipeline_depth->set(
+            static_cast<double>(trigger_bus.size()));
+        gauge_watch_groups->set(
+            static_cast<double>(watch_engine.group_count()));
 
         // Check for reload.
         if (platform::g_reload_requested.exchange(false)) {
-            perform_config_reload(
+            bool ok = perform_config_reload(
                 config->config_file_path,
                 scheduler, pipeline, watch_engine, log);
+            if (ok) {
+                counter_reloads_ok->increment();
+            } else {
+                counter_reloads_fail->increment();
+            }
         }
 
         // Sleep for 5 seconds (or until stop).

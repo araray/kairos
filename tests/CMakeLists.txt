@@ -390,3 +390,30 @@ add_executable(test_watch_events_query
 )
 target_link_libraries(test_watch_events_query PRIVATE kairos_test_helpers)
 gtest_discover_tests(test_watch_events_query)
+
+# ── Phase 3 Batch 11: MCP log streaming tests ────────────────────
+
+# Base64 encoding, log chunk notifications, run_complete, capabilities
+add_executable(test_mcp_log_streaming
+    unit/mcp/log_streaming_test.cpp
+)
+target_link_libraries(test_mcp_log_streaming PRIVATE kairos_test_helpers)
+gtest_discover_tests(test_mcp_log_streaming)
+
+# ── Phase 3 Batch 11: Run stats + ActiveRunTracker tests ─────────
+
+# QueryReader::query_run_stats, query_db_size, total_active()
+add_executable(test_run_stats
+    unit/persist/run_stats_test.cpp
+)
+target_link_libraries(test_run_stats PRIVATE kairos_test_helpers)
+gtest_discover_tests(test_run_stats)
+
+# ── Phase 3 Batch 11: Watch scan span instrumentation tests ──────
+
+# Recording tracer, span hierarchy, attributes
+add_executable(test_watch_scan_spans
+    unit/watch/watch_scan_spans_test.cpp
+)
+target_link_libraries(test_watch_scan_spans PRIVATE kairos_test_helpers)
+gtest_discover_tests(test_watch_scan_spans)

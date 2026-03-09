@@ -235,6 +235,14 @@ public:
         return count(target_id) < max_instances;
     }
 
+    /// Total active runs across all targets.
+    [[nodiscard]] int total_active() const {
+        std::lock_guard lock(mu_);
+        int total = 0;
+        for (const auto& [_, c] : counts_) total += c;
+        return total;
+    }
+
     /// Reset all counts (for reconciliation).
     void reset() {
         std::lock_guard lock(mu_);

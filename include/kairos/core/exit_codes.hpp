@@ -22,6 +22,11 @@ enum class ExitCode : int {
     // ── Configuration errors ──────────────────────────────────────────
     kConfigError         = 2,    // Missing/invalid config or mandatory key
 
+    // ── CLI-specific (§23.3) ───────────────────────────────────────
+    kNotFound            = 4,    // Workflow/job/run ID not found
+    kAlreadyRunning      = 5,    // Daemon already started
+    kNotRunning          = 6,    // Daemon not started (for commands requiring it)
+
     // ── Standard POSIX conventions ────────────────────────────────────
     kCommandNotExecutable = 126,  // Permission denied on command
     kCommandNotFound      = 127,  // Missing interpreter or binary
@@ -43,6 +48,9 @@ constexpr std::string_view exit_code_description(int code) {
         case 0:   return "Success";
         case 1:   return "Generic error";
         case 2:   return "Configuration error";
+        case 4:   return "Not found";
+        case 5:   return "Already running";
+        case 6:   return "Not running";
         case 126: return "Command not executable (permissions)";
         case 127: return "Command not found";
         case 200: return "Timeout exceeded (soft kill)";

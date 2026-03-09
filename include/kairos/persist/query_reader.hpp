@@ -18,6 +18,7 @@
 #include <SQLiteCpp/SQLiteCpp.h>
 
 #include <chrono>
+#include <filesystem>
 #include <memory>
 #include <optional>
 #include <string>
@@ -153,6 +154,24 @@ public:
     [[nodiscard]] std::vector<WatchEventRow> query_watch_events(
         int limit = 50,
         const std::string& watch_group = "") const;
+
+    // ── Run summary stats (for CLI status) ───────────────────────
+
+    /// Summary statistics for `kairos status` display.
+    struct RunStats {
+        int64_t total_runs = 0;       ///< All-time run count.
+        int64_t runs_today = 0;       ///< Runs started in the last 24h.
+        int64_t failures_today = 0;   ///< Failed runs in the last 24h.
+        int64_t active_runs = 0;      ///< Runs with status='RUNNING'.
+    };
+
+    /// Query aggregate run statistics from the database.
+    [[nodiscard]] RunStats query_run_stats() const;
+
+    /// Query the database file size in bytes.
+    /// @param db_path  Path to the SQLite database file.
+    [[nodiscard]] static int64_t query_db_size(
+        const std::filesystem::path& db_path);
 
 private:
     SQLite::Database& db_;

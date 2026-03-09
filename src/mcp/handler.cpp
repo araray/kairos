@@ -12,10 +12,52 @@
 
 #include <spdlog/spdlog.h>
 
+#include <array>
 #include <stdexcept>
+#include <thread>
 #include <unordered_map>
 
 namespace kairos::mcp {
+
+// ── Base64 encoder (RFC 4648) ──────────────────────────────────────────────
+// Needed for §22.7: log chunks must be base64-encoded to prevent embedded
+// newlines from breaking the JSON-RPC stdio frame boundary.
+
+namespace {
+
+constexpr std::array<char, 64> kBase64Alphabet = {
+    'A','B','C','D','E','F','G','H','I','J','K','L','M',
+    'N','O','P','Q','R','S','T','U','V','W','X','Y','Z',
+    'a','b','c','d','e','f','g','h','i','j','k','l','m',
+    'n','o','p','q','r','s','t','u','v','w','x','y','z',
+    '0','1','2','3','4','5','6','7','8','9','+','/'
+};
+
+/// Encode raw bytes as base64.
+/// No line wrapping — suitable for JSON embedding.
+std::string base64_encode(const std::string& input) {
+    std::string result;
+    result.reserve(((input.size() + 2) / 3) * 4);
+
+    const auto* data = reinterpret_cast<const unsigned char*>(input.data());
+    std::size_t len = input.size();
+
+    for (std::size_t i = 0; i < len; i += 3) {
+        uint32_t octet_a = data[i];
+        uint32_t octet_b = (i + 1 < len) ? data[i + 1] : 0;
+        uint32_t octet_c = (i + 2 < len) ? data[i + 2] : 0;
+        uint32_t triple = (octet_a << 16) | (octet_b << 8) | octet_c;
+
+        result += kBase64Alphabet[(triple >> 18) & 0x3F];
+        result += kBase64Alphabet[(triple >> 12) & 0x3F];
+        result += (i + 1 < len) ? kBase64Alphabet[(triple >> 6) & 0x3F] : '=';
+        result += (i + 2 < len) ? kBase64Alphabet[triple & 0x3F] : '=';
+    }
+
+    return result;
+}
+
+}  // anonymous namespace
 
 // ── Constructor ────────────────────────────────────────────────────────────
 
@@ -49,7 +91,9 @@ json McpHandler::handle_initialize(const json& params) {
     return {
         {"protocolVersion", "2024-11-05"},
         {"capabilities", {
-            {"tools", {{"listChanged", false}}}
+            {"tools", {{"listChanged", false}}},
+            {"logging", json::object()},
+            {"notifications", {{"log_chunk", true}, {"run_complete", true}}}
         }},
         {"serverInfo", {
             {"name", deps_.server_info.name},
@@ -308,6 +352,65 @@ json McpHandler::tool_stub(const std::string& name) {
         {"tool", name},
         {"message", "This tool will be available in a future release"}
     };
+}
+
+// ── Log streaming (§22.7) ─────────────────────────────────────────────────
+
+void McpHandler::emit_log_chunk(
+    const std::string& run_id,
+    const std::string& job_id,
+    const std::string& stream,
+    const std::string& data)
+{
+    if (!deps_.transport) return;
+
+    // Base64-encode to prevent embedded newlines from breaking
+    // the JSON-RPC stdio frame boundary.
+    std::string encoded = base64_encode(data);
+
+    json params = {
+        {"run_id", run_id},
+        {"stream", stream},
+        {"data", encoded}
+    };
+    if (!job_id.empty()) {
+        params["job_id"] = job_id;
+    }
+
+    deps_.transport->send_notification("notifications/log_chunk", params);
+}
+
+void McpHandler::emit_run_complete(
+    const std::string& run_id,
+    const std::string& status,
+    int64_t duration_ms)
+{
+    if (!deps_.transport) return;
+
+    deps_.transport->send_notification("notifications/run_complete", {
+        {"run_id", run_id},
+        {"status", status},
+        {"duration_ms", duration_ms}
+    });
+}
+
+void McpHandler::start_log_follow(
+    const std::string& run_id,
+    std::stop_token stop)
+{
+    // In Phase 4, this will subscribe to the Pipeline's RunStream
+    // and emit log chunks as they arrive. For v1 (Phase 3), the
+    // method is implemented but relies on SQLite polling (same
+    // approach as CLI follow mode per §23.8).
+    //
+    // When the Pipeline produces a RunStream (§14.7), this method
+    // will be updated to use direct subscription instead of polling.
+    //
+    // For now, log a diagnostic and return — the full follow
+    // implementation requires RunStream which is Phase 4 scope.
+    spdlog::debug("MCP log follow requested for run={} (polling "
+                  "not yet wired — requires RunStream from Phase 4)",
+                  run_id);
 }
 
 // ── Helper: wrap tool result ───────────────────────────────────────────────

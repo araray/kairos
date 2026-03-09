@@ -522,4 +522,55 @@ std::vector<QueryReader::WatchEventRow> QueryReader::query_watch_events(
     return results;
 }
 
+// ── Run summary stats ──────────────────────────────────────────────────
+
+QueryReader::RunStats QueryReader::query_run_stats() const {
+    RunStats stats;
+
+    // Total runs (all time).
+    try {
+        SQLite::Statement q1(db_,
+            "SELECT COUNT(*) FROM runs");
+        if (q1.executeStep()) {
+            stats.total_runs = q1.getColumn(0).getInt64();
+        }
+    } catch (...) {
+        // Table may not exist in a fresh DB — leave at 0.
+    }
+
+    // Runs in last 24h + failures in last 24h.
+    try {
+        SQLite::Statement q2(db_,
+            "SELECT "
+            "  COUNT(*), "
+            "  SUM(CASE WHEN status = 'FAILURE' THEN 1 ELSE 0 END) "
+            "FROM runs "
+            "WHERE created_at >= datetime('now', '-1 day')");
+        if (q2.executeStep()) {
+            stats.runs_today = q2.getColumn(0).getInt64();
+            stats.failures_today = q2.getColumn(1).getInt64();
+        }
+    } catch (...) {}
+
+    // Currently running.
+    try {
+        SQLite::Statement q3(db_,
+            "SELECT COUNT(*) FROM runs WHERE status = 'RUNNING'");
+        if (q3.executeStep()) {
+            stats.active_runs = q3.getColumn(0).getInt64();
+        }
+    } catch (...) {}
+
+    return stats;
+}
+
+int64_t QueryReader::query_db_size(
+    const std::filesystem::path& db_path)
+{
+    std::error_code ec;
+    auto sz = std::filesystem::file_size(db_path, ec);
+    if (ec) return 0;
+    return static_cast<int64_t>(sz);
+}
+
 }  // namespace kairos::persist

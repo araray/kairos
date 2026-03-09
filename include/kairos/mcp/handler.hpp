@@ -21,6 +21,7 @@
 
 #include <functional>
 #include <memory>
+#include <stop_token>
 #include <string>
 #include <vector>
 
@@ -74,6 +75,23 @@ public:
     json dispatch(const std::string& method,
                   const json& params, const json& id);
 
+    /// Start streaming log chunks for a run via MCP notifications.
+    ///
+    /// Called from tool_run_workflow when follow=true.  Subscribes
+    /// to the run's log stream and emits base64-encoded chunks as
+    /// JSON-RPC notifications ("notifications/log_chunk").
+    ///
+    /// When the run completes, emits "notifications/run_complete".
+    ///
+    /// This method launches a background thread that monitors the
+    /// run and emits notifications via the transport.
+    ///
+    /// @param run_id   The run to follow.
+    /// @param stop     Stop token from the daemon.
+    /// Spec reference: §22.7
+    void start_log_follow(const std::string& run_id,
+                          std::stop_token stop = {});
+
 private:
     // ── MCP protocol methods ────────────────────────────────────────
     json handle_initialize(const json& params);
@@ -107,6 +125,24 @@ private:
 
     /// Wrap a tool result in the MCP content array format.
     static json wrap_tool_result(const json& result);
+
+    /// Emit a base64-encoded log chunk notification.
+    /// @param run_id   Run identifier.
+    /// @param job_id   Job identifier (empty for run-level logs).
+    /// @param stream   "stdout" or "stderr".
+    /// @param data     Raw log data (will be base64-encoded).
+    void emit_log_chunk(const std::string& run_id,
+                        const std::string& job_id,
+                        const std::string& stream,
+                        const std::string& data);
+
+    /// Emit a run-complete notification.
+    /// @param run_id      Run identifier.
+    /// @param status      Final status ("success", "failure", "cancelled").
+    /// @param duration_ms Run duration in milliseconds.
+    void emit_run_complete(const std::string& run_id,
+                           const std::string& status,
+                           int64_t duration_ms);
 
     Dependencies deps_;
     bool initialized_ = false;

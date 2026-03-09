@@ -28,9 +28,18 @@
 #include <spdlog/sinks/stdout_color_sinks.h>
 
 #include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <string>
 #include <unordered_map>
+
+#ifndef _WIN32
+#include <cerrno>
+#include <csignal>
+#include <cstring>
+#include <sys/types.h>
+#include <signal.h>
+#endif
 
 namespace fs = std::filesystem;
 using json = nlohmann::json;
@@ -212,14 +221,33 @@ int run(int argc, char** argv) {
     auto* cmd_mcp = app.add_subcommand("mcp",
         "Start MCP stdio server for agent integration");
 
+    // ── status ─────────────────────────────────────────────────────
+    auto* cmd_status = app.add_subcommand("status",
+        "Show daemon and engine status");
+    bool show_history = false;
+    cmd_status->add_flag("--history", show_history,
+        "Include metric trends");
+
+    // ── config ───────────────────────────────────────────────────
+    auto* cmd_config = app.add_subcommand("config",
+        "Configuration management");
+    cmd_config->require_subcommand(1);
+
+    auto* config_reload = cmd_config->add_subcommand("reload",
+        "Reload configuration (send SIGHUP to running daemon)");
+
+    auto* config_show = cmd_config->add_subcommand("show",
+        "Show effective configuration");
+
+    auto* config_validate = cmd_config->add_subcommand("validate",
+        "Validate configuration files");
+
     // ── Future subcommand stubs ──────────────────────────────────
     app.add_subcommand("workflows", "Manage workflows")->disabled();
     app.add_subcommand("jobs", "Manage jobs")->disabled();
     app.add_subcommand("runs", "Query run history")->disabled();
     app.add_subcommand("logs", "View/follow logs")->disabled();
     app.add_subcommand("explain", "Explain execution plan")->disabled();
-    app.add_subcommand("status", "Show daemon status")->disabled();
-    app.add_subcommand("reload", "Reload configuration")->disabled();
     app.add_subcommand("stop", "Stop the daemon")->disabled();
     app.add_subcommand("prune", "Prune old records")->disabled();
 
@@ -682,6 +710,259 @@ int run(int argc, char** argv) {
             return 1;
         }
         return 0;
+    }
+
+    // ── status ───────────────────────────────────────────────────
+    if (cmd_status->parsed()) {
+        setup_logging(log_level, json_output, false);
+
+        auto cfg = load_config_or_die(config_path, {});
+        if (!cfg) return static_cast<int>(ExitCode::kConfigError);
+
+        // Determine if daemon is running (check PID file).
+        auto lock_path = cfg->data_dir / "kairos.lock";
+        std::string daemon_pid;
+        bool daemon_running = false;
+        {
+            std::ifstream pf(lock_path);
+            if (pf.is_open()) {
+                std::getline(pf, daemon_pid);
+                // Check if the PID is actually alive.
+                if (!daemon_pid.empty()) {
+#ifndef _WIN32
+                    pid_t pid = std::stoi(daemon_pid);
+                    daemon_running = (::kill(pid, 0) == 0);
+#else
+                    daemon_running = true;  // Best effort on Windows.
+#endif
+                }
+            }
+        }
+
+        // Open DB for run stats.
+        persist::QueryReader::RunStats stats;
+        int64_t db_size = 0;
+        try {
+            auto db = persist::open_database(cfg->db_path);
+            persist::QueryReader reader(*db);
+            stats = reader.query_run_stats();
+            db_size = persist::QueryReader::query_db_size(cfg->db_path);
+        } catch (...) {
+            // DB may not exist — show zeros.
+        }
+
+        // Load registry for watch group count.
+        auto registry = load_registry_from_yaml(
+            cfg, spdlog::default_logger());
+
+        if (json_output) {
+            std::cout << json{
+                {"version", std::string(kairos::kVersion)},
+                {"daemon_running", daemon_running},
+                {"daemon_pid", daemon_pid},
+                {"config_path", cfg->config_file_path.string()},
+                {"data_dir", cfg->data_dir.string()},
+                {"db_size_bytes", db_size},
+                {"workflows", static_cast<int>(registry->workflow_count())},
+                {"watch_groups", static_cast<int>(registry->watch_group_count())},
+                {"total_runs", stats.total_runs},
+                {"runs_today", stats.runs_today},
+                {"failures_today", stats.failures_today},
+                {"active_runs", stats.active_runs},
+            }.dump(2) << "\n";
+        } else {
+            // Human-friendly status display (§23.4).
+            auto format_bytes = [](int64_t bytes) -> std::string {
+                if (bytes < 1024) return fmt::format("{} B", bytes);
+                if (bytes < 1024 * 1024)
+                    return fmt::format("{:.1f} KB", bytes / 1024.0);
+                return fmt::format("{:.1f} MB", bytes / (1024.0 * 1024.0));
+            };
+
+            std::string status_str = daemon_running
+                ? "RUNNING" : "STOPPED";
+            std::string status_icon = daemon_running ? "[ok]" : "[--]";
+
+            std::cout << "\n";
+            std::cout << "  KAIROS v" << kairos::kVersion << "\n";
+            std::cout << "  Status: " << status_str;
+            if (daemon_running && !daemon_pid.empty()) {
+                std::cout << "  (PID " << daemon_pid << ")";
+            }
+            std::cout << "\n";
+            std::cout << "  Config: " << cfg->config_file_path.string()
+                      << "\n";
+            std::cout << "  Data:   " << cfg->data_dir.string() << "\n";
+            std::cout << "\n";
+
+            std::cout << fmt::format(
+                "  Workflows:    {}    Watch Groups: {}\n",
+                registry->workflow_count(),
+                registry->watch_group_count());
+            std::cout << fmt::format(
+                "  DB Size:      {}    Total Runs:   {}\n",
+                format_bytes(db_size), stats.total_runs);
+            std::cout << fmt::format(
+                "  Runs Today:   {}    Failures:     {}\n",
+                stats.runs_today, stats.failures_today);
+            if (stats.active_runs > 0) {
+                std::cout << fmt::format(
+                    "  Active Runs:  {}\n", stats.active_runs);
+            }
+            std::cout << "\n";
+        }
+        return 0;
+    }
+
+    // ── config reload ────────────────────────────────────────────
+    if (config_reload->parsed()) {
+        setup_logging(log_level, json_output, false);
+
+        auto cfg = load_config_or_die(config_path, {});
+        if (!cfg) return static_cast<int>(ExitCode::kConfigError);
+
+        auto lock_path = cfg->data_dir / "kairos.lock";
+
+        // Read PID from lock file.
+        std::string pid_str;
+        {
+            std::ifstream pf(lock_path);
+            if (!pf.is_open()) {
+                if (json_output) {
+                    std::cout << json{
+                        {"success", false},
+                        {"error", "Daemon not running (no PID file)"}
+                    }.dump(2) << "\n";
+                } else {
+                    std::cerr << "Daemon not running "
+                              << "(no PID file at "
+                              << lock_path.string() << ")\n";
+                }
+                return static_cast<int>(ExitCode::kNotRunning);
+            }
+            std::getline(pf, pid_str);
+        }
+
+        if (pid_str.empty()) {
+            std::cerr << "PID file is empty.\n";
+            return static_cast<int>(ExitCode::kNotRunning);
+        }
+
+#ifndef _WIN32
+        pid_t pid = std::stoi(pid_str);
+
+        // Check if process is alive.
+        if (::kill(pid, 0) != 0) {
+            if (json_output) {
+                std::cout << json{
+                    {"success", false},
+                    {"error", "Daemon process " + pid_str +
+                              " is not running"}
+                }.dump(2) << "\n";
+            } else {
+                std::cerr << "Daemon process " << pid_str
+                          << " is not running.\n";
+            }
+            return static_cast<int>(ExitCode::kNotRunning);
+        }
+
+        // Send SIGHUP to trigger reload.
+        if (::kill(pid, SIGHUP) != 0) {
+            int err = errno;
+            if (json_output) {
+                std::cout << json{
+                    {"success", false},
+                    {"error", "Failed to send SIGHUP: " +
+                              std::string(std::strerror(err))}
+                }.dump(2) << "\n";
+            } else {
+                std::cerr << "Failed to send SIGHUP to PID "
+                          << pid_str << ": "
+                          << std::strerror(err) << "\n";
+            }
+            return 1;
+        }
+
+        if (json_output) {
+            std::cout << json{
+                {"success", true},
+                {"pid", pid},
+                {"signal", "SIGHUP"}
+            }.dump(2) << "\n";
+        } else {
+            std::cout << "Reload signal sent to daemon (PID "
+                      << pid_str << ")\n";
+        }
+        return 0;
+#else
+        // Windows: SIGHUP not available.
+        // Future: use a named event or control pipe.
+        if (json_output) {
+            std::cout << json{
+                {"success", false},
+                {"error", "Reload via signal not supported on Windows"}
+            }.dump(2) << "\n";
+        } else {
+            std::cerr << "Reload via signal is not supported on Windows.\n"
+                      << "Use the MCP reloadConfig tool instead.\n";
+        }
+        return 1;
+#endif
+    }
+
+    // ── config show ──────────────────────────────────────────────
+    if (config_show->parsed()) {
+        auto cfg = load_config_or_die(config_path, {});
+        if (!cfg) return static_cast<int>(ExitCode::kConfigError);
+
+        if (json_output) {
+            std::cout << json{
+                {"config_file", cfg->config_file_path.string()},
+                {"data_dir", cfg->data_dir.string()},
+                {"db_path", cfg->db_path.string()},
+            }.dump(2) << "\n";
+        } else {
+            std::cout << "Config file: " << cfg->config_file_path.string()
+                      << "\n";
+            std::cout << "Data dir:    " << cfg->data_dir.string() << "\n";
+            std::cout << "DB path:     " << cfg->db_path.string() << "\n";
+        }
+        return 0;
+    }
+
+    // ── config validate ──────────────────────────────────────────
+    if (config_validate->parsed()) {
+        auto config_file = config::resolve_config_path(config_path);
+        auto result = config::load_config(config_file, {});
+        if (result.ok()) {
+            if (json_output) {
+                std::cout << json{{"valid", true}}.dump(2) << "\n";
+            } else {
+                std::cout << "Configuration is valid.\n";
+            }
+            return 0;
+        } else {
+            if (json_output) {
+                json errs = json::array();
+                for (const auto& e : result.errors) {
+                    errs.push_back({
+                        {"key", e.key_path},
+                        {"message", e.message}
+                    });
+                }
+                std::cout << json{
+                    {"valid", false},
+                    {"errors", errs}
+                }.dump(2) << "\n";
+            } else {
+                std::cerr << "Configuration has errors:\n";
+                for (const auto& e : result.errors) {
+                    std::cerr << "  [" << e.key_path << "] "
+                              << e.message << "\n";
+                }
+            }
+            return static_cast<int>(ExitCode::kConfigError);
+        }
     }
 
     // ── mcp ───────────────────────────────────────────────────────

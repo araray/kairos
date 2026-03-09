@@ -451,8 +451,31 @@ ScanResult WatchEngine::run_scan(
     ScanResult result;
     auto scan_start = std::chrono::steady_clock::now();
 
+    // ── OTel span: kairos.watch_scan (§21.2, §21.5) ─────────────
+    std::unique_ptr<observability::SpanHandle> scan_span;
+    if (deps_.tracer) {
+        std::string mode_str;
+        switch (state.def.mode) {
+            case WatchMode::Native: mode_str = "native"; break;
+            case WatchMode::Sample: mode_str = "sample"; break;
+            case WatchMode::Hybrid: mode_str = "hybrid"; break;
+        }
+        scan_span = deps_.tracer->start_span("kairos.watch_scan", {
+            {"watch_group", state.def.group_name},
+            {"scan_mode", mode_str},
+        });
+    }
+
     // Collect current sample.
     std::stop_source temp_stop;
+
+    // Child span: kairos.snapshot
+    std::unique_ptr<observability::SpanHandle> snap_span;
+    if (deps_.tracer && scan_span) {
+        snap_span = deps_.tracer->start_child_span(
+            *scan_span, "kairos.snapshot");
+    }
+
     auto current = collect_sample(state.def, temp_stop.get_token());
     current.epoch = ++state.sample_epoch;
 
@@ -465,52 +488,88 @@ ScanResult WatchEngine::run_scan(
 
     result.sample = current;
 
+    if (snap_span) {
+        snap_span->set_attribute("files_scanned",
+            static_cast<int64_t>(current.entries.size()));
+        snap_span->end();
+    }
+
     // Record scan time.
     auto wall_now = deps_.clock ? deps_.clock->now()
                                 : std::chrono::system_clock::now();
     state.last_scan_iso = format_iso8601(wall_now);
 
     // Compute diff (only if we have a previous sample — EventWatcher parity).
+    int64_t changes_detected = 0;
     if (!state.last_sample.empty()) {
-        result.diff = compute_diff(current, state.last_sample);
-
-        // ── Hybrid mode deduplication (§12.7) ──────────────────────
-        // Suppress diff entries for paths recently reported by native
-        // events to avoid double-reporting the same change.
-        if (!result.diff.empty() &&
-            !state.recently_reported.empty())
         {
-            // Remove recently-reported paths from created/deleted/modified.
-            auto remove_reported = [&](std::vector<std::string>& paths) {
-                paths.erase(
-                    std::remove_if(paths.begin(), paths.end(),
-                        [&](const std::string& p) {
-                            return is_recently_reported(state, p);
-                        }),
-                    paths.end());
-            };
-            remove_reported(result.diff.created);
-            remove_reported(result.diff.deleted);
+            // Child span: kairos.diff
+            std::unique_ptr<observability::SpanHandle> diff_span;
+            if (deps_.tracer && scan_span) {
+                diff_span = deps_.tracer->start_child_span(
+                    *scan_span, "kairos.diff");
+            }
 
-            // Remove reported paths from modified map.
-            for (auto it = result.diff.modified.begin();
-                 it != result.diff.modified.end(); )
+            result.diff = compute_diff(result.sample, state.last_sample);
+
+            // ── Hybrid mode deduplication (§12.7) ──────────────────────
+            if (!result.diff.empty() &&
+                !state.recently_reported.empty())
             {
-                if (is_recently_reported(state, it->first)) {
-                    it = result.diff.modified.erase(it);
-                } else {
-                    ++it;
+                auto remove_reported = [&](std::vector<std::string>& paths) {
+                    paths.erase(
+                        std::remove_if(paths.begin(), paths.end(),
+                            [&](const std::string& p) {
+                                return is_recently_reported(state, p);
+                            }),
+                        paths.end());
+                };
+                remove_reported(result.diff.created);
+                remove_reported(result.diff.deleted);
+
+                for (auto it = result.diff.modified.begin();
+                     it != result.diff.modified.end(); )
+                {
+                    if (is_recently_reported(state, it->first)) {
+                        it = result.diff.modified.erase(it);
+                    } else {
+                        ++it;
+                    }
                 }
+            }
+
+            prune_recently_reported(state);
+
+            changes_detected =
+                static_cast<int64_t>(result.diff.created.size()) +
+                static_cast<int64_t>(result.diff.deleted.size()) +
+                static_cast<int64_t>(result.diff.modified.size());
+
+            if (diff_span) {
+                diff_span->set_attribute("changes_detected", changes_detected);
+                diff_span->end();
             }
         }
 
-        // Prune stale entries from recently-reported.
-        prune_recently_reported(state);
-
         // Evaluate rules if there are (non-deduplicated) changes.
         if (!result.diff.empty()) {
+            // Child span: kairos.rule_eval
+            std::unique_ptr<observability::SpanHandle> rule_span;
+            if (deps_.tracer && scan_span) {
+                rule_span = deps_.tracer->start_child_span(
+                    *scan_span, "kairos.rule_eval");
+            }
+
             result.triggered = evaluate_rules(
-                state.def, current, state.last_sample, result.diff);
+                state.def, result.sample, state.last_sample, result.diff);
+
+            if (rule_span) {
+                rule_span->set_attribute("rules_evaluated",
+                    static_cast<int64_t>(state.def.rules.size()));
+                rule_span->set_attribute("events_emitted",
+                    static_cast<int64_t>(result.triggered.size()));
+                rule_span->end();
+            }
 
             // Emit TriggerEvents.
             if (!result.triggered.empty()) {
@@ -526,15 +585,19 @@ ScanResult WatchEngine::run_scan(
 
             // Persist events.
             for (const auto& tr : result.triggered) {
-                persist_event(tr, current.epoch);
+                persist_event(tr, result.sample.epoch);
             }
         }
     }
 
     // Persist sample.
-    persist_sample(state.def.group_name, current);
+    persist_sample(state.def.group_name, result.sample);
 
-    // Update state.
+    // Capture sample size before moving into state (span needs it).
+    int64_t files_in_sample =
+        static_cast<int64_t>(current.entries.size());
+
+    // Update state. Move current (not result.sample — caller needs it).
     state.last_sample = std::move(current);
 
     // Schedule next scan.
@@ -547,6 +610,20 @@ ScanResult WatchEngine::run_scan(
     result.scan_duration =
         std::chrono::duration_cast<std::chrono::milliseconds>(
             scan_end - scan_start);
+
+    // Finalize the scan span.
+    if (scan_span) {
+        scan_span->set_attribute("scan_duration_ms",
+            static_cast<int64_t>(result.scan_duration.count()));
+        scan_span->set_attribute("files_scanned", files_in_sample);
+        scan_span->set_attribute("changes_detected", changes_detected);
+        scan_span->set_attribute("events_emitted",
+            static_cast<int64_t>(result.triggered.size()));
+        if (result.incomplete) {
+            scan_span->set_error("scan incomplete — bound exceeded");
+        }
+        scan_span->end();
+    }
 
     return result;
 }
