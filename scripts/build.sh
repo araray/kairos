@@ -55,6 +55,7 @@ BUILD_DIR=""                # Auto-computed if empty
 ENABLE_TESTS="ON"
 ENABLE_HTTP="OFF"
 ENABLE_OTEL="OFF"
+ENABLE_VAULT="OFF"
 ENABLE_TUI="OFF"
 ENABLE_ASAN="OFF"
 ENABLE_UBSAN="OFF"
@@ -91,6 +92,7 @@ HEADER
     echo "    --tests / --no-tests   Build test suite (default: on)"
     echo "    --http                 Build HTTP server + Web UI"
     echo "    --otel                 Build with OpenTelemetry tracing"
+    echo "    --vault                Build with Ansible Vault support (OpenSSL)"
     echo "    --tui                  Build TUI dashboard (FTXUI)"
     echo ""
     echo -e "  ${C_BOLD}SANITIZERS${C_RESET}"
@@ -136,6 +138,9 @@ HEADER
     echo "    ${C_DIM}# Full-featured release${C_RESET}"
     echo "    ./scripts/build.sh --profile full"
     echo ""
+    echo "    ${C_DIM}# Vault + HTTP (requires OpenSSL)${C_RESET}"
+    echo "    ./scripts/build.sh --http --vault"
+    echo ""
     echo "    ${C_DIM}# Clang debug, pass extra flags${C_RESET}"
     echo "    ./scripts/build.sh --compiler clang -- -DCMAKE_VERBOSE_MAKEFILE=ON"
     echo ""
@@ -159,6 +164,8 @@ while [[ $# -gt 0 ]]; do
         --http)             ENABLE_HTTP="ON"; shift ;;
         --no-http)          ENABLE_HTTP="OFF"; shift ;;
         --otel)             ENABLE_OTEL="ON"; shift ;;
+        --vault)            ENABLE_VAULT="ON"; shift ;;
+        --no-vault)         ENABLE_VAULT="OFF"; shift ;;
         --tui)              ENABLE_TUI="ON"; shift ;;
 
         # Sanitizers
@@ -230,6 +237,7 @@ if [[ -n "$PROFILE" ]]; then
         full)
             BUILD_TYPE="Release"
             ENABLE_HTTP="ON"
+            ENABLE_VAULT="ON"
             ENABLE_TESTS="ON"
             ;;
         *)
@@ -273,6 +281,7 @@ CMAKE_ARGS=(
     -DKAIROS_BUILD_TESTS="${ENABLE_TESTS}"
     -DKAIROS_HTTP="${ENABLE_HTTP}"
     -DKAIROS_OTEL="${ENABLE_OTEL}"
+    -DKAIROS_VAULT="${ENABLE_VAULT}"
     -DKAIROS_TUI="${ENABLE_TUI}"
 )
 
@@ -333,6 +342,7 @@ features=""
 [[ "$ENABLE_TESTS" == "ON" ]] && features+="tests "
 [[ "$ENABLE_HTTP"  == "ON" ]] && features+="http "
 [[ "$ENABLE_OTEL"  == "ON" ]] && features+="otel "
+[[ "$ENABLE_VAULT" == "ON" ]] && features+="vault "
 [[ "$ENABLE_TUI"   == "ON" ]] && features+="tui "
 _cfg "Features" "${features:-none}"
 
