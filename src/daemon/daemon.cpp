@@ -154,7 +154,8 @@ static bool perform_config_reload(
     engine::Scheduler& scheduler,
     engine::Pipeline& pipeline,
     watch::WatchEngine& watch_engine,
-    std::shared_ptr<spdlog::logger> log)
+    std::shared_ptr<spdlog::logger> log,
+    mcp::McpHandler* mcp_handler = nullptr)
 {
     log->info("Config reload: re-parsing {}", config_path.string());
 
@@ -175,6 +176,11 @@ static bool perform_config_reload(
     scheduler.request_reload(new_registry);
     pipeline.request_reload(new_registry);
     watch_engine.request_reload(new_registry->watch_groups());
+
+    // Propagate to MCP handler if available (Phase 4 Batch 3).
+    if (mcp_handler) {
+        mcp_handler->update_registry(new_registry);
+    }
 
     log->info("Config reload complete");
     return true;
@@ -382,6 +388,30 @@ int run_daemon(std::shared_ptr<const kairos::config::ConfigState> config) {
         mcp_deps.server_info.name = "kairos";
         mcp_deps.server_info.version = std::string(kairos::kVersion);
 
+        // Phase 4 Batch 3: wire workflow/run dependencies.
+        mcp_deps.registry = registry;
+        mcp_deps.query_reader = &query_reader;
+        mcp_deps.submit_run =
+            [&trigger_bus](const std::string& target_id,
+                           engine::TriggerEvent::TargetKind kind)
+            -> std::string {
+                auto run_id = core::generate_run_id();
+                engine::TriggerEvent evt;
+                evt.type = engine::TriggerType::ManualRun;
+                evt.target_id = target_id;
+                evt.target_kind = kind;
+                evt.trigger_id = "mcp";
+                evt.correlation_id = run_id;
+                evt.fire_time = std::chrono::system_clock::now();
+                evt.mono_time = std::chrono::steady_clock::now();
+                evt.payload = engine::ManualRunPayload{
+                    .invoked_by = "mcp"};
+                bool ok = trigger_bus.push(
+                    std::move(evt),
+                    std::chrono::milliseconds(5000));
+                return ok ? run_id : std::string{};
+            };
+
         // Config reload callback: delegates to the daemon's reload logic.
         mcp_deps.reload_config =
             [&config, &scheduler, &pipeline, &watch_engine, &log]
@@ -403,6 +433,9 @@ int run_daemon(std::shared_ptr<const kairos::config::ConfigState> config) {
                            const nlohmann::json& id) -> nlohmann::json {
                 return mcp_handler->dispatch(method, params, id);
             });
+
+        // Wire the transport back into the handler (resolves circular dep).
+        mcp_handler->set_transport(mcp_transport.get());
 
         // Start MCP on a dedicated thread.
         mcp_thread = std::jthread([&mcp_transport, &log](std::stop_token st) {
@@ -566,7 +599,8 @@ int run_daemon(std::shared_ptr<const kairos::config::ConfigState> config) {
         if (platform::g_reload_requested.exchange(false)) {
             bool ok = perform_config_reload(
                 config->config_file_path,
-                scheduler, pipeline, watch_engine, log);
+                scheduler, pipeline, watch_engine, log,
+                mcp_handler.get());
             if (ok) {
                 counter_reloads_ok->increment();
             } else {

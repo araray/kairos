@@ -573,3 +573,14 @@ add_executable(test_run_stream_close
 )
 target_link_libraries(test_run_stream_close PRIVATE kairos_test_helpers)
 gtest_discover_tests(test_run_stream_close)
+
+# ── Phase 4 Batch 3: MCP tools wiring tests ────────────────────
+
+# All 10 previously-stub MCP tools: listWorkflows, getWorkflow,
+# runWorkflow, listJobs, runJob, queryRuns, getRunDetail,
+# getRunLogs, getStepOutput, explainPlan + registry update + dispatch
+add_executable(test_mcp_tools_wiring
+    unit/mcp/mcp_tools_wiring_test.cpp
+)
+target_link_libraries(test_mcp_tools_wiring PRIVATE kairos_test_helpers)
+gtest_discover_tests(test_mcp_tools_wiring)

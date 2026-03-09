@@ -272,12 +272,15 @@ TEST_F(McpHandlerTest, GetMetricsReturnsJson) {
     EXPECT_FALSE(inner.contains("error"));
 }
 
-// ── Stub tools ──────────────────────────────────────────────────────────────
+// ── Previously-stub tools are now wired (Phase 4 Batch 3) ──────────────────
 
-TEST_F(McpHandlerTest, StubToolsReturnNotImplemented) {
+TEST_F(McpHandlerTest, PreviouslyStubToolsNoLongerReturnNotImplemented) {
     auto handler = make_handler();
 
-    std::vector<std::string> stub_tools = {
+    // These tools used to be stubs. They are now wired and should NOT
+    // return "not_implemented". Without full dependencies they return
+    // error objects — but never "not_implemented".
+    std::vector<std::string> wired_tools = {
         "kairos.listWorkflows", "kairos.getWorkflow",
         "kairos.runWorkflow",   "kairos.listJobs",
         "kairos.runJob",        "kairos.queryRuns",
@@ -285,14 +288,19 @@ TEST_F(McpHandlerTest, StubToolsReturnNotImplemented) {
         "kairos.getStepOutput", "kairos.explainPlan",
     };
 
-    for (const auto& tool_name : stub_tools) {
+    for (const auto& tool_name : wired_tools) {
+        SCOPED_TRACE("tool: " + tool_name);
         json params = {{"name", tool_name}};
         auto result = handler.dispatch("tools/call", params, 1);
 
         auto inner = json::parse(
             result["content"][0]["text"].get<std::string>());
-        EXPECT_EQ(inner["status"], "not_implemented")
-            << "Tool " << tool_name << " should be stub";
+        // Should NOT be "not_implemented" anymore.
+        if (inner.contains("status")) {
+            EXPECT_NE(inner["status"], "not_implemented")
+                << "Tool " << tool_name
+                << " should no longer be a stub";
+        }
     }
 }
 

@@ -6,22 +6,28 @@
 // ║  Implements the 14-tool schema defined in §22.4.                        ║
 // ║                                                                          ║
 // ║  Thread safety: all methods may be called from the MCP server thread.   ║
-// ║  Access to shared state (WatchEngine, MetricsRegistry) is thread-safe  ║
-// ║  by their respective designs.                                           ║
+// ║  Access to shared state (WatchEngine, MetricsRegistry, QueryReader,     ║
+// ║  WorkflowRegistry) is thread-safe by their respective designs.          ║
+// ║                                                                          ║
+// ║  Phase 4 Batch 3: all 10 stub tools now fully wired.                   ║
 // ║                                                                          ║
 // ║  Spec reference: §22.4–§22.6                                           ║
 // ╚════════════════════════════════════════════════════════════════════════════╝
 #pragma once
 
 #include "kairos/mcp/transport.hpp"
+#include "kairos/engine/trigger_event.hpp"
+#include "kairos/engine/workflow_registry.hpp"
 #include "kairos/exec/output_sink.hpp"
 #include "kairos/observability/metrics.hpp"
+#include "kairos/persist/query_reader.hpp"
 #include "kairos/watch/watch_engine.hpp"
 
 #include <nlohmann/json.hpp>
 
 #include <functional>
 #include <memory>
+#include <mutex>
 #include <stop_token>
 #include <string>
 #include <vector>
@@ -35,6 +41,11 @@ struct McpServerInfo {
     std::string name = "kairos";
     std::string version;
 };
+
+/// Submit-run callback type.
+/// Takes (target_name_or_id, target_kind) → run_id (empty on failure).
+using SubmitRunFn = std::function<std::string(
+    const std::string&, engine::TriggerEvent::TargetKind)>;
 
 /// MCP handler.  Routes protocol messages and tool calls to
 /// the appropriate Kairos subsystem.
@@ -65,6 +76,21 @@ public:
 
         /// Server info for the initialize response.
         McpServerInfo server_info;
+
+        // ── Phase 4 Batch 3: dependencies for full tool wiring ──────
+
+        /// Workflow/job registry for listing and resolving targets.
+        /// Thread-safe: immutable after construction; shared_ptr ensures
+        /// the registry outlives any in-flight MCP calls during reload.
+        std::shared_ptr<const engine::WorkflowRegistry> registry;
+
+        /// Read-only database queries for runs, logs, step output.
+        /// Thread-safe: SQLite WAL mode allows concurrent reads.
+        persist::QueryReader* query_reader = nullptr;
+
+        /// Submit a run via the trigger bus. Returns run_id on success,
+        /// empty string on failure (queue full, target not found).
+        SubmitRunFn submit_run;
     };
 
     explicit McpHandler(Dependencies deps);
@@ -98,13 +124,26 @@ public:
     void start_log_follow(const std::string& run_id,
                           std::stop_token stop = {});
 
+    /// Update the registry pointer (called on config reload).
+    /// Thread-safe: protected by registry_mu_.
+    void update_registry(
+        std::shared_ptr<const engine::WorkflowRegistry> new_registry);
+
+    /// Set the transport pointer (called after transport creation).
+    /// The handler is created before the transport (circular dep:
+    /// transport needs handler's dispatch callback). This setter
+    /// resolves the chicken-and-egg by wiring transport afterward.
+    void set_transport(StdioTransport* transport) {
+        deps_.transport = transport;
+    }
+
 private:
     // ── MCP protocol methods ────────────────────────────────────────
     json handle_initialize(const json& params);
     json handle_tools_list(const json& params);
     json handle_tools_call(const json& params);
 
-    // ── Tool implementations ────────────────────────────────────────
+    // ── Tool implementations: Watch ─────────────────────────────────
 
     /// kairos.listWatchGroups — List all configured watch groups.
     json tool_list_watch_groups(const json& args);
@@ -115,14 +154,49 @@ private:
     /// kairos.watchScanOnce — Run a single scan cycle.
     json tool_watch_scan_once(const json& args);
 
+    // ── Tool implementations: Config/Metrics ────────────────────────
+
     /// kairos.reloadConfig — Reload configuration.
     json tool_reload_config(const json& args);
 
     /// kairos.getMetrics — Get current metrics snapshot.
     json tool_get_metrics(const json& args);
 
-    // ── Stub tools (not yet wired) ──────────────────────────────────
-    json tool_stub(const std::string& name);
+    // ── Tool implementations: Workflows (Phase 4 Batch 3) ───────────
+
+    /// kairos.listWorkflows — List all configured workflows.
+    json tool_list_workflows(const json& args);
+
+    /// kairos.getWorkflow — Get workflow details + DAG structure.
+    json tool_get_workflow(const json& args);
+
+    /// kairos.runWorkflow — Trigger a workflow execution.
+    json tool_run_workflow(const json& args);
+
+    /// kairos.explainPlan — Dry-run: explain what would happen.
+    json tool_explain_plan(const json& args);
+
+    // ── Tool implementations: Jobs (Phase 4 Batch 3) ────────────────
+
+    /// kairos.listJobs — List all standalone jobs.
+    json tool_list_jobs(const json& args);
+
+    /// kairos.runJob — Trigger a standalone job execution.
+    json tool_run_job(const json& args);
+
+    // ── Tool implementations: Runs/Logs (Phase 4 Batch 3) ───────────
+
+    /// kairos.queryRuns — Query run execution history.
+    json tool_query_runs(const json& args);
+
+    /// kairos.getRunDetail — Get full run detail with jobs and steps.
+    json tool_get_run_detail(const json& args);
+
+    /// kairos.getRunLogs — Get log chunks for a run.
+    json tool_get_run_logs(const json& args);
+
+    /// kairos.getStepOutput — Get stdout/stderr for a specific step.
+    json tool_get_step_output(const json& args);
 
     // ── Internal ────────────────────────────────────────────────────
 
@@ -131,6 +205,17 @@ private:
 
     /// Wrap a tool result in the MCP content array format.
     static json wrap_tool_result(const json& result);
+
+    /// Resolve a workflow by ID or name. Returns nullptr if not found.
+    const engine::WorkflowDef* resolve_workflow(
+        const std::string& id_or_name) const;
+
+    /// Resolve a standalone job by ID or name. Returns nullptr if not found.
+    const engine::JobDef* resolve_standalone_job(
+        const std::string& id_or_name) const;
+
+    /// Get a snapshot of the current registry (thread-safe).
+    std::shared_ptr<const engine::WorkflowRegistry> get_registry() const;
 
 public:
     // ── Log streaming (§22.7) ───────────────────────────────────────
@@ -157,6 +242,9 @@ public:
 private:
     Dependencies deps_;
     bool initialized_ = false;
+
+    /// Mutex for registry updates during config reload.
+    mutable std::mutex registry_mu_;
 };
 
 }  // namespace kairos::mcp

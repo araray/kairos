@@ -1,14 +1,25 @@
 /// src/mcp/handler.cpp
 // ╔════════════════════════════════════════════════════════════════════════════╗
-// ║  handler.cpp — MCP handler: dispatch + tool implementations             ║
+// ║  handler.cpp — MCP handler: dispatch + all 14 tool implementations       ║
 // ║                                                                          ║
-// ║  Implements the 14-tool MCP schema from §22.4.                          ║
-// ║  Watch tools (listWatchGroups, getEvents, watchScanOnce) are fully      ║
-// ║  wired. Workflow/run/log tools are stubs pending Phase 4.               ║
+// ║  Phase 4 Batch 3: all 10 previously-stub tools are now fully wired.     ║
+// ║                                                                          ║
+// ║  Tool categories:                                                        ║
+// ║    Watch:     listWatchGroups, getEvents, watchScanOnce                  ║
+// ║    Config:    reloadConfig                                               ║
+// ║    Metrics:   getMetrics                                                ║
+// ║    Workflows: listWorkflows, getWorkflow, runWorkflow, explainPlan      ║
+// ║    Jobs:      listJobs, runJob                                          ║
+// ║    Runs/Logs: queryRuns, getRunDetail, getRunLogs, getStepOutput        ║
+// ║                                                                          ║
+// ║  Spec reference: §22.4–§22.8                                           ║
 // ╚════════════════════════════════════════════════════════════════════════════╝
 
 #include "kairos/mcp/handler.hpp"
+#include "kairos/core/id_generator.hpp"
 #include "kairos/core/version.hpp"
+#include "kairos/engine/dag.hpp"
+#include "kairos/engine/execution_plan.hpp"
 
 #include <spdlog/spdlog.h>
 
@@ -16,6 +27,7 @@
 #include <stdexcept>
 #include <thread>
 #include <unordered_map>
+#include <unordered_set>
 
 namespace kairos::mcp {
 
@@ -116,16 +128,31 @@ json McpHandler::handle_tools_call(const json& params) {
     auto tool_name = params.at("name").get<std::string>();
     auto arguments = params.value("arguments", json::object());
 
-    // Tool dispatch table.
+    // Tool dispatch table — all 14 tools fully wired.
     static const std::unordered_map<
         std::string,
         std::function<json(McpHandler*, const json&)>
     > tool_map = {
+        // Watch tools
         {"kairos.listWatchGroups", &McpHandler::tool_list_watch_groups},
         {"kairos.getEvents",       &McpHandler::tool_get_events},
         {"kairos.watchScanOnce",   &McpHandler::tool_watch_scan_once},
+        // Config/Metrics
         {"kairos.reloadConfig",    &McpHandler::tool_reload_config},
         {"kairos.getMetrics",      &McpHandler::tool_get_metrics},
+        // Workflows (Phase 4 Batch 3)
+        {"kairos.listWorkflows",   &McpHandler::tool_list_workflows},
+        {"kairos.getWorkflow",     &McpHandler::tool_get_workflow},
+        {"kairos.runWorkflow",     &McpHandler::tool_run_workflow},
+        {"kairos.explainPlan",     &McpHandler::tool_explain_plan},
+        // Jobs (Phase 4 Batch 3)
+        {"kairos.listJobs",        &McpHandler::tool_list_jobs},
+        {"kairos.runJob",          &McpHandler::tool_run_job},
+        // Runs/Logs (Phase 4 Batch 3)
+        {"kairos.queryRuns",       &McpHandler::tool_query_runs},
+        {"kairos.getRunDetail",    &McpHandler::tool_get_run_detail},
+        {"kairos.getRunLogs",      &McpHandler::tool_get_run_logs},
+        {"kairos.getStepOutput",   &McpHandler::tool_get_step_output},
     };
 
     auto it = tool_map.find(tool_name);
@@ -134,24 +161,12 @@ json McpHandler::handle_tools_call(const json& params) {
         return wrap_tool_result(result);
     }
 
-    // Check if it's a known-but-unimplemented tool.
-    static const std::vector<std::string> known_stubs = {
-        "kairos.listWorkflows", "kairos.getWorkflow",
-        "kairos.runWorkflow",   "kairos.listJobs",
-        "kairos.runJob",        "kairos.queryRuns",
-        "kairos.getRunDetail",  "kairos.getRunLogs",
-        "kairos.getStepOutput", "kairos.explainPlan",
-    };
-    for (const auto& name : known_stubs) {
-        if (tool_name == name) {
-            return wrap_tool_result(tool_stub(tool_name));
-        }
-    }
-
     throw std::invalid_argument("Unknown tool: " + tool_name);
 }
 
-// ── Tool implementations: Watch ────────────────────────────────────────────
+// ═══════════════════════════════════════════════════════════════════════════
+//  Tool implementations: Watch
+// ═══════════════════════════════════════════════════════════════════════════
 
 json McpHandler::tool_list_watch_groups(const json& /*args*/) {
     if (!deps_.watch_engine) {
@@ -306,7 +321,9 @@ json McpHandler::tool_watch_scan_once(const json& args) {
     };
 }
 
-// ── Tool implementations: Config ───────────────────────────────────────────
+// ═══════════════════════════════════════════════════════════════════════════
+//  Tool implementations: Config
+// ═══════════════════════════════════════════════════════════════════════════
 
 json McpHandler::tool_reload_config(const json& /*args*/) {
     if (!deps_.reload_config) {
@@ -328,14 +345,15 @@ json McpHandler::tool_reload_config(const json& /*args*/) {
     };
 }
 
-// ── Tool implementations: Metrics ──────────────────────────────────────────
+// ═══════════════════════════════════════════════════════════════════════════
+//  Tool implementations: Metrics
+// ═══════════════════════════════════════════════════════════════════════════
 
 json McpHandler::tool_get_metrics(const json& /*args*/) {
     if (!deps_.metrics) {
         return {{"error", "Metrics not available"}};
     }
 
-    // Parse the JSON string from MetricsRegistry::to_json().
     try {
         auto metrics_str = deps_.metrics->to_json();
         return json::parse(metrics_str);
@@ -344,17 +362,521 @@ json McpHandler::tool_get_metrics(const json& /*args*/) {
     }
 }
 
-// ── Stub tool ──────────────────────────────────────────────────────────────
+// ═══════════════════════════════════════════════════════════════════════════
+//  Tool implementations: Workflows (Phase 4 Batch 3)
+// ═══════════════════════════════════════════════════════════════════════════
 
-json McpHandler::tool_stub(const std::string& name) {
+json McpHandler::tool_list_workflows(const json& /*args*/) {
+    auto reg = get_registry();
+    if (!reg) {
+        return {{"error", "Workflow registry not available"}};
+    }
+
+    json workflows = json::array();
+    for (const auto* wf : reg->workflows()) {
+        workflows.push_back({
+            {"id",            wf->workflow_id},
+            {"name",          wf->workflow_name},
+            {"job_count",     static_cast<int>(wf->jobs.size())},
+        });
+    }
+
     return {
-        {"status", "not_implemented"},
-        {"tool", name},
-        {"message", "This tool will be available in a future release"}
+        {"workflows", workflows},
+        {"count",     static_cast<int>(workflows.size())}
     };
 }
 
-// ── Log streaming (§22.7) ─────────────────────────────────────────────────
+json McpHandler::tool_get_workflow(const json& args) {
+    auto reg = get_registry();
+    if (!reg) {
+        return {{"error", "Workflow registry not available"}};
+    }
+
+    auto workflow_id = args.value("workflow_id", std::string{});
+    if (workflow_id.empty()) {
+        return {{"error", "Missing required parameter: workflow_id"}};
+    }
+
+    const auto* wf = resolve_workflow(workflow_id);
+    if (!wf) {
+        return {{"error", "Workflow not found: " + workflow_id}};
+    }
+
+    // Build jobs array with step details.
+    json jobs = json::array();
+    for (const auto& job : wf->jobs) {
+        json steps = json::array();
+        for (const auto& step : job.steps) {
+            json step_j = {
+                {"step_id",   step.step_id},
+                {"step_name", step.step_name},
+                {"command",   step.command},
+                {"use_shell", step.use_shell},
+            };
+            if (!step.working_dir.empty()) {
+                step_j["working_dir"] = step.working_dir.string();
+            }
+            if (step.timeout.has_value()) {
+                step_j["timeout_seconds"] = step.timeout->count();
+            }
+            steps.push_back(std::move(step_j));
+        }
+
+        json job_j = {
+            {"job_id",    job.job_id},
+            {"job_name",  job.job_name},
+            {"steps",     steps},
+            {"needs",     json(job.needs)},
+            {"continue_on_error", job.continue_on_error},
+        };
+        if (job.condition_expr.has_value()) {
+            job_j["condition"] = *job.condition_expr;
+        }
+        if (!job.working_dir.empty()) {
+            job_j["working_dir"] = job.working_dir.string();
+        }
+        jobs.push_back(std::move(job_j));
+    }
+
+    // Build DAG structure: levels with job IDs.
+    json dag_levels = json::array();
+    for (int lvl = 0; lvl < wf->dag.level_count(); ++lvl) {
+        dag_levels.push_back(json(wf->dag.jobs_at_level(lvl)));
+    }
+
+    return {
+        {"workflow_id",   wf->workflow_id},
+        {"workflow_name", wf->workflow_name},
+        {"jobs",          jobs},
+        {"dag_levels",    dag_levels},
+        {"level_count",   wf->dag.level_count()},
+    };
+}
+
+json McpHandler::tool_run_workflow(const json& args) {
+    auto workflow_id = args.value("workflow_id", std::string{});
+    if (workflow_id.empty()) {
+        return {{"error", "Missing required parameter: workflow_id"}};
+    }
+
+    // Resolve name to ID if needed.
+    auto reg = get_registry();
+    if (reg) {
+        const auto* wf = resolve_workflow(workflow_id);
+        if (!wf) {
+            return {{"error", "Workflow not found: " + workflow_id}};
+        }
+        workflow_id = wf->workflow_id;
+    }
+
+    if (!deps_.submit_run) {
+        return {{"error", "Run submission not available"}};
+    }
+
+    auto run_id = deps_.submit_run(
+        workflow_id, engine::TriggerEvent::TargetKind::Workflow);
+
+    if (run_id.empty()) {
+        return {{"error", "Failed to submit workflow run (queue full?)"}};
+    }
+
+    bool follow = args.value("follow", false);
+    if (follow) {
+        start_log_follow(run_id);
+    }
+
+    return {
+        {"run_id",  run_id},
+        {"status",  "running"},
+        {"follow",  follow},
+    };
+}
+
+json McpHandler::tool_explain_plan(const json& args) {
+    auto reg = get_registry();
+    if (!reg) {
+        return {{"error", "Workflow registry not available"}};
+    }
+
+    auto workflow_id = args.value("workflow_id", std::string{});
+    if (workflow_id.empty()) {
+        return {{"error", "Missing required parameter: workflow_id"}};
+    }
+
+    const auto* wf = resolve_workflow(workflow_id);
+    if (!wf) {
+        return {{"error", "Workflow not found: " + workflow_id}};
+    }
+
+    // Build execution plan from the DAG structure.
+    // Walk the DAG level-by-level, marking conditions as pending
+    // if they reference same-workflow jobs (can't evaluate until runtime).
+    engine::ExecutionPlan plan;
+    plan.workflow_id = wf->workflow_id;
+    plan.workflow_name = wf->workflow_name;
+    plan.trigger_type = "explain";
+
+    // Collect all job names in this workflow for self-reference detection.
+    std::unordered_set<std::string> wf_job_names;
+    for (const auto& job : wf->jobs) {
+        wf_job_names.insert(job.job_name);
+    }
+
+    for (int lvl = 0; lvl < wf->dag.level_count(); ++lvl) {
+        for (const auto& job_id : wf->dag.jobs_at_level(lvl)) {
+            const auto& node = wf->dag.node(job_id);
+            engine::PlanEntry entry;
+            entry.job_id = node.job_id;
+            entry.job_name = node.job_name;
+            entry.level = node.topo_level;
+            entry.needs = node.needs;
+            entry.condition_expr =
+                node.condition_expr.value_or("");
+
+            if (node.condition_expr.has_value() &&
+                !node.condition_expr->empty()) {
+                // Check if the condition references a job in the same
+                // workflow — if so, mark as ConditionPending because
+                // we can't evaluate it before the run starts.
+                bool refs_self = false;
+                for (const auto& jn : wf_job_names) {
+                    if (node.condition_expr->find(
+                            "\"" + jn + "\"") != std::string::npos) {
+                        refs_self = true;
+                        break;
+                    }
+                }
+
+                if (refs_self) {
+                    entry.action = engine::PlanAction::ConditionPending;
+                    entry.reason = "Condition references same-workflow "
+                                   "job — will be evaluated at runtime";
+                    entry.condition_result = "pending";
+                } else {
+                    // External condition — could potentially evaluate
+                    // against the database, but for safety we mark
+                    // as Run (the condition will be evaluated at runtime).
+                    entry.action = engine::PlanAction::Run;
+                    entry.reason = "External condition (evaluated at "
+                                   "runtime)";
+                }
+            } else if (node.needs.empty()) {
+                entry.action = engine::PlanAction::Run;
+                entry.reason = "No dependencies, no condition";
+            } else {
+                entry.action = engine::PlanAction::Run;
+                entry.reason = "Dependencies will be met";
+            }
+
+            plan.entries.push_back(std::move(entry));
+        }
+    }
+
+    // Return as parsed JSON (from render_json).
+    auto json_str = plan.render_json();
+    return json::parse(json_str);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  Tool implementations: Jobs (Phase 4 Batch 3)
+// ═══════════════════════════════════════════════════════════════════════════
+
+json McpHandler::tool_list_jobs(const json& /*args*/) {
+    auto reg = get_registry();
+    if (!reg) {
+        return {{"error", "Workflow registry not available"}};
+    }
+
+    json jobs = json::array();
+    for (const auto* job : reg->standalone_jobs()) {
+        json job_j = {
+            {"id",         job->job_id},
+            {"name",       job->job_name},
+            {"step_count", static_cast<int>(job->steps.size())},
+        };
+        if (job->condition_expr.has_value()) {
+            job_j["condition"] = *job->condition_expr;
+        }
+        jobs.push_back(std::move(job_j));
+    }
+
+    return {
+        {"jobs",  jobs},
+        {"count", static_cast<int>(jobs.size())}
+    };
+}
+
+json McpHandler::tool_run_job(const json& args) {
+    auto job_id = args.value("job_id", std::string{});
+    if (job_id.empty()) {
+        return {{"error", "Missing required parameter: job_id"}};
+    }
+
+    // Resolve name to ID if needed.
+    auto reg = get_registry();
+    if (reg) {
+        const auto* job = resolve_standalone_job(job_id);
+        if (!job) {
+            return {{"error", "Standalone job not found: " + job_id}};
+        }
+        job_id = job->job_id;
+    }
+
+    if (!deps_.submit_run) {
+        return {{"error", "Run submission not available"}};
+    }
+
+    auto run_id = deps_.submit_run(
+        job_id, engine::TriggerEvent::TargetKind::StandaloneJob);
+
+    if (run_id.empty()) {
+        return {{"error", "Failed to submit job run (queue full?)"}};
+    }
+
+    bool follow = args.value("follow", false);
+    if (follow) {
+        start_log_follow(run_id);
+    }
+
+    return {
+        {"run_id",  run_id},
+        {"status",  "running"},
+        {"follow",  follow},
+    };
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  Tool implementations: Runs/Logs (Phase 4 Batch 3)
+// ═══════════════════════════════════════════════════════════════════════════
+
+json McpHandler::tool_query_runs(const json& args) {
+    if (!deps_.query_reader) {
+        return {{"error", "Query reader not available"}};
+    }
+
+    int limit = args.value("limit", 20);
+    if (limit < 1) limit = 1;
+    if (limit > 100) limit = 100;
+
+    auto status_filter = args.value("status", std::string{});
+    auto workflow_filter = args.value("workflow_id", std::string{});
+    auto since = args.value("since", std::string{});
+
+    // Map MCP status names to internal status names.
+    // MCP uses lowercase; internal uses uppercase.
+    if (!status_filter.empty()) {
+        // Convert to uppercase for the DB query.
+        std::string upper;
+        upper.reserve(status_filter.size());
+        for (char c : status_filter) {
+            upper += static_cast<char>(std::toupper(
+                static_cast<unsigned char>(c)));
+        }
+        status_filter = upper;
+    }
+
+    auto runs = deps_.query_reader->query_recent_runs(
+        limit, status_filter, workflow_filter, since);
+
+    json results = json::array();
+    for (const auto& r : runs) {
+        results.push_back({
+            {"run_id",        r.run_id},
+            {"target_type",   r.target_type},
+            {"target_id",     r.target_id},
+            {"target_name",   r.target_name},
+            {"trigger_type",  r.trigger_type},
+            {"status",        r.status},
+            {"exit_code",     r.exit_code},
+            {"start_ts",      r.start_ts},
+            {"end_ts",        r.end_ts},
+            {"duration_ms",   r.duration_ms},
+        });
+    }
+
+    return {
+        {"runs",  results},
+        {"count", static_cast<int>(results.size())}
+    };
+}
+
+json McpHandler::tool_get_run_detail(const json& args) {
+    if (!deps_.query_reader) {
+        return {{"error", "Query reader not available"}};
+    }
+
+    auto run_id = args.value("run_id", std::string{});
+    if (run_id.empty()) {
+        return {{"error", "Missing required parameter: run_id"}};
+    }
+
+    auto detail = deps_.query_reader->get_run_detail(run_id);
+    if (!detail.has_value()) {
+        return {{"error", "Run not found: " + run_id}};
+    }
+
+    // Build jobs array.
+    json jobs = json::array();
+    for (const auto& j : detail->jobs) {
+        json steps = json::array();
+        for (const auto& s : j.steps) {
+            steps.push_back({
+                {"step_id",       s.step_id},
+                {"step_name",     s.step_name},
+                {"status",        s.status},
+                {"exit_code",     s.exit_code},
+                {"start_ts",      s.start_ts},
+                {"end_ts",        s.end_ts},
+                {"duration_ms",   s.duration_ms},
+                {"command",       s.command},
+            });
+        }
+
+        jobs.push_back({
+            {"job_id",            j.job_id},
+            {"job_name",          j.job_name},
+            {"status",            j.status},
+            {"exit_code",         j.exit_code},
+            {"start_ts",          j.start_ts},
+            {"end_ts",            j.end_ts},
+            {"duration_ms",       j.duration_ms},
+            {"condition_result",  j.condition_result},
+            {"steps",             steps},
+        });
+    }
+
+    return {
+        {"run_id",        detail->run.run_id},
+        {"target_type",   detail->run.target_type},
+        {"target_id",     detail->run.target_id},
+        {"target_name",   detail->run.target_name},
+        {"trigger_type",  detail->run.trigger_type},
+        {"status",        detail->run.status},
+        {"exit_code",     detail->run.exit_code},
+        {"start_ts",      detail->run.start_ts},
+        {"end_ts",        detail->run.end_ts},
+        {"duration_ms",   detail->run.duration_ms},
+        {"jobs",          jobs},
+    };
+}
+
+json McpHandler::tool_get_run_logs(const json& args) {
+    if (!deps_.query_reader) {
+        return {{"error", "Query reader not available"}};
+    }
+
+    auto run_id = args.value("run_id", std::string{});
+    if (run_id.empty()) {
+        return {{"error", "Missing required parameter: run_id"}};
+    }
+
+    // Cursor-based pagination: cursor is a stringified row ID.
+    int64_t after_id = 0;
+    if (args.contains("cursor") && !args.at("cursor").is_null()) {
+        auto cursor_str = args.at("cursor").get<std::string>();
+        if (!cursor_str.empty()) {
+            try {
+                after_id = std::stoll(cursor_str);
+            } catch (...) {
+                // Invalid cursor — start from beginning.
+            }
+        }
+    }
+
+    int limit = args.value("limit", 100);
+    if (limit < 1) limit = 1;
+    if (limit > 1000) limit = 1000;
+
+    auto chunks = deps_.query_reader->get_log_chunks(
+        run_id, after_id, limit);
+
+    json results = json::array();
+    int64_t last_id = after_id;
+    for (const auto& c : chunks) {
+        results.push_back({
+            {"job_id",      c.job_id},
+            {"step_id",     c.step_id},
+            {"stream",      c.stream},
+            {"content",     c.content},
+            {"created_at",  c.created_at},
+        });
+        if (c.id > last_id) {
+            last_id = c.id;
+        }
+    }
+
+    // Build next_cursor: if we got exactly `limit` results,
+    // there might be more.
+    json next_cursor = json(nullptr);
+    if (static_cast<int>(chunks.size()) == limit) {
+        next_cursor = std::to_string(last_id);
+    }
+
+    return {
+        {"chunks",      results},
+        {"count",       static_cast<int>(results.size())},
+        {"next_cursor", next_cursor},
+    };
+}
+
+json McpHandler::tool_get_step_output(const json& args) {
+    if (!deps_.query_reader) {
+        return {{"error", "Query reader not available"}};
+    }
+
+    auto run_id = args.value("run_id", std::string{});
+    auto step_id = args.value("step_id", std::string{});
+    if (run_id.empty() || step_id.empty()) {
+        return {{"error",
+                 "Missing required parameters: run_id, step_id"}};
+    }
+
+    // Get all log chunks for this run, then filter by step_id.
+    // For large runs this is sub-optimal; a future QueryReader method
+    // could accept step_id directly. For now, this is correct.
+    auto all_chunks = deps_.query_reader->get_log_chunks(
+        run_id, 0, 10000);
+
+    std::string stdout_content;
+    std::string stderr_content;
+    int exit_code = -1;  // Unknown unless we can find it in run detail.
+
+    for (const auto& c : all_chunks) {
+        if (c.step_id == step_id) {
+            if (c.stream == "stdout") {
+                stdout_content += c.content;
+            } else if (c.stream == "stderr") {
+                stderr_content += c.content;
+            }
+        }
+    }
+
+    // Try to get exit code from run detail.
+    auto detail = deps_.query_reader->get_run_detail(run_id);
+    if (detail.has_value()) {
+        for (const auto& job : detail->jobs) {
+            for (const auto& step : job.steps) {
+                if (step.step_id == step_id) {
+                    exit_code = step.exit_code;
+                    break;
+                }
+            }
+        }
+    }
+
+    return {
+        {"run_id",    run_id},
+        {"step_id",   step_id},
+        {"stdout",    stdout_content},
+        {"stderr",    stderr_content},
+        {"exit_code", exit_code},
+    };
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  Log streaming (§22.7)
+// ═══════════════════════════════════════════════════════════════════════════
 
 void McpHandler::emit_log_chunk(
     const std::string& run_id,
@@ -442,7 +964,51 @@ void McpHandler::start_log_follow(
         });
 }
 
-// ── Helper: wrap tool result ───────────────────────────────────────────────
+// ═══════════════════════════════════════════════════════════════════════════
+//  Registry management
+// ═══════════════════════════════════════════════════════════════════════════
+
+void McpHandler::update_registry(
+    std::shared_ptr<const engine::WorkflowRegistry> new_registry) {
+    std::lock_guard lock(registry_mu_);
+    deps_.registry = std::move(new_registry);
+}
+
+std::shared_ptr<const engine::WorkflowRegistry>
+McpHandler::get_registry() const {
+    std::lock_guard lock(registry_mu_);
+    return deps_.registry;
+}
+
+const engine::WorkflowDef* McpHandler::resolve_workflow(
+    const std::string& id_or_name) const {
+    auto reg = get_registry();
+    if (!reg) return nullptr;
+
+    // Try by ID first.
+    const auto* wf = reg->workflow(id_or_name);
+    if (wf) return wf;
+
+    // Try by name.
+    return reg->workflow_by_name(id_or_name);
+}
+
+const engine::JobDef* McpHandler::resolve_standalone_job(
+    const std::string& id_or_name) const {
+    auto reg = get_registry();
+    if (!reg) return nullptr;
+
+    // Try by ID first.
+    const auto* job = reg->standalone_job(id_or_name);
+    if (job) return job;
+
+    // Try by name.
+    return reg->standalone_job_by_name(id_or_name);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  Helper: wrap tool result
+// ═══════════════════════════════════════════════════════════════════════════
 
 json McpHandler::wrap_tool_result(const json& result) {
     return {
@@ -453,7 +1019,9 @@ json McpHandler::wrap_tool_result(const json& result) {
     };
 }
 
-// ── Tool schemas ───────────────────────────────────────────────────────────
+// ═══════════════════════════════════════════════════════════════════════════
+//  Tool schemas
+// ═══════════════════════════════════════════════════════════════════════════
 
 json McpHandler::build_tool_schemas() const {
     json tools = json::array();
