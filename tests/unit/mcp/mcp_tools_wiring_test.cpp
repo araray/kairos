@@ -79,11 +79,12 @@ make_test_registry() {
     auto dag = engine::WorkflowDag::build(
         {dn_setup, dn_build, dn_test, dn_deploy});
 
-    engine::WorkflowDef wf;
-    wf.workflow_id = "wfl-abc123";
-    wf.workflow_name = "Deploy Pipeline";
-    wf.jobs = {j_setup, j_build, j_test, j_deploy};
-    wf.dag = std::move(dag);
+    engine::WorkflowDef wf{
+        .workflow_id = "wfl-abc123",
+        .workflow_name = "Deploy Pipeline",
+        .jobs = {j_setup, j_build, j_test, j_deploy},
+        .dag = std::move(dag),
+    };
 
     // Standalone jobs.
     engine::StepDef sj_step{
