@@ -90,17 +90,19 @@ struct CombinedStopToken {
     }
 
 private:
-    // stop_callback must be stored as optional because it can't be
-    // default-constructed — it requires a token and callable.
-    // Using unique_ptr for type erasure since stop_callback's type
-    // depends on the callable.
+    // stop_callback is non-movable (move ctor is deleted per the
+    // C++20 spec). We need type erasure because stop_callback<Lambda>
+    // has a lambda-dependent type. Solution: forward constructor args
+    // to build the stop_callback in-place on the heap — no move needed.
     struct CallbackHolder {
         virtual ~CallbackHolder() = default;
     };
     template <typename T>
     struct CallbackHolderImpl : CallbackHolder {
         T cb;
-        explicit CallbackHolderImpl(T&& c) : cb(std::move(c)) {}
+        template <typename... Args>
+        explicit CallbackHolderImpl(Args&&... args)
+            : cb(std::forward<Args>(args)...) {}
     };
     std::unique_ptr<CallbackHolder> cb1_;
     std::unique_ptr<CallbackHolder> cb2_;

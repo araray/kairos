@@ -80,16 +80,14 @@ void CombinedStopToken::arm(std::stop_token global_stop,
     // When either fires, request_stop() on the combined source.
     auto fire = [this]() { combined.request_stop(); };
 
-    using GlobalCb = std::stop_callback<decltype(fire)>;
-    using RunCb = std::stop_callback<decltype(fire)>;
+    using CbType = std::stop_callback<decltype(fire)>;
 
-    auto g = std::make_unique<CallbackHolderImpl<GlobalCb>>(
-        GlobalCb(global_stop, fire));
-    auto r = std::make_unique<CallbackHolderImpl<RunCb>>(
-        RunCb(run_stop, fire));
-
-    cb1_ = std::move(g);
-    cb2_ = std::move(r);
+    // Construct stop_callbacks in-place on the heap via forwarding.
+    // Cannot use make_unique: stop_callback's move ctor is deleted.
+    // CallbackHolderImpl's variadic ctor forwards args directly to
+    // the stop_callback(token, callable) constructor — no move.
+    cb1_.reset(new CallbackHolderImpl<CbType>(global_stop, fire));
+    cb2_.reset(new CallbackHolderImpl<CbType>(run_stop, fire));
 }
 
 }  // namespace kairos::engine
