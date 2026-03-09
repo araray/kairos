@@ -15,12 +15,15 @@
 // ╚════════════════════════════════════════════════════════════════════════════╝
 
 #include "kairos/daemon/daemon.hpp"
+#include "kairos/daemon/command_reader.hpp"
 #include "kairos/config/yaml_loader.hpp"
+#include "kairos/core/id_generator.hpp"
 #include "kairos/core/version.hpp"
 #include "kairos/engine/pipeline.hpp"
 #include "kairos/engine/scheduler.hpp"
 #include "kairos/engine/trigger_event.hpp"
 #include "kairos/engine/workflow_registry.hpp"
+#include "kairos/exec/output_sink.hpp"
 #include "kairos/exec/runner_pool.hpp"
 #include "kairos/mcp/handler.hpp"
 #include "kairos/mcp/transport.hpp"
@@ -36,6 +39,10 @@
 #include "kairos/watch/real_scanner.hpp"
 #include "kairos/watch/watch_engine.hpp"
 #include "kairos/watch/file_watcher.hpp"
+
+#ifdef KAIROS_HTTP_ENABLED
+#include "kairos/http/http_server.hpp"
+#endif
 
 #include <spdlog/spdlog.h>
 
@@ -270,6 +277,10 @@ int run_daemon(std::shared_ptr<const kairos::config::ConfigState> config) {
     // ── Step 12: Create Query Reader ───────────────────────────────
     persist::QueryReader query_reader(*db);
 
+    // ── Step 12.5: Create RunStream (per-run pub-sub, §14.7) ──────
+    exec::RunStream run_stream;
+    log->debug("RunStream pub-sub created");
+
     // ── Step 13: Start Pipeline thread ─────────────────────────────
     engine::PipelineConfig pipeline_cfg;
     engine::Pipeline pipeline(pipeline_cfg, engine::Pipeline::Dependencies{
@@ -280,6 +291,7 @@ int run_daemon(std::shared_ptr<const kairos::config::ConfigState> config) {
         .active_runs = &active_runs,
         .db_writer = &db_writer,
         .query_reader = &query_reader,
+        .run_stream = &run_stream,
     });
     pipeline.start(stop_token);
     log->info("Pipeline thread started");
@@ -398,6 +410,68 @@ int run_daemon(std::shared_ptr<const kairos::config::ConfigState> config) {
         log->debug("MCP server disabled (kairos.mcp.enabled=false)");
     }
 
+    // ── Step 15.8: Create Command Reader (§23.10) ─────────────────
+    auto commands_dir = config->data_dir / "commands";
+    daemon::CommandReader command_reader(commands_dir);
+    log->debug("Command reader initialized: {}", commands_dir.string());
+
+    // ── Step 15.9: Start HTTP server (optional, §26) ─────────────
+#ifdef KAIROS_HTTP_ENABLED
+    std::unique_ptr<http::HttpServer> http_server;
+    bool http_enabled = config->global.get<bool>(
+        "kairos.http.enabled", false);
+
+    if (http_enabled) {
+        http::HttpConfig http_cfg;
+        http_cfg.listen_addr = config->global.get<std::string>(
+            "kairos.http.host", "127.0.0.1");
+        http_cfg.listen_port = static_cast<uint16_t>(
+            config->global.get<int>("kairos.http.port", 8420));
+        http_cfg.api_token = config->global.get<std::string>(
+            "kairos.http.auth_token", "");
+        http_cfg.enable_cors = config->global.get<bool>(
+            "kairos.http.cors_enabled", false);
+
+        auto uptime_start_http = std::chrono::steady_clock::now();
+
+        http::HttpDependencies http_deps;
+        http_deps.metrics = &metrics_registry;
+        http_deps.reader = &query_reader;
+        http_deps.registry = registry;
+        http_deps.run_stream = &run_stream;
+        http_deps.get_uptime = [uptime_start_http]() -> double {
+            return std::chrono::duration<double>(
+                std::chrono::steady_clock::now() - uptime_start_http).count();
+        };
+        http_deps.submit_run = [&trigger_bus](
+            const std::string& name) -> std::string {
+            auto run_id = core::generate_run_id();
+            engine::TriggerEvent evt;
+            evt.type = engine::TriggerType::Manual;
+            evt.target_id = name;
+            evt.trigger_id = "http-api";
+            evt.correlation_id = run_id;
+            bool ok = trigger_bus.push(std::move(evt),
+                std::chrono::milliseconds(5000));
+            return ok ? run_id : std::string{};
+        };
+        http_deps.reload_config = [&config, &scheduler, &pipeline,
+                                    &watch_engine, &log]() -> bool {
+            return perform_config_reload(
+                config->config_file_path,
+                scheduler, pipeline, watch_engine, log);
+        };
+
+        http_server = std::make_unique<http::HttpServer>(
+            std::move(http_cfg), std::move(http_deps));
+        http_server->start(stop_token);
+        log->info("HTTP server started: {}",
+                  http_server->listen_address());
+    } else {
+        log->debug("HTTP server disabled (kairos.http.enabled=false)");
+    }
+#endif
+
     // ── Step 16: Install signal handlers ───────────────────────────
     platform::install_signal_handlers(
         [&](platform::SignalType sig) {
@@ -493,6 +567,30 @@ int run_daemon(std::shared_ptr<const kairos::config::ConfigState> config) {
             }
         }
 
+        // Poll for CLI commands (cancel, reload, etc.) — §23.10.
+        auto commands = command_reader.poll();
+        for (const auto& cmd : commands) {
+            switch (cmd.type) {
+                case daemon::Command::Type::Cancel:
+                    log->info("Command: cancel run '{}'", cmd.run_id);
+                    // The CLI already marked the run as CANCELLED in the DB.
+                    // The daemon acknowledges the cancel. Process termination
+                    // of in-flight jobs is handled by the pipeline checking
+                    // run status on each iteration.
+                    // TODO(Phase 4): Wire per-run stop_source for immediate
+                    // process kill on cancel.
+                    break;
+                case daemon::Command::Type::Reload:
+                    log->info("Command: config reload (via CLI)");
+                    platform::g_reload_requested.store(true);
+                    break;
+                default:
+                    log->warn("Unknown command type from file: {}",
+                              cmd.source_file);
+                    break;
+            }
+        }
+
         // Sleep for 5 seconds (or until stop).
         clock.sleep_for(std::chrono::milliseconds(5000));
     }
@@ -527,6 +625,15 @@ int run_daemon(std::shared_ptr<const kairos::config::ConfigState> config) {
     // 2. Stop watch engine (no new watch events).
     log->debug("Stopping watch engine");
     watch_engine.stop();
+
+    // 2.3. Stop HTTP server (close listener).
+#ifdef KAIROS_HTTP_ENABLED
+    if (http_server) {
+        log->debug("Stopping HTTP server");
+        http_server->stop();
+        http_server.reset();
+    }
+#endif
 
     // 2.5. Stop MCP server (close stdin reader).
     if (mcp_transport) {

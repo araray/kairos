@@ -82,3 +82,13 @@ if(KAIROS_BUILD_TESTS)
     set(gtest_force_shared_crt ON CACHE BOOL "" FORCE)
     FetchContent_MakeAvailable(googletest)
 endif()
+
+# ── Optional: HTTP server dependencies ─────────────────────────────────────
+if(KAIROS_HTTP)
+    FetchContent_Declare(httplib
+        GIT_REPOSITORY https://github.com/yhirose/cpp-httplib.git
+        GIT_TAG        v0.15.3
+        GIT_SHALLOW    TRUE
+    )
+    FetchContent_MakeAvailable(httplib)
+endif()

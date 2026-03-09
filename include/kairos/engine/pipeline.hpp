@@ -15,6 +15,7 @@
 #include "kairos/engine/trigger_event.hpp"
 #include "kairos/engine/trigger_types.hpp"
 #include "kairos/engine/workflow_registry.hpp"
+#include "kairos/exec/output_sink.hpp"
 #include "kairos/exec/runner_pool.hpp"
 #include "kairos/kel/evaluator.hpp"
 #include "kairos/persist/db_writer.hpp"
@@ -133,6 +134,7 @@ public:
         ActiveRunTracker* active_runs = nullptr;
         persist::DBWriter* db_writer = nullptr;
         persist::QueryReader* query_reader = nullptr;
+        exec::RunStream* run_stream = nullptr;
     };
 
     explicit Pipeline(PipelineConfig config, Dependencies deps);

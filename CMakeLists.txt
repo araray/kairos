@@ -39,6 +39,7 @@ add_library(kairos_core STATIC
     src/kel/evaluator.cpp
     src/exec/env_builder.cpp
     src/exec/runner_pool.cpp
+    src/exec/output_sink.cpp
     src/persist/migration.cpp
     src/persist/database.cpp
     src/persist/db_writer.cpp
@@ -132,6 +133,7 @@ add_executable(kairos
     src/main.cpp
     src/cli/cli_app.cpp
     src/daemon/daemon.cpp
+    src/daemon/command_reader.cpp
 )
 
 target_link_libraries(kairos PRIVATE
@@ -139,6 +141,13 @@ target_link_libraries(kairos PRIVATE
     kairos_platform
     CLI11::CLI11
 )
+
+# ── Optional: HTTP server (KAIROS_HTTP=ON) ─────────────────────────────────
+if(KAIROS_HTTP)
+    target_sources(kairos PRIVATE src/http/http_server.cpp)
+    target_compile_definitions(kairos PRIVATE KAIROS_HTTP_ENABLED)
+    target_link_libraries(kairos PRIVATE httplib::httplib)
+endif()
 
 # ── Tests ──────────────────────────────────────────────────────────────────
 if(KAIROS_BUILD_TESTS)

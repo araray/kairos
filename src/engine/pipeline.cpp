@@ -6,6 +6,7 @@
 
 #include "kairos/engine/pipeline.hpp"
 #include "kairos/core/id_generator.hpp"
+#include "kairos/exec/output_sink.hpp"
 
 #include <spdlog/spdlog.h>
 
@@ -109,6 +110,11 @@ RunStatus Pipeline::process_event(const TriggerEvent& event,
     ctx.run_status = status;
 
     persist_run_complete(ctx);
+
+    // Close RunStream subscribers for this run (§14.7).
+    // Any live followers (CLI --follow, MCP, SSE) will see
+    // the stream end and can check the final run status.
+    if (deps_.run_stream) deps_.run_stream->close_run(ctx.run_id);
 
     if (deps_.active_runs) deps_.active_runs->decrement(event.target_id);
 
@@ -388,6 +394,40 @@ RunStatus Pipeline::execute_job(const std::string& job_id, RunContext& ctx,
 
         auto proc_spec = build_process_spec(step, *job_def, ctx);
 
+        // ── Wire output streaming (§14.7) ────────────────────────
+        // Create a per-step OutputMultiplexer that fans out to:
+        //   1. DB writer (log_chunks table, batched async)
+        //   2. RunStream pub-sub (live followers: CLI, MCP, SSE)
+        exec::OutputMultiplexer output_mux;
+        std::atomic<int64_t> chunk_index{0};
+
+        // Sink 1: DB writer — persist log chunks.
+        if (deps_.db_writer) {
+            output_mux.add_sink(
+                [this, &ctx, &job_id, &step, &chunk_index]
+                (std::string_view chunk, bool is_stderr) {
+                    deps_.db_writer->enqueue(persist::InsertLogChunk{
+                        .run_id = ctx.run_id,
+                        .job_id = job_id,
+                        .step_id = step.step_id,
+                        .chunk_index = chunk_index.fetch_add(1),
+                        .stream = is_stderr ? "stderr" : "stdout",
+                        .content = std::string(chunk),
+                    });
+                });
+        }
+
+        // Sink 2: RunStream pub-sub — live followers.
+        if (deps_.run_stream) {
+            output_mux.add_sink(
+                [this, &ctx, &job_id, &step]
+                (std::string_view chunk, bool is_stderr) {
+                    deps_.run_stream->publish(
+                        ctx.run_id, job_id, step.step_id,
+                        chunk, is_stderr);
+                });
+        }
+
         // Submit to runner pool and wait for completion.
         // Uses promise/future instead of CV+atomic: the shared state is
         // heap-allocated, so it's safe even if the worker thread is still
@@ -402,6 +442,7 @@ RunStatus Pipeline::execute_job(const std::string& job_id, RunContext& ctx,
         item.step_id = step.step_id;
         item.correlation_id = ctx.correlation_id;
         item.process_spec = std::move(proc_spec);
+        item.output_callback = exec::make_output_callback(output_mux);
         item.on_complete = [step_promise](
             const std::string&, exec::ProcessResult result) {
             step_promise->set_value(std::move(result));

@@ -499,3 +499,50 @@ add_executable(test_completions
 )
 target_link_libraries(test_completions PRIVATE kairos_test_helpers)
 gtest_discover_tests(test_completions)
+
+# ══════════════════════════════════════════════════════════════════════════
+# Phase 4 Batch 1: OutputMultiplexer, RunStream, CommandReader, HTTP server
+# ══════════════════════════════════════════════════════════════════════════
+
+# ── OutputMultiplexer tests ──────────────────────────────────
+
+# Fan-out delivery, secret masking, remove sink, concurrency
+add_executable(test_output_multiplexer
+    unit/exec/output_sink_test.cpp
+)
+target_link_libraries(test_output_multiplexer PRIVATE kairos_test_helpers)
+gtest_discover_tests(test_output_multiplexer)
+
+# ── RunStream pub-sub tests ──────────────────────────────────
+
+# Subscribe, publish, unsubscribe, close_run, concurrency
+add_executable(test_run_stream
+    unit/exec/run_stream_test.cpp
+)
+target_link_libraries(test_run_stream PRIVATE kairos_test_helpers)
+gtest_discover_tests(test_run_stream)
+
+# ── CommandReader tests ──────────────────────────────────────
+
+# Command file parsing, polling, cleanup, response writing
+add_executable(test_command_reader
+    unit/daemon/command_reader_test.cpp
+    ${CMAKE_SOURCE_DIR}/src/daemon/command_reader.cpp
+)
+target_link_libraries(test_command_reader PRIVATE kairos_test_helpers)
+gtest_discover_tests(test_command_reader)
+
+# ── HTTP server tests (conditional on KAIROS_HTTP) ───────────
+
+add_executable(test_http_server
+    unit/http/http_server_test.cpp
+)
+target_link_libraries(test_http_server PRIVATE kairos_test_helpers)
+if(KAIROS_HTTP)
+    target_compile_definitions(test_http_server PRIVATE KAIROS_HTTP_ENABLED)
+    target_sources(test_http_server PRIVATE
+        ${CMAKE_SOURCE_DIR}/src/http/http_server.cpp
+    )
+    target_link_libraries(test_http_server PRIVATE httplib::httplib)
+endif()
+gtest_discover_tests(test_http_server)
