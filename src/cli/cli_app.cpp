@@ -17,6 +17,8 @@
 #include "kairos/engine/workflow_registry.hpp"
 #include "kairos/exec/process_handle.hpp"
 #include "kairos/exec/runner_pool.hpp"
+#include "kairos/kel/evaluator.hpp"
+#include "kairos/kel/value.hpp"
 #include "kairos/mcp/handler.hpp"
 #include "kairos/mcp/transport.hpp"
 #include "kairos/observability/logging.hpp"
@@ -314,8 +316,10 @@ int run(int argc, char** argv) {
         "Follow log output until completion");
 
     auto* workflows_explain = cmd_workflows->add_subcommand("explain",
-        "Explain execution plan")->disabled();
-    (void)workflows_explain;
+        "Explain execution plan (dry-run)");
+    std::string workflows_explain_id;
+    workflows_explain->add_option("id", workflows_explain_id,
+        "Workflow ID or name")->required();
 
     // ── Future subcommand stubs ──────────────────────────────────
     // ── jobs ──────────────────────────────────────────────────────
@@ -339,9 +343,30 @@ int run(int argc, char** argv) {
         "Job ID or name")->required();
     jobs_run->add_flag("-f,--follow", jobs_run_follow,
         "Follow log output until completion");
-    app.add_subcommand("explain", "Explain execution plan")->disabled();
-    app.add_subcommand("stop", "Stop the daemon")->disabled();
-    app.add_subcommand("prune", "Prune old records")->disabled();
+
+    // ── stop ──────────────────────────────────────────────────────
+    auto* cmd_stop = app.add_subcommand("stop",
+        "Stop the running daemon (sends SIGTERM)");
+
+    // ── prune ─────────────────────────────────────────────────────
+    auto* cmd_prune = app.add_subcommand("prune",
+        "Prune old records from the database");
+    int prune_days = 30;
+    bool prune_dry_run = false;
+    bool prune_force = false;
+    cmd_prune->add_option("--older-than", prune_days,
+        "Prune records older than N days (default: 30)");
+    cmd_prune->add_flag("--dry-run", prune_dry_run,
+        "Show what would be pruned without deleting");
+    cmd_prune->add_flag("--force", prune_force,
+        "Skip confirmation prompt");
+
+    // ── events tail ───────────────────────────────────────────────
+    auto* events_tail = cmd_events->add_subcommand("tail",
+        "Stream watch events in real-time (poll-based)");
+    std::string events_tail_group;
+    events_tail->add_option("--watch-group", events_tail_group,
+        "Filter by watch group");
 
     // ── Parse ─────────────────────────────────────────────────────────
     try {
@@ -468,19 +493,35 @@ int run(int argc, char** argv) {
             if (statuses.empty()) {
                 std::cout << "No watch groups configured.\n";
             } else {
-                // Table output.
-                std::cout << fmt::format("{:<20} {:<8} {:<6} {:<6} {:<22} {}\n",
-                    "GROUP", "MODE", "PATHS", "FILES",
-                    "LAST SCAN", "STATUS");
-                std::cout << std::string(80, '-') << "\n";
+                bool use_color = cli::supports_color();
+                cli::Table table({"GROUP", "MODE", "PATHS", "FILES",
+                                  "LAST SCAN", "STATUS"});
                 for (const auto& s : statuses) {
-                    std::cout << fmt::format(
-                        "{:<20} {:<8} {:<6} {:<6} {:<22} {}\n",
-                        s.group_name, s.mode, s.watched_paths,
-                        s.files_in_last_sample,
-                        s.last_scan_time.empty() ? "(none)" : s.last_scan_time,
-                        s.status);
+                    std::string last_scan = s.last_scan_time.empty()
+                        ? "(none)" : s.last_scan_time;
+                    if (last_scan.size() > 19) {
+                        last_scan = last_scan.substr(0, 19);
+                    }
+                    std::string status_display = s.status;
+                    if (use_color) {
+                        if (s.status == "idle" || s.status == "ok") {
+                            status_display = cli::colorize(
+                                s.status, cli::ansi::green, true);
+                        } else if (s.status == "error") {
+                            status_display = cli::colorize(
+                                s.status, cli::ansi::red, true);
+                        }
+                    }
+                    table.add_row({
+                        s.group_name, s.mode,
+                        std::to_string(s.watched_paths),
+                        std::to_string(s.files_in_last_sample),
+                        last_scan, status_display
+                    });
                 }
+                table.render(std::cout, use_color);
+                std::cout << "\n" << statuses.size()
+                          << " watch group(s)\n";
             }
         }
         return 0;
@@ -773,18 +814,33 @@ int run(int argc, char** argv) {
                                   << events_group << ")\n";
                     }
                 } else {
-                    std::cout << fmt::format(
-                        "{:<20} {:<15} {:<15} {:<10} {}\n",
-                        "GROUP", "RULE", "TYPE", "SEVERITY",
-                        "CREATED");
-                    std::cout << std::string(80, '-') << "\n";
+                    bool use_color = cli::supports_color();
+                    cli::Table table({"GROUP", "RULE", "TYPE",
+                                      "SEVERITY", "CREATED"});
                     for (const auto& e : events) {
-                        std::cout << fmt::format(
-                            "{:<20} {:<15} {:<15} {:<10} {}\n",
-                            e.watch_group, e.rule_name, e.event_type,
-                            e.severity, e.created_at);
+                        std::string sev = e.severity;
+                        if (use_color) {
+                            if (sev == "critical") {
+                                sev = cli::colorize(
+                                    sev, cli::ansi::red, true);
+                            } else if (sev == "warning") {
+                                sev = cli::colorize(
+                                    sev, cli::ansi::yellow, true);
+                            } else {
+                                sev = cli::colorize(
+                                    sev, cli::ansi::green, true);
+                            }
+                        }
+                        std::string ts = e.created_at.size() > 19
+                            ? e.created_at.substr(0, 19) : e.created_at;
+                        table.add_row({
+                            e.watch_group, e.rule_name,
+                            e.event_type, sev, ts
+                        });
                     }
-                    std::cout << "\n" << events.size() << " event(s)\n";
+                    table.render(std::cout, use_color);
+                    std::cout << "\n" << events.size()
+                              << " event(s)\n";
                 }
             }
         } catch (const std::exception& e) {
@@ -1780,6 +1836,317 @@ int run(int argc, char** argv) {
         return status == engine::RunStatus::Success ? 0 : 1;
     }
 
+    // ── workflows explain ────────────────────────────────────────
+    if (workflows_explain->parsed()) {
+        setup_logging(log_level, json_output, false);
+        bool use_color = !json_output && cli::supports_color();
+
+        auto cfg = load_config_or_die(config_path, {});
+        if (!cfg) return static_cast<int>(ExitCode::kConfigError);
+
+        auto registry = load_registry_from_yaml(
+            cfg, spdlog::default_logger());
+
+        // Find the workflow by ID or name.
+        const engine::WorkflowDef* found_wf = nullptr;
+        for (const auto* wf : registry->workflows()) {
+            if (wf->workflow_id == workflows_explain_id ||
+                wf->workflow_name == workflows_explain_id) {
+                found_wf = wf;
+                break;
+            }
+        }
+
+        if (!found_wf) {
+            if (json_output) {
+                std::cout << json{
+                    {"error", "Workflow not found"},
+                    {"id", workflows_explain_id}
+                }.dump(2) << "\n";
+            } else {
+                std::cerr << "Workflow '" << workflows_explain_id
+                          << "' not found.\n";
+            }
+            return static_cast<int>(ExitCode::kNotFound);
+        }
+
+        // Build execution plan from the DAG (§11.7).
+        // For explain, we evaluate conditions against SQLite history
+        // but do not execute anything.
+        engine::ExecutionPlan plan;
+        plan.workflow_id = found_wf->workflow_id;
+        plan.workflow_name = found_wf->workflow_name;
+        plan.trigger_type = "explain";
+
+        // Try to open DB for condition evaluation — if it fails,
+        // conditions that query history will be marked PENDING.
+        std::unique_ptr<SQLite::Database> db;
+        std::unique_ptr<persist::QueryReader> reader;
+        try {
+            db = persist::open_database(cfg->db_path);
+            reader = std::make_unique<persist::QueryReader>(*db);
+        } catch (...) {
+            // DB may not exist — proceed without history queries.
+        }
+
+        // Walk the DAG level-by-level, building plan entries.
+        for (int lvl = 0; lvl < found_wf->dag.level_count(); ++lvl) {
+            for (const auto& job_id : found_wf->dag.jobs_at_level(lvl)) {
+                const auto& dag_node = found_wf->dag.node(job_id);
+
+                engine::PlanEntry entry;
+                entry.job_id = dag_node.job_id;
+                entry.job_name = dag_node.job_name;
+                entry.level = dag_node.topo_level;
+                entry.needs = dag_node.needs;
+                entry.condition_expr =
+                    dag_node.condition_expr.value_or("");
+
+                // Check if any predecessor would not run.
+                bool all_needs_will_run = true;
+                for (const auto& need_id : dag_node.needs) {
+                    // Look up the predecessor's plan entry.
+                    for (const auto& prev : plan.entries) {
+                        if (prev.job_id == need_id &&
+                            prev.action != engine::PlanAction::Run &&
+                            prev.action != engine::PlanAction::ConditionPending) {
+                            all_needs_will_run = false;
+                            break;
+                        }
+                    }
+                }
+
+                if (!all_needs_will_run) {
+                    entry.action = engine::PlanAction::DependencyFailed;
+                    entry.reason = "Upstream dependency will not run";
+                    plan.entries.push_back(std::move(entry));
+                    continue;
+                }
+
+                // Evaluate condition expression if present.
+                if (dag_node.condition_expr.has_value() &&
+                    !dag_node.condition_expr->empty()) {
+                    // Check if condition references jobs in THIS workflow
+                    // (which haven't run yet).
+                    bool references_self_jobs = false;
+                    for (const auto& other_id :
+                         found_wf->dag.all_job_ids()) {
+                        // Simple heuristic: if condition mentions a job name
+                        // from this workflow, it's undecidable before execution.
+                        const auto& other_node =
+                            found_wf->dag.node(other_id);
+                        if (dag_node.condition_expr->find(
+                                "\"" + other_node.job_name + "\"") !=
+                            std::string::npos) {
+                            references_self_jobs = true;
+                            break;
+                        }
+                    }
+
+                    if (references_self_jobs) {
+                        entry.action = engine::PlanAction::ConditionPending;
+                        entry.reason =
+                            "Condition references same-workflow job "
+                            "(undecidable before execution)";
+                        entry.condition_result = "pending";
+                        plan.entries.push_back(std::move(entry));
+                        continue;
+                    }
+
+                    // Try to evaluate the condition against history.
+                    if (reader) {
+                        try {
+                            kel::EvalContext ctx;
+                            ctx.variables["workflow"] =
+                                kel::KelValue(found_wf->workflow_name);
+                            ctx.variables["trigger"] =
+                                kel::KelValue(std::string("explain"));
+                            ctx.variables["run_id"] =
+                                kel::KelValue(std::string("(dry-run)"));
+
+                            reader->register_kel_bindings(
+                                ctx, std::chrono::system_clock::now());
+
+                            kel::EvalLimits limits;
+                            auto result = kel::evaluate(
+                                *dag_node.condition_expr, ctx, limits);
+
+                            if (result.is_bool()) {
+                                if (result.as_bool()) {
+                                    entry.action = engine::PlanAction::Run;
+                                    entry.reason = "Condition: " +
+                                        *dag_node.condition_expr +
+                                        " \xe2\x86\x92 true";
+                                    entry.condition_result = "true";
+                                } else {
+                                    entry.action = engine::PlanAction::Skip;
+                                    entry.reason = "Condition: " +
+                                        *dag_node.condition_expr +
+                                        " \xe2\x86\x92 false";
+                                    entry.condition_result = "false";
+                                }
+                            } else {
+                                entry.action =
+                                    engine::PlanAction::ConditionPending;
+                                entry.reason = "Condition evaluated to "
+                                    "non-boolean result";
+                                entry.condition_result = "error";
+                            }
+                        } catch (const std::exception& e) {
+                            entry.action =
+                                engine::PlanAction::ConditionPending;
+                            entry.reason = std::string(
+                                "Condition eval error: ") + e.what();
+                            entry.condition_result = "error";
+                        }
+                    } else {
+                        // No DB available — mark as pending.
+                        entry.action = engine::PlanAction::ConditionPending;
+                        entry.reason = "No database available for "
+                            "condition evaluation";
+                        entry.condition_result = "pending";
+                    }
+                } else {
+                    // No condition — will run.
+                    if (dag_node.needs.empty()) {
+                        entry.action = engine::PlanAction::Run;
+                        entry.reason = "No dependencies, no condition";
+                    } else {
+                        entry.action = engine::PlanAction::Run;
+                        std::string needs_str;
+                        for (size_t i = 0; i < dag_node.needs.size(); ++i) {
+                            if (i > 0) needs_str += ", ";
+                            // Resolve ID to name.
+                            try {
+                                needs_str += found_wf->dag.node(
+                                    dag_node.needs[i]).job_name;
+                            } catch (...) {
+                                needs_str += dag_node.needs[i];
+                            }
+                        }
+                        entry.reason = "Needs [" + needs_str +
+                            "] \xe2\x86\x92 will be met";
+                    }
+                }
+
+                plan.entries.push_back(std::move(entry));
+            }
+        }
+
+        // Output the plan.
+        if (json_output) {
+            std::cout << plan.render_json() << "\n";
+        } else {
+            // Rich human-friendly display (§23.4 explain example).
+            std::cout << "\n  Execution Plan for: "
+                      << found_wf->workflow_name
+                      << " (" << found_wf->workflow_id << ")\n";
+            std::cout << "  ";
+            for (int i = 0; i < 52; ++i) std::cout << "\xe2\x95\x90";
+            std::cout << "\n\n";
+
+            std::cout << "  DAG Levels: "
+                      << found_wf->dag.level_count() << "\n";
+            std::cout << "  Total Jobs: "
+                      << found_wf->jobs.size() << "\n\n";
+
+            // Display by level.
+            int current_level = -1;
+            for (const auto& e : plan.entries) {
+                if (e.level != current_level) {
+                    current_level = e.level;
+                    int jobs_at_level = static_cast<int>(
+                        found_wf->dag.jobs_at_level(current_level).size());
+                    std::string par = (jobs_at_level > 1)
+                        ? " (parallel)" : "";
+                    std::cout << "  Level " << current_level
+                              << par << ":\n";
+                }
+
+                // Action icon.
+                std::string icon;
+                std::string action_str;
+                switch (e.action) {
+                    case engine::PlanAction::Run:
+                        icon = use_color
+                            ? cli::colorize("\xe2\x97\x8f", cli::ansi::green, true)
+                            : "[+]";
+                        action_str = use_color
+                            ? cli::colorize("WOULD RUN", cli::ansi::green, true)
+                            : "WOULD RUN";
+                        break;
+                    case engine::PlanAction::Skip:
+                        icon = use_color
+                            ? cli::colorize("\xe2\x97\x8b", cli::ansi::yellow, true)
+                            : "[-]";
+                        action_str = use_color
+                            ? cli::colorize("WOULD SKIP", cli::ansi::yellow, true)
+                            : "WOULD SKIP";
+                        break;
+                    case engine::PlanAction::ConditionPending:
+                        icon = use_color
+                            ? cli::colorize("?", cli::ansi::cyan, true)
+                            : "[?]";
+                        action_str = use_color
+                            ? cli::colorize("PENDING", cli::ansi::cyan, true)
+                            : "PENDING";
+                        break;
+                    case engine::PlanAction::DependencyFailed:
+                        icon = use_color
+                            ? cli::colorize("\xe2\x9c\x97", cli::ansi::red, true)
+                            : "[x]";
+                        action_str = use_color
+                            ? cli::colorize("DEP FAIL", cli::ansi::red, true)
+                            : "DEP FAIL";
+                        break;
+                    case engine::PlanAction::Disabled:
+                        icon = use_color
+                            ? cli::colorize("\xe2\x8a\x98", cli::ansi::gray, true)
+                            : "[.]";
+                        action_str = "DISABLED";
+                        break;
+                }
+
+                std::cout << "    " << icon << " "
+                          << (use_color
+                              ? cli::colorize(e.job_name, cli::ansi::bold, true)
+                              : e.job_name)
+                          << " \xe2\x80\x94 " << action_str;
+
+                if (!e.condition_expr.empty()) {
+                    std::cout << "\n      \xe2\x94\x94\xe2\x94\x80 condition: "
+                              << e.condition_expr;
+                    if (!e.condition_result.empty()) {
+                        std::cout << " \xe2\x86\x92 " << e.condition_result;
+                    }
+                }
+                if (!e.needs.empty()) {
+                    std::string needs_str;
+                    for (size_t i = 0; i < e.needs.size(); ++i) {
+                        if (i > 0) needs_str += ", ";
+                        try {
+                            needs_str += found_wf->dag.node(
+                                e.needs[i]).job_name;
+                        } catch (...) {
+                            needs_str += e.needs[i];
+                        }
+                    }
+                    std::cout << "\n      \xe2\x94\x94\xe2\x94\x80 needs: ["
+                              << needs_str << "]";
+                }
+                std::cout << "\n";
+            }
+
+            std::cout << "\n  Summary: "
+                      << plan.jobs_to_run() << " to run, "
+                      << plan.jobs_to_skip() << " to skip, "
+                      << plan.jobs_pending() << " pending\n";
+            std::cout << "  Max parallelism: "
+                      << plan.max_parallelism() << "\n\n";
+        }
+        return 0;
+    }
+
     // ── jobs list ────────────────────────────────────────────────
     if (jobs_list->parsed()) {
         setup_logging(log_level, json_output, false);
@@ -2082,6 +2449,429 @@ int run(int argc, char** argv) {
         }
 
         return status == engine::RunStatus::Success ? 0 : 1;
+    }
+
+    // ── stop ─────────────────────────────────────────────────────
+    if (cmd_stop->parsed()) {
+        setup_logging(log_level, json_output, false);
+
+        auto cfg = load_config_or_die(config_path, {});
+        if (!cfg) return static_cast<int>(ExitCode::kConfigError);
+
+        auto lock_path = cfg->data_dir / "kairos.lock";
+
+        // Read PID from lock file.
+        std::string pid_str;
+        {
+            std::ifstream pf(lock_path);
+            if (!pf.is_open()) {
+                if (json_output) {
+                    std::cout << json{
+                        {"success", false},
+                        {"error", "Daemon not running (no PID file)"}
+                    }.dump(2) << "\n";
+                } else {
+                    std::cerr << "Daemon not running (no PID file at "
+                              << lock_path.string() << ")\n";
+                }
+                return static_cast<int>(ExitCode::kNotRunning);
+            }
+            std::getline(pf, pid_str);
+        }
+
+        if (pid_str.empty()) {
+            if (json_output) {
+                std::cout << json{
+                    {"success", false},
+                    {"error", "PID file is empty"}
+                }.dump(2) << "\n";
+            } else {
+                std::cerr << "PID file is empty.\n";
+            }
+            return static_cast<int>(ExitCode::kNotRunning);
+        }
+
+#ifndef _WIN32
+        pid_t pid = std::stoi(pid_str);
+
+        // Check if the process is alive.
+        if (::kill(pid, 0) != 0) {
+            if (json_output) {
+                std::cout << json{
+                    {"success", false},
+                    {"error", "Daemon process " + pid_str +
+                              " is not running"}
+                }.dump(2) << "\n";
+            } else {
+                std::cerr << "Daemon process " << pid_str
+                          << " is not running.\n";
+            }
+            // Clean up stale PID file.
+            std::error_code ec;
+            fs::remove(lock_path, ec);
+            return static_cast<int>(ExitCode::kNotRunning);
+        }
+
+        // Send SIGTERM for graceful shutdown.
+        if (::kill(pid, SIGTERM) != 0) {
+            int err = errno;
+            if (json_output) {
+                std::cout << json{
+                    {"success", false},
+                    {"error", "Failed to send SIGTERM: " +
+                              std::string(std::strerror(err))}
+                }.dump(2) << "\n";
+            } else {
+                std::cerr << "Failed to send SIGTERM to PID "
+                          << pid_str << ": "
+                          << std::strerror(err) << "\n";
+            }
+            return 1;
+        }
+
+        if (json_output) {
+            std::cout << json{
+                {"success", true},
+                {"pid", pid},
+                {"signal", "SIGTERM"}
+            }.dump(2) << "\n";
+        } else {
+            std::cout << "Stop signal sent to daemon (PID "
+                      << pid_str << ")\n";
+            std::cout << "  Waiting for graceful shutdown...\n";
+        }
+
+        // Optionally wait for the daemon to exit (up to 10 seconds).
+        for (int i = 0; i < 20; ++i) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(500));
+            if (::kill(pid, 0) != 0) {
+                if (!json_output) {
+                    std::cout << "  Daemon stopped.\n";
+                }
+                return 0;
+            }
+        }
+
+        if (!json_output) {
+            std::cout << "  Daemon still running after 10s. "
+                      << "Check manually.\n";
+        }
+        return 0;
+#else
+        // Windows: no SIGTERM equivalent via kill().
+        // Future: use TerminateProcess or a named event.
+        if (json_output) {
+            std::cout << json{
+                {"success", false},
+                {"error", "Stop via signal not supported on Windows. "
+                          "Use task manager or the MCP interface."}
+            }.dump(2) << "\n";
+        } else {
+            std::cerr << "Stop via signal is not supported on Windows.\n"
+                      << "Use task manager or the MCP interface.\n";
+        }
+        return 1;
+#endif
+    }
+
+    // ── prune ────────────────────────────────────────────────────
+    if (cmd_prune->parsed()) {
+        setup_logging(log_level, json_output, false);
+
+        auto cfg = load_config_or_die(config_path, {});
+        if (!cfg) return static_cast<int>(ExitCode::kConfigError);
+
+        std::unique_ptr<SQLite::Database> db;
+        try {
+            db = persist::open_database(cfg->db_path);
+        } catch (const std::exception& e) {
+            std::cerr << "Failed to open database: " << e.what()
+                      << "\nRun 'kairos init-db' first.\n";
+            return 1;
+        }
+
+        persist::QueryReader reader(*db);
+
+        // Preview what would be pruned (§16.8).
+        auto preview = reader.query_prune_preview(prune_days);
+
+        int64_t total = preview.runs_to_delete +
+                        preview.run_jobs_to_delete +
+                        preview.run_steps_to_delete +
+                        preview.log_chunks_to_delete +
+                        preview.watch_events_to_delete +
+                        preview.watch_samples_to_delete +
+                        preview.metrics_snapshots_to_delete;
+
+        if (json_output) {
+            json result = {
+                {"older_than_days", prune_days},
+                {"dry_run", prune_dry_run},
+                {"preview", {
+                    {"runs", preview.runs_to_delete},
+                    {"run_jobs", preview.run_jobs_to_delete},
+                    {"run_steps", preview.run_steps_to_delete},
+                    {"log_chunks", preview.log_chunks_to_delete},
+                    {"watch_events", preview.watch_events_to_delete},
+                    {"watch_samples", preview.watch_samples_to_delete},
+                    {"metrics_snapshots", preview.metrics_snapshots_to_delete},
+                    {"total_records", total}
+                }}
+            };
+
+            if (!prune_dry_run && (prune_force || total > 0)) {
+                // Execute the prune via direct SQL in a transaction.
+                std::string cutoff =
+                    "datetime('now', '-" +
+                    std::to_string(prune_days) + " days')";
+
+                int total_deleted = 0;
+                try {
+                    SQLite::Transaction txn(*db);
+
+                    // Log chunks first (FK dependency).
+                    SQLite::Statement del_chunks(*db,
+                        "DELETE FROM log_chunks WHERE run_id IN "
+                        "(SELECT run_id FROM runs WHERE start_ts < " +
+                        cutoff + ")");
+                    total_deleted += del_chunks.exec();
+
+                    // Run steps.
+                    SQLite::Statement del_steps(*db,
+                        "DELETE FROM run_steps WHERE run_id IN "
+                        "(SELECT run_id FROM runs WHERE start_ts < " +
+                        cutoff + ")");
+                    total_deleted += del_steps.exec();
+
+                    // Run jobs.
+                    SQLite::Statement del_jobs(*db,
+                        "DELETE FROM run_jobs WHERE run_id IN "
+                        "(SELECT run_id FROM runs WHERE start_ts < " +
+                        cutoff + ")");
+                    total_deleted += del_jobs.exec();
+
+                    // Runs.
+                    SQLite::Statement del_runs(*db,
+                        "DELETE FROM runs WHERE start_ts < " + cutoff);
+                    total_deleted += del_runs.exec();
+
+                    // Watch events.
+                    SQLite::Statement del_events(*db,
+                        "DELETE FROM watch_events WHERE created_at < " +
+                        cutoff);
+                    total_deleted += del_events.exec();
+
+                    // Watch samples.
+                    SQLite::Statement del_samples(*db,
+                        "DELETE FROM watch_samples WHERE collected_at < " +
+                        cutoff);
+                    total_deleted += del_samples.exec();
+
+                    // Metrics snapshots.
+                    SQLite::Statement del_metrics(*db,
+                        "DELETE FROM metrics_snapshots WHERE recorded_at < " +
+                        cutoff);
+                    total_deleted += del_metrics.exec();
+
+                    txn.commit();
+
+                    // WAL checkpoint after pruning.
+                    db->exec("PRAGMA wal_checkpoint(TRUNCATE)");
+                } catch (const std::exception& e) {
+                    result["error"] = e.what();
+                }
+
+                result["deleted_total"] = total_deleted;
+                result["pruned"] = true;
+            }
+
+            std::cout << result.dump(2) << "\n";
+        } else {
+            // Human-friendly output.
+            std::cout << "\n  Prune Preview (records older than "
+                      << prune_days << " days):\n\n";
+
+            bool use_color = cli::supports_color();
+            cli::Table table({"TABLE", "RECORDS"});
+            table.add_row({"Runs", std::to_string(preview.runs_to_delete)});
+            table.add_row({"Run Jobs",
+                std::to_string(preview.run_jobs_to_delete)});
+            table.add_row({"Run Steps",
+                std::to_string(preview.run_steps_to_delete)});
+            table.add_row({"Log Chunks",
+                std::to_string(preview.log_chunks_to_delete)});
+            table.add_row({"Watch Events",
+                std::to_string(preview.watch_events_to_delete)});
+            table.add_row({"Watch Samples",
+                std::to_string(preview.watch_samples_to_delete)});
+            table.add_row({"Metrics Snapshots",
+                std::to_string(preview.metrics_snapshots_to_delete)});
+            table.render(std::cout, use_color);
+            std::cout << "\n  Total: " << total << " record(s)\n\n";
+
+            if (total == 0) {
+                std::cout << "  Nothing to prune.\n\n";
+                return 0;
+            }
+
+            if (prune_dry_run) {
+                std::cout << "  (dry-run: no records deleted)\n\n";
+                return 0;
+            }
+
+            // Confirmation prompt (unless --force).
+            if (!prune_force) {
+                std::cout << "  Delete " << total
+                          << " record(s)? [y/N] ";
+                std::string answer;
+                std::getline(std::cin, answer);
+                if (answer != "y" && answer != "Y") {
+                    std::cout << "  Aborted.\n";
+                    return 0;
+                }
+            }
+
+            // Execute the prune.
+            std::string cutoff =
+                "datetime('now', '-" +
+                std::to_string(prune_days) + " days')";
+            int total_deleted = 0;
+
+            try {
+                SQLite::Transaction txn(*db);
+
+                SQLite::Statement del_chunks(*db,
+                    "DELETE FROM log_chunks WHERE run_id IN "
+                    "(SELECT run_id FROM runs WHERE start_ts < " +
+                    cutoff + ")");
+                total_deleted += del_chunks.exec();
+
+                SQLite::Statement del_steps(*db,
+                    "DELETE FROM run_steps WHERE run_id IN "
+                    "(SELECT run_id FROM runs WHERE start_ts < " +
+                    cutoff + ")");
+                total_deleted += del_steps.exec();
+
+                SQLite::Statement del_jobs(*db,
+                    "DELETE FROM run_jobs WHERE run_id IN "
+                    "(SELECT run_id FROM runs WHERE start_ts < " +
+                    cutoff + ")");
+                total_deleted += del_jobs.exec();
+
+                SQLite::Statement del_runs(*db,
+                    "DELETE FROM runs WHERE start_ts < " + cutoff);
+                total_deleted += del_runs.exec();
+
+                SQLite::Statement del_events(*db,
+                    "DELETE FROM watch_events WHERE created_at < " +
+                    cutoff);
+                total_deleted += del_events.exec();
+
+                SQLite::Statement del_samples(*db,
+                    "DELETE FROM watch_samples WHERE collected_at < " +
+                    cutoff);
+                total_deleted += del_samples.exec();
+
+                SQLite::Statement del_metrics(*db,
+                    "DELETE FROM metrics_snapshots WHERE recorded_at < " +
+                    cutoff);
+                total_deleted += del_metrics.exec();
+
+                txn.commit();
+
+                // WAL checkpoint.
+                db->exec("PRAGMA wal_checkpoint(TRUNCATE)");
+
+                std::cout << "  Pruned " << total_deleted
+                          << " record(s).\n";
+                std::cout << "  Run 'kairos status' to verify.\n\n";
+            } catch (const std::exception& e) {
+                std::cerr << "  Prune failed: " << e.what() << "\n";
+                return 1;
+            }
+        }
+        return 0;
+    }
+
+    // ── events tail ──────────────────────────────────────────────
+    if (events_tail->parsed()) {
+        setup_logging(log_level, json_output, false);
+
+        auto cfg = load_config_or_die(config_path, {});
+        if (!cfg) return static_cast<int>(ExitCode::kConfigError);
+
+        std::unique_ptr<SQLite::Database> db;
+        try {
+            db = persist::open_database(cfg->db_path);
+        } catch (const std::exception& e) {
+            std::cerr << "Failed to open database: " << e.what()
+                      << "\nRun 'kairos init-db' first.\n";
+            return 1;
+        }
+
+        persist::QueryReader reader(*db);
+        bool use_color = !json_output && cli::supports_color();
+
+        // Get the current max event ID as our starting cursor.
+        int64_t cursor = reader.query_max_event_id();
+
+        if (!json_output) {
+            std::cout << "Tailing watch events";
+            if (!events_tail_group.empty()) {
+                std::cout << " (group: " << events_tail_group << ")";
+            }
+            std::cout << "... (Ctrl+C to stop)\n\n";
+        }
+
+        // Poll loop at 500ms (§23.2 events tail).
+        while (true) {
+            auto events = reader.query_watch_events_since(
+                cursor, 100, events_tail_group);
+
+            for (const auto& e : events) {
+                int64_t row_id = std::stoll(e.event_uid);
+                cursor = std::max(cursor, row_id);
+
+                if (json_output) {
+                    std::cout << json{
+                        {"event_uid", e.event_uid},
+                        {"watch_group", e.watch_group},
+                        {"rule_name", e.rule_name},
+                        {"event_type", e.event_type},
+                        {"severity", e.severity},
+                        {"created_at", e.created_at}
+                    }.dump() << "\n";
+                    std::cout.flush();
+                } else {
+                    // Colorize severity.
+                    std::string sev = e.severity;
+                    if (use_color) {
+                        if (sev == "critical") {
+                            sev = cli::colorize(sev, cli::ansi::red, true);
+                        } else if (sev == "warning") {
+                            sev = cli::colorize(sev, cli::ansi::yellow, true);
+                        } else {
+                            sev = cli::colorize(sev, cli::ansi::green, true);
+                        }
+                    }
+
+                    std::string ts = e.created_at.size() > 19
+                        ? e.created_at.substr(0, 19) : e.created_at;
+
+                    std::cout << ts << "  "
+                              << fmt::format("{:<15}", e.watch_group)
+                              << fmt::format("{:<15}", e.rule_name)
+                              << fmt::format("{:<12}", e.event_type)
+                              << sev << "\n";
+                    std::cout.flush();
+                }
+            }
+
+            std::this_thread::sleep_for(std::chrono::milliseconds(500));
+        }
+
+        // Unreachable (Ctrl+C terminates).
+        return 0;
     }
 
     // ── mcp ───────────────────────────────────────────────────────

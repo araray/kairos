@@ -277,6 +277,40 @@ public:
     [[nodiscard]] std::vector<MetricsSnapshotRow> query_metrics_snapshots(
         int limit = 10) const;
 
+    // ── Prune preview queries (§16.8, §23.2 — prune --dry-run) ──
+
+    /// Summary of what a prune operation would delete.
+    struct PrunePreview {
+        int64_t runs_to_delete = 0;
+        int64_t run_jobs_to_delete = 0;
+        int64_t run_steps_to_delete = 0;
+        int64_t log_chunks_to_delete = 0;
+        int64_t watch_events_to_delete = 0;
+        int64_t watch_samples_to_delete = 0;
+        int64_t metrics_snapshots_to_delete = 0;
+    };
+
+    /// Preview what a prune operation with the given cutoff would delete.
+    /// @param older_than_days  Delete records older than this many days.
+    [[nodiscard]] PrunePreview query_prune_preview(
+        int older_than_days) const;
+
+    // ── Events tail (cursor-based, for events tail CLI) ─────────
+
+    /// Query watch events with a cursor (row id > after_id).
+    /// Used by `kairos events tail` for poll-based streaming.
+    /// @param after_id     Only return events with rowid > after_id.
+    /// @param limit        Max events to return.
+    /// @param watch_group  Optional filter by group name (empty = all).
+    [[nodiscard]] std::vector<WatchEventRow> query_watch_events_since(
+        int64_t after_id,
+        int limit = 50,
+        const std::string& watch_group = "") const;
+
+    /// Query the maximum rowid in watch_events table.
+    /// Returns 0 if no events exist.
+    [[nodiscard]] int64_t query_max_event_id() const;
+
 private:
     SQLite::Database& db_;
 };

@@ -785,4 +785,145 @@ std::vector<QueryReader::MetricsSnapshotRow> QueryReader::query_metrics_snapshot
     return results;
 }
 
+// ── Prune preview queries ─────────────────────────────────────────────
+
+QueryReader::PrunePreview QueryReader::query_prune_preview(
+    int older_than_days) const
+{
+    PrunePreview preview;
+
+    // Build the cutoff date string for SQLite's datetime comparison.
+    // datetime('now', '-N days') in the query.
+    std::string cutoff_expr =
+        "datetime('now', '-" + std::to_string(older_than_days) + " days')";
+
+    // Runs older than cutoff.
+    try {
+        SQLite::Statement q(db_,
+            "SELECT COUNT(*) FROM runs WHERE start_ts < " + cutoff_expr);
+        if (q.executeStep()) {
+            preview.runs_to_delete = q.getColumn(0).getInt64();
+        }
+    } catch (...) {}
+
+    // Run jobs associated with old runs.
+    try {
+        SQLite::Statement q(db_,
+            "SELECT COUNT(*) FROM run_jobs WHERE run_id IN "
+            "(SELECT run_id FROM runs WHERE start_ts < " + cutoff_expr + ")");
+        if (q.executeStep()) {
+            preview.run_jobs_to_delete = q.getColumn(0).getInt64();
+        }
+    } catch (...) {}
+
+    // Run steps associated with old runs.
+    try {
+        SQLite::Statement q(db_,
+            "SELECT COUNT(*) FROM run_steps WHERE run_id IN "
+            "(SELECT run_id FROM runs WHERE start_ts < " + cutoff_expr + ")");
+        if (q.executeStep()) {
+            preview.run_steps_to_delete = q.getColumn(0).getInt64();
+        }
+    } catch (...) {}
+
+    // Log chunks associated with old runs.
+    try {
+        SQLite::Statement q(db_,
+            "SELECT COUNT(*) FROM log_chunks WHERE run_id IN "
+            "(SELECT run_id FROM runs WHERE start_ts < " + cutoff_expr + ")");
+        if (q.executeStep()) {
+            preview.log_chunks_to_delete = q.getColumn(0).getInt64();
+        }
+    } catch (...) {}
+
+    // Watch events older than cutoff.
+    try {
+        SQLite::Statement q(db_,
+            "SELECT COUNT(*) FROM watch_events WHERE created_at < " +
+            cutoff_expr);
+        if (q.executeStep()) {
+            preview.watch_events_to_delete = q.getColumn(0).getInt64();
+        }
+    } catch (...) {}
+
+    // Watch samples older than cutoff (by collected_at).
+    try {
+        SQLite::Statement q(db_,
+            "SELECT COUNT(*) FROM watch_samples WHERE collected_at < " +
+            cutoff_expr);
+        if (q.executeStep()) {
+            preview.watch_samples_to_delete = q.getColumn(0).getInt64();
+        }
+    } catch (...) {}
+
+    // Metrics snapshots older than cutoff.
+    try {
+        SQLite::Statement q(db_,
+            "SELECT COUNT(*) FROM metrics_snapshots WHERE recorded_at < " +
+            cutoff_expr);
+        if (q.executeStep()) {
+            preview.metrics_snapshots_to_delete = q.getColumn(0).getInt64();
+        }
+    } catch (...) {}
+
+    return preview;
+}
+
+// ── Events tail (cursor-based) ────────────────────────────────────────
+
+std::vector<QueryReader::WatchEventRow> QueryReader::query_watch_events_since(
+    int64_t after_id,
+    int limit,
+    const std::string& watch_group) const
+{
+    std::vector<WatchEventRow> results;
+
+    std::string sql =
+        "SELECT id, watch_group, rule_name, event_type, action_taken, "
+        "file_path, details_json, created_at "
+        "FROM watch_events "
+        "WHERE id > ? ";
+
+    if (!watch_group.empty()) {
+        sql += "AND watch_group = ? ";
+    }
+    sql += "ORDER BY id ASC LIMIT ?";
+
+    SQLite::Statement query(db_, sql);
+
+    int bind_idx = 1;
+    query.bind(bind_idx++, after_id);
+    if (!watch_group.empty()) {
+        query.bind(bind_idx++, watch_group);
+    }
+    query.bind(bind_idx, limit);
+
+    while (query.executeStep()) {
+        WatchEventRow row;
+        row.event_uid          = std::to_string(query.getColumn(0).getInt64());
+        row.watch_group        = query.getColumn(1).getString();
+        row.rule_name          = query.getColumn(2).getString();
+        row.event_type         = query.getColumn(3).getString();
+        row.severity           = query.getColumn(4).getString();
+        row.affected_files_json= query.getColumn(5).getString();
+        row.details_json       = query.getColumn(6).getString();
+        row.created_at         = query.getColumn(7).getString();
+        row.sample_epoch       = 0;
+        results.push_back(std::move(row));
+    }
+
+    return results;
+}
+
+int64_t QueryReader::query_max_event_id() const {
+    try {
+        SQLite::Statement q(db_,
+            "SELECT COALESCE(MAX(id), 0) FROM watch_events");
+        if (q.executeStep()) {
+            return q.getColumn(0).getInt64();
+        }
+    } catch (...) {}
+    return 0;
+}
+
 }  // namespace kairos::persist

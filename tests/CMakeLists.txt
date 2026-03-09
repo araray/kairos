@@ -454,3 +454,21 @@ add_executable(test_metrics_pruning
 )
 target_link_libraries(test_metrics_pruning PRIVATE kairos_test_helpers)
 gtest_discover_tests(test_metrics_pruning)
+
+# ── Phase 3 Batch 14: Prune preview + events tail tests ─────
+
+# PrunePreview, query_watch_events_since, query_max_event_id
+add_executable(test_prune_preview
+    unit/persist/prune_preview_test.cpp
+)
+target_link_libraries(test_prune_preview PRIVATE kairos_test_helpers)
+gtest_discover_tests(test_prune_preview)
+
+# ── Phase 3 Batch 14: Execution plan builder tests ──────────
+
+# ExecutionPlan statistics, rendering, DAG-based plan construction
+add_executable(test_explain_plan
+    unit/engine/explain_plan_test.cpp
+)
+target_link_libraries(test_explain_plan PRIVATE kairos_test_helpers)
+gtest_discover_tests(test_explain_plan)
