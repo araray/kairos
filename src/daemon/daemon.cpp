@@ -563,10 +563,9 @@ int run_daemon(std::shared_ptr<const kairos::config::ConfigState> config) {
         tracer->flush();
     }
 
-    // 5. Stop and flush DB writer — must complete before db.reset()
-    //    to avoid "database is locked" assertion in sqlite3_close().
-    //    stop() joins the writer thread, drains remaining items, and
-    //    releases all prepared statements.
+    // 5. Stop and flush DB writer — joins the writer thread, drains
+    //    remaining items, and releases all prepared statements so that
+    //    ~Database (during stack unwinding) will not hit SQLITE_BUSY.
     log->debug("Stopping DB writer");
     db_writer.stop();
 
@@ -576,9 +575,17 @@ int run_daemon(std::shared_ptr<const kairos::config::ConfigState> config) {
         shutdown_watchdog.join();
     }
 
-    // 7. Close database and release lock.
-    db.reset();
-    instance_lock.reset();
+    // 7. Database and instance lock are released by RAII.
+    //    Stack destruction order guarantees correctness:
+    //      ~watch_engine → ~scheduler → ~pipeline → ~query_reader
+    //      → ~db_writer (calls stop(), releases statements)
+    //      → ... → ~db (sqlite3_close, now safe)
+    //      → ~instance_lock (releases file lock)
+    //
+    //    DO NOT call db.reset() or instance_lock.reset() here!
+    //    Doing so destroys the database while stack-allocated objects
+    //    (Pipeline, Scheduler, etc.) still hold references to it.
+    //    Their destructors would then access freed memory → segfault.
 
     log->info("Kairos stopped");
     observability::shutdown_logging();
