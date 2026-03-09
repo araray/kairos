@@ -366,7 +366,7 @@ void DBWriter::execute_request(const DBWriteRequest& req) {
             // Default: 7 days (hardcoded in spec).
             SQLite::Statement prune(db_,
                 "DELETE FROM metrics_snapshots "
-                "WHERE recorded_at < datetime('now', '-' || ? || ' days')");
+                "WHERE created_at < datetime('now', '-' || ? || ' days')");
             prune.bind(1, r.retention_days);
             int deleted = prune.exec();
             if (deleted > 0) {

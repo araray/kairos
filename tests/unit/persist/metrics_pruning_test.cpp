@@ -56,22 +56,22 @@ private:
 // ── PruneMetricsSnapshots tests ────────────────────────────────────────
 
 TEST_F(MetricsPruningTest, PruneDeletesOldSnapshots) {
-    // Insert some "old" snapshots with explicit recorded_at.
+    // Insert some "old" snapshots with explicit created_at.
     db().exec(
         "INSERT INTO metrics_snapshots (metric_name, metric_type, value, "
-        "labels_json, recorded_at) VALUES "
+        "labels_json, created_at) VALUES "
         "('kairos_runs_total', 'counter', 42.0, '', "
         " datetime('now', '-10 days'))");
     db().exec(
         "INSERT INTO metrics_snapshots (metric_name, metric_type, value, "
-        "labels_json, recorded_at) VALUES "
+        "labels_json, created_at) VALUES "
         "('kairos_uptime_seconds', 'gauge', 3600.0, '', "
         " datetime('now', '-10 days'))");
 
     // Insert a "recent" snapshot.
     db().exec(
         "INSERT INTO metrics_snapshots (metric_name, metric_type, value, "
-        "labels_json, recorded_at) VALUES "
+        "labels_json, created_at) VALUES "
         "('kairos_runs_total', 'counter', 100.0, '', "
         " datetime('now'))");
 
@@ -145,7 +145,7 @@ TEST_F(MetricsPruningTest, PruneWithCustomRetentionDays) {
     // Insert a snapshot 3 days ago.
     db().exec(
         "INSERT INTO metrics_snapshots (metric_name, metric_type, value, "
-        "labels_json, recorded_at) VALUES "
+        "labels_json, created_at) VALUES "
         "('m1', 'counter', 1.0, '', datetime('now', '-3 days'))");
 
     // With retention_days=2, it should be pruned.
