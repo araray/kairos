@@ -44,7 +44,7 @@ TEST(CancelRegistryTest, CancelUnknownRunReturnsFalse) {
 TEST(CancelRegistryTest, UnregisterRemovesRun) {
     kairos::engine::CancelRegistry reg;
 
-    reg.register_run("run-002");
+    (void)reg.register_run("run-002");
     EXPECT_TRUE(reg.is_registered("run-002"));
     EXPECT_EQ(reg.active_count(), 1u);
 
@@ -72,9 +72,9 @@ TEST(CancelRegistryTest, ActiveCountTracksMultiple) {
 
     EXPECT_EQ(reg.active_count(), 0u);
 
-    reg.register_run("run-a");
-    reg.register_run("run-b");
-    reg.register_run("run-c");
+    (void)reg.register_run("run-a");
+    (void)reg.register_run("run-b");
+    (void)reg.register_run("run-c");
     EXPECT_EQ(reg.active_count(), 3u);
 
     reg.unregister_run("run-b");
@@ -88,7 +88,7 @@ TEST(CancelRegistryTest, ActiveCountTracksMultiple) {
 TEST(CancelRegistryTest, UnregisterIdempotent) {
     kairos::engine::CancelRegistry reg;
 
-    reg.register_run("run-004");
+    (void)reg.register_run("run-004");
     reg.unregister_run("run-004");
     // Second unregister should be a no-op.
     reg.unregister_run("run-004");
