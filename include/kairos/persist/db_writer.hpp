@@ -237,6 +237,12 @@ public:
     /// Flush all pending writes (blocking). Used during shutdown.
     void flush();
 
+    /// Full shutdown: close queue, join writer thread, flush remaining
+    /// items, and release all prepared statements. Must be called before
+    /// the SQLite::Database is destroyed to avoid "database is locked"
+    /// assertion. Safe to call multiple times; second call is a no-op.
+    void stop();
+
     /// @return Number of pending (unprocessed) write requests.
     [[nodiscard]] std::size_t pending_count() const;
 
@@ -248,12 +254,14 @@ private:
     void process_batch(std::vector<DBWriteRequest>& batch);
     void execute_request(const DBWriteRequest& req);
     void prepare_statements();
+    void release_statements();
 
     SQLite::Database& db_;
     DBWriterConfig config_;
     core::BoundedQueue<DBWriteRequest> queue_;
     std::jthread writer_thread_;
     std::atomic<int64_t> total_writes_{0};
+    bool stopped_ = false;
 
     // Pre-compiled prepared statements.
     std::unique_ptr<SQLite::Statement> stmt_insert_run_;

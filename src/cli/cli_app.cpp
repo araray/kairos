@@ -279,8 +279,10 @@ int run(int argc, char** argv) {
         "Run ID")->required();
 
     auto* runs_cancel = cmd_runs->add_subcommand("cancel",
-        "Cancel a running run")->disabled();
-    (void)runs_cancel;
+        "Cancel a running run");
+    std::string run_cancel_id;
+    runs_cancel->add_option("run_id", run_cancel_id,
+        "Run ID to cancel")->required();
 
     // ── logs ──────────────────────────────────────────────────────
     auto* cmd_logs = app.add_subcommand("logs",
@@ -367,6 +369,14 @@ int run(int argc, char** argv) {
     std::string events_tail_group;
     events_tail->add_option("--watch-group", events_tail_group,
         "Filter by watch group");
+
+    // ── completions ──────────────────────────────────────────────
+    auto* cmd_completions = app.add_subcommand("completions",
+        "Generate shell completion scripts");
+    cmd_completions->group("");  // Hidden from --help.
+    std::string completions_shell;
+    cmd_completions->add_option("shell", completions_shell,
+        "Shell type: bash, zsh, or fish")->required();
 
     // ── Parse ─────────────────────────────────────────────────────────
     try {
@@ -1375,6 +1385,121 @@ int run(int argc, char** argv) {
         return 0;
     }
 
+    // ── runs cancel ──────────────────────────────────────────────
+    if (runs_cancel->parsed()) {
+        setup_logging(log_level, json_output, false);
+
+        auto cfg = load_config_or_die(config_path, {});
+        if (!cfg) return static_cast<int>(ExitCode::kConfigError);
+
+        try {
+            auto db = persist::open_database(cfg->db_path);
+            persist::QueryReader reader(*db);
+
+            // Verify the run exists and is actually running.
+            auto run_opt = reader.get_run_summary(run_cancel_id);
+            if (!run_opt) {
+                if (json_output) {
+                    std::cout << json{
+                        {"success", false},
+                        {"error", "Run not found"},
+                        {"run_id", run_cancel_id}
+                    }.dump(2) << "\n";
+                } else {
+                    std::cerr << "Run '" << run_cancel_id
+                              << "' not found.\n";
+                }
+                return static_cast<int>(ExitCode::kNotFound);
+            }
+
+            if (run_opt->status != "RUNNING" &&
+                run_opt->status != "PENDING") {
+                if (json_output) {
+                    std::cout << json{
+                        {"success", false},
+                        {"error", "Run is not active"},
+                        {"run_id", run_cancel_id},
+                        {"status", run_opt->status}
+                    }.dump(2) << "\n";
+                } else {
+                    std::cerr << "Run '" << run_cancel_id
+                              << "' is not active (status: "
+                              << run_opt->status << ").\n";
+                }
+                return 1;
+            }
+
+            // Update run status to CANCELLED directly in SQLite.
+            // This provides immediate feedback in `runs list/show`.
+            // The daemon pipeline will detect the cancellation on
+            // next status check and terminate running processes.
+            {
+                SQLite::Statement stmt(*db,
+                    "UPDATE runs SET status = 'CANCELLED', "
+                    "end_ts = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') "
+                    "WHERE run_id = ? AND status IN ('RUNNING', 'PENDING')");
+                stmt.bind(1, run_cancel_id);
+                int updated = stmt.exec();
+
+                if (updated == 0) {
+                    if (json_output) {
+                        std::cout << json{
+                            {"success", false},
+                            {"error", "Run was already completed"},
+                            {"run_id", run_cancel_id}
+                        }.dump(2) << "\n";
+                    } else {
+                        std::cerr << "Run already completed.\n";
+                    }
+                    return 1;
+                }
+            }
+
+            // Also mark any RUNNING/PENDING jobs as CANCELLED.
+            {
+                SQLite::Statement stmt(*db,
+                    "UPDATE job_runs SET status = 'CANCELLED', "
+                    "end_ts = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') "
+                    "WHERE run_id = ? AND status IN ('RUNNING', 'PENDING')");
+                stmt.bind(1, run_cancel_id);
+                stmt.exec();
+            }
+
+            // Write a cancel command file for the daemon to pick up.
+            // The daemon can poll data_dir/commands/ for cancel requests
+            // and terminate running processes (Phase 4 integration).
+            auto cmd_dir = cfg->data_dir / "commands";
+            std::error_code ec;
+            fs::create_directories(cmd_dir, ec);
+            if (!ec) {
+                auto cmd_file = cmd_dir / ("cancel_" + run_cancel_id);
+                std::ofstream ofs(cmd_file);
+                if (ofs.is_open()) {
+                    ofs << run_cancel_id << "\n";
+                }
+            }
+
+            if (json_output) {
+                std::cout << json{
+                    {"success", true},
+                    {"run_id", run_cancel_id},
+                    {"status", "CANCELLED"},
+                    {"note", "Run marked as cancelled. Running processes "
+                             "may take a moment to terminate."}
+                }.dump(2) << "\n";
+            } else {
+                std::cout << "Run '" << run_cancel_id
+                          << "' cancelled.\n";
+                std::cout << "  Note: Running processes may take a moment "
+                          << "to terminate.\n";
+            }
+        } catch (const std::exception& e) {
+            std::cerr << "Failed to cancel run: " << e.what() << "\n";
+            return 1;
+        }
+        return 0;
+    }
+
     // ── logs ─────────────────────────────────────────────────────
     if (cmd_logs->parsed()) {
         setup_logging(log_level, json_output, false);
@@ -1512,22 +1637,24 @@ int run(int argc, char** argv) {
             if (workflows.empty()) {
                 std::cout << "No workflows configured.\n";
             } else {
-                std::cout << fmt::format("{:<30} {:<12} {}\n",
-                    "WORKFLOW", "ID", "JOBS");
-                std::cout << std::string(70, '-') << "\n";
+                bool use_color = cli::supports_color();
+                cli::Table t({"WORKFLOW", "ID", "JOBS", "JOBS_LIST"});
                 for (const auto* wf : workflows) {
                     std::string jobs;
                     for (size_t i = 0; i < wf->jobs.size(); ++i) {
                         if (i > 0) jobs += ", ";
                         jobs += wf->jobs[i].job_name;
                     }
-                    std::cout << fmt::format("{:<30} {:<12} {}\n",
-                        wf->workflow_name,
-                        wf->workflow_id.size() > 12
-                            ? wf->workflow_id.substr(0, 12)
-                            : wf->workflow_id,
-                        jobs);
+                    t.add_row({
+                        use_color ? cli::colorize(wf->workflow_name,
+                                                  cli::ansi::bold, true)
+                                  : wf->workflow_name,
+                        cli::truncate(wf->workflow_id, 12),
+                        std::to_string(wf->jobs.size()),
+                        jobs
+                    });
                 }
+                t.render(std::cout, use_color);
             }
         }
         return 0;
@@ -2871,6 +2998,191 @@ int run(int argc, char** argv) {
         }
 
         // Unreachable (Ctrl+C terminates).
+        return 0;
+    }
+
+    // ── completions ──────────────────────────────────────────────
+    if (cmd_completions->parsed()) {
+        // Shell completion script generation (§23.9).
+        // Usage:
+        //   eval "$(kairos completions bash)"
+        //   eval "$(kairos completions zsh)"
+        //   kairos completions fish | source
+
+        if (completions_shell == "bash") {
+            std::cout << R"BASH(# Kairos bash completion — generated by `kairos completions bash`
+# Install: eval "$(kairos completions bash)"
+# Or:      kairos completions bash > /etc/bash_completion.d/kairos
+
+_kairos_completions() {
+    local cur prev words cword
+    _init_completion || return
+
+    local -a top_cmds=(start stop status mcp version init-db prune
+                       workflows jobs runs logs events watches config
+                       completions)
+
+    local -a wf_cmds=(list show run explain)
+    local -a jobs_cmds=(list show run)
+    local -a runs_cmds=(list show cancel)
+    local -a events_cmds=(list tail)
+    local -a watches_cmds=(list show scan-once)
+    local -a config_cmds=(show validate reload)
+    local -a completions_cmds=(bash zsh fish)
+
+    case "${words[1]}" in
+        workflows) COMPREPLY=($(compgen -W "${wf_cmds[*]}" -- "$cur")) ;;
+        jobs)      COMPREPLY=($(compgen -W "${jobs_cmds[*]}" -- "$cur")) ;;
+        runs)      COMPREPLY=($(compgen -W "${runs_cmds[*]}" -- "$cur")) ;;
+        events)    COMPREPLY=($(compgen -W "${events_cmds[*]}" -- "$cur")) ;;
+        watches)   COMPREPLY=($(compgen -W "${watches_cmds[*]}" -- "$cur")) ;;
+        config)    COMPREPLY=($(compgen -W "${config_cmds[*]}" -- "$cur")) ;;
+        completions) COMPREPLY=($(compgen -W "${completions_cmds[*]}" -- "$cur")) ;;
+        *)
+            case "$cur" in
+                -*)
+                    local -a flags=(--config -c --json --log-level --help)
+                    COMPREPLY=($(compgen -W "${flags[*]}" -- "$cur"))
+                    ;;
+                *)
+                    COMPREPLY=($(compgen -W "${top_cmds[*]}" -- "$cur"))
+                    ;;
+            esac
+            ;;
+    esac
+}
+complete -F _kairos_completions kairos
+)BASH";
+        } else if (completions_shell == "zsh") {
+            std::cout << R"ZSH(#compdef kairos
+# Kairos zsh completion — generated by `kairos completions zsh`
+# Install: eval "$(kairos completions zsh)"
+# Or:      kairos completions zsh > "${fpath[1]}/_kairos"
+
+_kairos() {
+    local -a top_cmds
+    top_cmds=(
+        'start:Start the daemon'
+        'stop:Stop the running daemon'
+        'status:Show daemon and engine status'
+        'mcp:Start MCP stdio server'
+        'version:Show version info'
+        'init-db:Initialize database'
+        'prune:Prune old records from the database'
+        'workflows:Workflow management'
+        'jobs:Manage standalone jobs'
+        'runs:Run history'
+        'logs:View logs for a run'
+        'events:Watch events'
+        'watches:Watch group management'
+        'config:Configuration management'
+        'completions:Generate shell completion scripts'
+    )
+
+    if (( CURRENT == 2 )); then
+        _describe 'command' top_cmds
+        return
+    fi
+
+    case "${words[2]}" in
+        workflows)
+            local -a wf_cmds=('list:List all workflows' 'show:Show workflow detail'
+                               'run:Trigger a workflow' 'explain:Explain execution plan')
+            _describe 'subcommand' wf_cmds ;;
+        jobs)
+            local -a j_cmds=('list:List standalone jobs' 'show:Show job detail'
+                              'run:Run a standalone job')
+            _describe 'subcommand' j_cmds ;;
+        runs)
+            local -a r_cmds=('list:List recent runs' 'show:Show run detail'
+                              'cancel:Cancel a running run')
+            _describe 'subcommand' r_cmds ;;
+        events)
+            local -a e_cmds=('list:List recent events' 'tail:Stream events')
+            _describe 'subcommand' e_cmds ;;
+        watches)
+            local -a w_cmds=('list:List watch groups' 'show:Show watch group detail'
+                              'scan-once:Run a single watch scan')
+            _describe 'subcommand' w_cmds ;;
+        config)
+            local -a c_cmds=('show:Show effective config' 'validate:Validate config'
+                              'reload:Reload config')
+            _describe 'subcommand' c_cmds ;;
+        completions)
+            local -a sh_cmds=('bash' 'zsh' 'fish')
+            _describe 'shell' sh_cmds ;;
+        *)
+            _arguments '*:options:(-c --config --json --log-level)' ;;
+    esac
+}
+_kairos "$@"
+)ZSH";
+        } else if (completions_shell == "fish") {
+            std::cout << R"FISH(# Kairos fish completion — generated by `kairos completions fish`
+# Install: kairos completions fish | source
+# Or:      kairos completions fish > ~/.config/fish/completions/kairos.fish
+
+# Top-level commands
+set -l cmds start stop status mcp version init-db prune workflows jobs runs logs events watches config completions
+
+# Disable file completion by default
+complete -c kairos -f
+
+# Top-level
+complete -c kairos -n "not __fish_seen_subcommand_from $cmds" -a start -d "Start the daemon"
+complete -c kairos -n "not __fish_seen_subcommand_from $cmds" -a stop -d "Stop the running daemon"
+complete -c kairos -n "not __fish_seen_subcommand_from $cmds" -a status -d "Show daemon and engine status"
+complete -c kairos -n "not __fish_seen_subcommand_from $cmds" -a mcp -d "Start MCP stdio server"
+complete -c kairos -n "not __fish_seen_subcommand_from $cmds" -a version -d "Show version info"
+complete -c kairos -n "not __fish_seen_subcommand_from $cmds" -a init-db -d "Initialize database"
+complete -c kairos -n "not __fish_seen_subcommand_from $cmds" -a prune -d "Prune old records"
+complete -c kairos -n "not __fish_seen_subcommand_from $cmds" -a workflows -d "Workflow management"
+complete -c kairos -n "not __fish_seen_subcommand_from $cmds" -a jobs -d "Job management"
+complete -c kairos -n "not __fish_seen_subcommand_from $cmds" -a runs -d "Run history"
+complete -c kairos -n "not __fish_seen_subcommand_from $cmds" -a logs -d "View logs"
+complete -c kairos -n "not __fish_seen_subcommand_from $cmds" -a events -d "Watch events"
+complete -c kairos -n "not __fish_seen_subcommand_from $cmds" -a watches -d "Watch group management"
+complete -c kairos -n "not __fish_seen_subcommand_from $cmds" -a config -d "Configuration management"
+complete -c kairos -n "not __fish_seen_subcommand_from $cmds" -a completions -d "Generate completions"
+
+# Global flags
+complete -c kairos -l config -s c -d "Config file path" -rF
+complete -c kairos -l json -d "JSON output"
+complete -c kairos -l log-level -d "Log level" -ra "trace debug info warn error"
+
+# Subcommands
+complete -c kairos -n "__fish_seen_subcommand_from workflows" -a "list show run explain" -f
+complete -c kairos -n "__fish_seen_subcommand_from jobs" -a "list show run" -f
+complete -c kairos -n "__fish_seen_subcommand_from runs" -a "list show cancel" -f
+complete -c kairos -n "__fish_seen_subcommand_from events" -a "list tail" -f
+complete -c kairos -n "__fish_seen_subcommand_from watches" -a "list show scan-once" -f
+complete -c kairos -n "__fish_seen_subcommand_from config" -a "show validate reload" -f
+complete -c kairos -n "__fish_seen_subcommand_from completions" -a "bash zsh fish" -f
+
+# Workflows run/explain flags
+complete -c kairos -n "__fish_seen_subcommand_from workflows; and __fish_seen_subcommand_from run" -s f -l follow -d "Follow log output"
+complete -c kairos -n "__fish_seen_subcommand_from workflows; and __fish_seen_subcommand_from run" -l dry-run -d "Show plan only"
+
+# Runs list flags
+complete -c kairos -n "__fish_seen_subcommand_from runs; and __fish_seen_subcommand_from list" -s n -l limit -d "Number of runs"
+complete -c kairos -n "__fish_seen_subcommand_from runs; and __fish_seen_subcommand_from list" -l status -d "Filter by status" -ra "SUCCESS FAILURE RUNNING CANCELLED"
+complete -c kairos -n "__fish_seen_subcommand_from runs; and __fish_seen_subcommand_from list" -l workflow -d "Filter by workflow"
+
+# Prune flags
+complete -c kairos -n "__fish_seen_subcommand_from prune" -l older-than -d "Days to keep"
+complete -c kairos -n "__fish_seen_subcommand_from prune" -l dry-run -d "Preview only"
+complete -c kairos -n "__fish_seen_subcommand_from prune" -l force -d "Skip confirmation"
+
+# Logs flags
+complete -c kairos -n "__fish_seen_subcommand_from logs" -s f -l follow -d "Follow log output"
+complete -c kairos -n "__fish_seen_subcommand_from logs" -l job -d "Filter by job"
+complete -c kairos -n "__fish_seen_subcommand_from logs" -l step -d "Filter by step"
+)FISH";
+        } else {
+            std::cerr << "Unknown shell: " << completions_shell
+                      << "\nSupported: bash, zsh, fish\n";
+            return 1;
+        }
         return 0;
     }
 

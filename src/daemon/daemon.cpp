@@ -563,9 +563,12 @@ int run_daemon(std::shared_ptr<const kairos::config::ConfigState> config) {
         tracer->flush();
     }
 
-    // 5. Flush DB writer.
-    log->debug("Flushing DB writer");
-    db_writer.flush();
+    // 5. Stop and flush DB writer — must complete before db.reset()
+    //    to avoid "database is locked" assertion in sqlite3_close().
+    //    stop() joins the writer thread, drains remaining items, and
+    //    releases all prepared statements.
+    log->debug("Stopping DB writer");
+    db_writer.stop();
 
     // 6. Stop shutdown watchdog.
     shutdown_watchdog.request_stop();

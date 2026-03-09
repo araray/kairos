@@ -20,21 +20,48 @@ DBWriter::DBWriter(SQLite::Database& db, DBWriterConfig config)
 }
 
 DBWriter::~DBWriter() {
+    // Delegate to stop() which is idempotent.
+    stop();
+}
+
+void DBWriter::stop() {
+    if (stopped_) return;
+    stopped_ = true;
+
     // Close the queue so the writer thread's pop() unblocks.
     queue_.close();
 
-    // Join the writer thread first — it performs its own final flush
-    // in writer_loop(). We must wait for that to complete before we
-    // touch any shared state (prepared statements, database).
+    // Join the writer thread — it performs its own final flush
+    // in writer_loop(). We must wait for that to complete before
+    // we touch prepared statements.
     if (writer_thread_.joinable()) {
         writer_thread_.request_stop();
         writer_thread_.join();
     }
 
-    // Now safe: no other thread accesses the statements.
-    // Drain anything enqueued after the writer thread's final flush
-    // (e.g., items pushed between thread exit and queue_.close()).
+    // Drain anything enqueued after the writer thread's final flush.
     flush();
+
+    // Release all prepared statements so that sqlite3_close() in
+    // ~Database will not see SQLITE_BUSY ("database is locked").
+    release_statements();
+
+    spdlog::debug("DB writer stopped (total writes: {})",
+                  total_writes_.load(std::memory_order_relaxed));
+}
+
+void DBWriter::release_statements() {
+    stmt_insert_run_.reset();
+    stmt_update_run_.reset();
+    stmt_insert_job_run_.reset();
+    stmt_update_job_run_.reset();
+    stmt_insert_step_run_.reset();
+    stmt_update_step_.reset();
+    stmt_insert_log_chunk_.reset();
+    stmt_insert_trigger_.reset();
+    stmt_insert_watch_sample_.reset();
+    stmt_insert_watch_event_.reset();
+    stmt_insert_metrics_snapshot_.reset();
 }
 
 void DBWriter::prepare_statements() {

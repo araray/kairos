@@ -472,3 +472,30 @@ add_executable(test_explain_plan
 )
 target_link_libraries(test_explain_plan PRIVATE kairos_test_helpers)
 gtest_discover_tests(test_explain_plan)
+
+# ── Phase 3 Batch 15: DB writer shutdown tests ──────────────
+
+# DBWriter::stop() — graceful shutdown, statement release, idempotency
+add_executable(test_db_writer_shutdown
+    unit/persist/db_writer_shutdown_test.cpp
+)
+target_link_libraries(test_db_writer_shutdown PRIVATE kairos_test_helpers)
+gtest_discover_tests(test_db_writer_shutdown)
+
+# ── Phase 3 Batch 15: Runs cancel SQL tests ─────────────────
+
+# Cancel SQL operations: RUNNING/PENDING → CANCELLED, no-op on completed
+add_executable(test_runs_cancel
+    unit/persist/runs_cancel_test.cpp
+)
+target_link_libraries(test_runs_cancel PRIVATE kairos_test_helpers)
+gtest_discover_tests(test_runs_cancel)
+
+# ── Phase 3 Batch 15: Shell completions structure tests ─────
+
+# Validates completion script patterns and subcommand coverage
+add_executable(test_completions
+    unit/cli/completions_test.cpp
+)
+target_link_libraries(test_completions PRIVATE kairos_test_helpers)
+gtest_discover_tests(test_completions)
