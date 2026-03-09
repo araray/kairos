@@ -193,17 +193,22 @@ TEST_F(MetricsPruningTest, PruneEmptyTable) {
 
 TEST(WorkflowRegistryJobs, StandaloneJobsAccessor) {
     // Create registry with workflows and standalone jobs.
-    engine::WorkflowDef wf;
-    wf.workflow_id = "wfl-test";
-    wf.workflow_name = "test-workflow";
-    wf.jobs.push_back(engine::JobDef{
-        .job_id = "job-in-wf",
-        .job_name = "in-workflow-job",
-    });
-    wf.dag = engine::WorkflowDag::build({engine::DagNode{
+    // WorkflowDef can't be default-constructed (WorkflowDag's default
+    // ctor is private), so we must use designated initializers.
+    auto dag = engine::WorkflowDag::build({engine::DagNode{
         .job_id = "job-in-wf",
         .job_name = "in-workflow-job",
     }});
+
+    engine::WorkflowDef wf{
+        .workflow_id = "wfl-test",
+        .workflow_name = "test-workflow",
+        .jobs = {engine::JobDef{
+            .job_id = "job-in-wf",
+            .job_name = "in-workflow-job",
+        }},
+        .dag = std::move(dag),
+    };
 
     engine::JobDef sj1{
         .job_id = "job-standalone-1",
@@ -214,8 +219,11 @@ TEST(WorkflowRegistryJobs, StandaloneJobsAccessor) {
         .job_name = "cleanup",
     };
 
+    std::vector<engine::WorkflowDef> wfs;
+    wfs.push_back(std::move(wf));
+
     engine::WorkflowRegistry registry(
-        {wf},  // workflows
+        std::move(wfs),  // workflows
         {},    // triggers
         {sj1, sj2});  // standalone_jobs
 
