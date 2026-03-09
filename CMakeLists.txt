@@ -148,6 +148,21 @@ if(KAIROS_HTTP)
     target_sources(kairos PRIVATE src/http/http_server.cpp)
     target_compile_definitions(kairos PRIVATE KAIROS_HTTP_ENABLED)
     target_link_libraries(kairos PRIVATE httplib::httplib)
+    # inja is header-only; include path comes from FetchContent.
+    target_include_directories(kairos PRIVATE
+        ${inja_SOURCE_DIR}/include
+    )
+endif()
+
+# ── Optional: OpenTelemetry tracing (KAIROS_OTEL=ON) ──────────────────────
+if(KAIROS_OTEL)
+    target_sources(kairos_core PRIVATE src/observability/otel_tracer.cpp)
+    target_compile_definitions(kairos_core PUBLIC KAIROS_OTEL)
+    target_link_libraries(kairos_core PUBLIC
+        opentelemetry-cpp::trace
+        opentelemetry-cpp::ostream_span_exporter
+        opentelemetry-cpp::otlp_http_exporter
+    )
 endif()
 
 # ── Tests ──────────────────────────────────────────────────────────────────

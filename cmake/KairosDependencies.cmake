@@ -90,5 +90,46 @@ if(KAIROS_HTTP)
         GIT_TAG        v0.15.3
         GIT_SHALLOW    TRUE
     )
-    FetchContent_MakeAvailable(httplib)
+
+    # inja — Jinja2-compatible template engine (header-only, MIT).
+    # Depends on nlohmann/json (already present — FetchContent deduplicates).
+    FetchContent_Declare(inja
+        GIT_REPOSITORY https://github.com/pantor/inja.git
+        GIT_TAG        v3.4.0
+        GIT_SHALLOW    TRUE
+    )
+    set(INJA_USE_EMBEDDED_JSON OFF CACHE BOOL "" FORCE)
+    set(INJA_INSTALL OFF CACHE BOOL "" FORCE)
+    set(INJA_EXPORT OFF CACHE BOOL "" FORCE)
+    set(BUILD_TESTING OFF CACHE BOOL "" FORCE)
+    set(BUILD_BENCHMARK OFF CACHE BOOL "" FORCE)
+
+    FetchContent_MakeAvailable(httplib inja)
+endif()
+
+# ── Optional: OpenTelemetry tracing ────────────────────────────────────
+if(KAIROS_OTEL)
+    # The OTel C++ SDK is heavy (protobuf, gRPC for OTLP).
+    # We use find_package so users can install it system-wide,
+    # or set CMAKE_PREFIX_PATH to a local build.
+    # For OTLP HTTP export (lighter), only libcurl is needed.
+    find_package(opentelemetry-cpp QUIET)
+    if(NOT opentelemetry-cpp_FOUND)
+        message(WARNING
+            "opentelemetry-cpp not found — building from source via FetchContent. "
+            "This will significantly increase build time (~60s). "
+            "Consider installing the SDK system-wide for faster builds.")
+
+        FetchContent_Declare(opentelemetry-cpp
+            GIT_REPOSITORY https://github.com/open-telemetry/opentelemetry-cpp.git
+            GIT_TAG        v1.14.2
+            GIT_SHALLOW    TRUE
+        )
+        set(WITH_OTLP_HTTP ON CACHE BOOL "" FORCE)
+        set(WITH_OTLP_GRPC OFF CACHE BOOL "" FORCE)
+        set(BUILD_TESTING OFF CACHE BOOL "" FORCE)
+        set(WITH_EXAMPLES OFF CACHE BOOL "" FORCE)
+        set(WITH_BENCHMARK OFF CACHE BOOL "" FORCE)
+        FetchContent_MakeAvailable(opentelemetry-cpp)
+    endif()
 endif()

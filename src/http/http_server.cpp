@@ -21,6 +21,7 @@
 #ifdef KAIROS_HTTP_ENABLED
 
 #include "kairos/http/http_server.hpp"
+#include "kairos/http/templates.hpp"
 
 // cpp-httplib — header-only HTTP server.
 // Must define implementation once.
@@ -28,140 +29,56 @@
 #include <httplib.h>
 #endif
 
+#include <inja/inja.hpp>
 #include <nlohmann/json.hpp>
 #include <spdlog/spdlog.h>
 
 #include <chrono>
+#include <cmath>
 #include <thread>
 
 namespace kairos::http {
 
 using json = nlohmann::json;
 
-// ── Dashboard HTML template (embedded) ────────────────────────────────────
+// ── inja template renderer ───────────────────────────────────────────────
 
-/// Minimal MPA dashboard — Bootstrap 5 CDN, server-rendered.
-/// In a real build, this would be generated from inja templates
-/// compiled into the binary (§26.6). For v1, inline HTML is adequate.
-static std::string render_dashboard(const HttpDependencies& deps) {
-    // Gather data.
-    double uptime = deps.get_uptime ? deps.get_uptime() : 0.0;
-    int hours = static_cast<int>(uptime / 3600);
-    int mins = static_cast<int>((uptime - hours * 3600) / 60);
+/// Renders an inja template string with the given data context.
+/// On inja parse/render errors, returns a 500 error page.
+///
+/// The inja::Environment is created fresh per render to avoid any
+/// thread-safety issues (inja::Environment is not thread-safe).
+/// For the low volume of HTML page requests in a local daemon,
+/// this is perfectly adequate.
+static std::string render_template(
+    std::string_view tmpl_str,
+    const json& data)
+{
+    inja::Environment env;
+    // Inject shared fragments (head CSS, nav bar).
+    json full_data = data;
+    full_data["head"] = std::string(templates::kHeadFragment);
+    full_data["nav"] = std::string(templates::kNavFragment);
 
-    auto runs = deps.reader ? deps.reader->query_recent_runs(10) :
-        std::vector<persist::QueryReader::RunSummary>{};
+    return env.render(std::string(tmpl_str), full_data);
+}
 
-    auto stats = deps.reader ? deps.reader->query_run_stats() :
-        persist::QueryReader::RunStats{};
-
-    // Build runs table rows.
-    std::string rows;
-    for (const auto& r : runs) {
-        std::string badge = "secondary";
-        if (r.status == "SUCCESS") badge = "success";
-        else if (r.status == "FAILURE") badge = "danger";
-        else if (r.status == "RUNNING") badge = "primary";
-        else if (r.status == "CANCELLED") badge = "warning";
-
-        rows += "<tr>"
-            "<td><code>" + r.run_id.substr(0, 12) + "</code></td>"
-            "<td>" + r.target_name + "</td>"
-            "<td><span class='badge bg-" + badge + "'>" +
-                r.status + "</span></td>"
-            "<td>" + r.trigger_type + "</td>"
-            "<td>" + r.start_ts + "</td>"
-            "<td>" + std::to_string(r.duration_ms) + "ms</td>"
-            "</tr>\n";
-    }
-
-    return R"html(<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Kairos Dashboard</title>
-  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css"
-        rel="stylesheet">
-  <style>
-    body { background: #1a1a2e; color: #e0e0e0; }
-    .card { background: #16213e; border: 1px solid #0f3460; }
-    .table { color: #e0e0e0; }
-    .navbar { background: #0f3460 !important; }
-    code { color: #00d4ff; }
-    .stat-value { font-size: 2rem; font-weight: bold; color: #00d4ff; }
-    .stat-label { font-size: 0.85rem; color: #888; text-transform: uppercase; }
-  </style>
-</head>
-<body>
-  <nav class="navbar navbar-dark mb-4">
-    <div class="container-fluid">
-      <span class="navbar-brand">⏱ Kairos</span>
-      <span class="text-light">Orchestration Dashboard</span>
-    </div>
-  </nav>
-  <div class="container-fluid">
-    <div class="row mb-4">
-      <div class="col-md-3">
-        <div class="card p-3 text-center">
-          <div class="stat-value">)html" + std::to_string(stats.total_runs) + R"html(</div>
-          <div class="stat-label">Total Runs</div>
-        </div>
-      </div>
-      <div class="col-md-3">
-        <div class="card p-3 text-center">
-          <div class="stat-value">)html" + std::to_string(stats.active_runs) + R"html(</div>
-          <div class="stat-label">Active Runs</div>
-        </div>
-      </div>
-      <div class="col-md-3">
-        <div class="card p-3 text-center">
-          <div class="stat-value">)html" + std::to_string(stats.runs_today) + R"html(</div>
-          <div class="stat-label">Runs Today</div>
-        </div>
-      </div>
-      <div class="col-md-3">
-        <div class="card p-3 text-center">
-          <div class="stat-value" style="color:)html" +
-            (stats.failures_today > 0 ? "#ff6b6b" : "#00d4ff") + R"html(">)html" +
-            std::to_string(stats.failures_today) + R"html(</div>
-          <div class="stat-label">Failures Today</div>
-        </div>
-      </div>
-    </div>
-    <div class="row mb-4">
-      <div class="col-md-6">
-        <div class="card p-3">
-          <h5>Uptime</h5>
-          <p>)html" + std::to_string(hours) + "h " + std::to_string(mins) + R"html(m</p>
-        </div>
-      </div>
-      <div class="col-md-6">
-        <div class="card p-3">
-          <h5>Quick Actions</h5>
-          <a href="/api/v1/workflows" class="btn btn-outline-info btn-sm me-2">Workflows API</a>
-          <a href="/api/v1/runs" class="btn btn-outline-info btn-sm me-2">Runs API</a>
-          <a href="/metrics" class="btn btn-outline-info btn-sm">Metrics</a>
-        </div>
-      </div>
-    </div>
-    <div class="card p-3">
-      <h5>Recent Runs</h5>
-      <table class="table table-sm table-hover">
-        <thead>
-          <tr>
-            <th>Run ID</th><th>Target</th><th>Status</th>
-            <th>Trigger</th><th>Started</th><th>Duration</th>
-          </tr>
-        </thead>
-        <tbody>
-          )html" + rows + R"html(
-        </tbody>
-      </table>
-    </div>
-  </div>
-</body>
-</html>)html";
+/// Build template data for a RunSummary, enriching with badge class
+/// and truncated ID for display.
+static json run_to_json(const persist::QueryReader::RunSummary& r) {
+    json j;
+    j["run_id"] = r.run_id;
+    j["run_id_short"] = templates::truncate(r.run_id);
+    j["target_name"] = r.target_name;
+    j["target_type"] = r.target_type;
+    j["trigger_type"] = r.trigger_type;
+    j["status"] = r.status;
+    j["badge"] = templates::status_to_badge(r.status);
+    j["exit_code"] = r.exit_code;
+    j["start_ts"] = r.start_ts;
+    j["end_ts"] = r.end_ts;
+    j["duration_ms"] = r.duration_ms;
+    return j;
 }
 
 // ── Server implementation ─────────────────────────────────────────────────
@@ -222,7 +139,226 @@ struct HttpServer::Impl {
         // ── Dashboard (unauthenticated) ────────────────────────
         svr.Get("/", [this](const httplib::Request&,
                              httplib::Response& res) {
-            res.set_content(render_dashboard(deps), "text/html");
+            try {
+                double uptime = deps.get_uptime ? deps.get_uptime() : 0.0;
+
+                auto runs = deps.reader
+                    ? deps.reader->query_recent_runs(10)
+                    : std::vector<persist::QueryReader::RunSummary>{};
+
+                auto stats = deps.reader
+                    ? deps.reader->query_run_stats()
+                    : persist::QueryReader::RunStats{};
+
+                json data;
+                data["total_runs"] = stats.total_runs;
+                data["active_runs"] = stats.active_runs;
+                data["runs_today"] = stats.runs_today;
+                data["failures_today"] = stats.failures_today;
+                data["uptime_hours"] = static_cast<int>(uptime / 3600);
+                data["uptime_minutes"] = static_cast<int>(
+                    std::fmod(uptime, 3600.0) / 60.0);
+
+                json runs_arr = json::array();
+                for (const auto& r : runs) {
+                    runs_arr.push_back(run_to_json(r));
+                }
+                data["recent_runs"] = std::move(runs_arr);
+
+                auto html = render_template(
+                    templates::kDashboardTemplate, data);
+                res.set_content(html, "text/html");
+            } catch (const std::exception& e) {
+                spdlog::error("Dashboard render error: {}", e.what());
+                json err_data;
+                err_data["error_title"] = "Render Error";
+                err_data["error_message"] = std::string(e.what());
+                auto html = render_template(
+                    templates::kErrorTemplate, err_data);
+                res.status = 500;
+                res.set_content(html, "text/html");
+            }
+            set_cors(res);
+        });
+
+        // ── Workflows page (unauthenticated) ──────────────────
+        svr.Get("/workflows", [this](const httplib::Request&,
+                                      httplib::Response& res) {
+            try {
+                json data;
+                json arr = json::array();
+                if (deps.registry) {
+                    for (const auto* wf : deps.registry->workflows()) {
+                        json j;
+                        j["name"] = wf->workflow_name;
+                        j["job_count"] = wf->jobs.size();
+                        j["trigger_type"] = wf->trigger_type.empty()
+                            ? "manual" : wf->trigger_type;
+                        arr.push_back(std::move(j));
+                    }
+                }
+                data["workflows"] = std::move(arr);
+
+                auto html = render_template(
+                    templates::kWorkflowsTemplate, data);
+                res.set_content(html, "text/html");
+            } catch (const std::exception& e) {
+                spdlog::error("Workflows page render error: {}", e.what());
+                res.status = 500;
+                res.set_content("Internal server error", "text/plain");
+            }
+            set_cors(res);
+        });
+
+        // ── Runs page (unauthenticated) ───────────────────────
+        svr.Get("/runs", [this](const httplib::Request& req,
+                                 httplib::Response& res) {
+            try {
+                int limit = 50;
+                std::string status_filter, wf_filter, since;
+                if (req.has_param("limit"))
+                    limit = std::stoi(req.get_param_value("limit"));
+                if (req.has_param("status"))
+                    status_filter = req.get_param_value("status");
+
+                json data;
+                json arr = json::array();
+                if (deps.reader) {
+                    auto runs = deps.reader->query_recent_runs(
+                        limit, status_filter, wf_filter, since);
+                    for (const auto& r : runs) {
+                        arr.push_back(run_to_json(r));
+                    }
+                }
+                data["runs"] = std::move(arr);
+
+                auto html = render_template(
+                    templates::kRunsTemplate, data);
+                res.set_content(html, "text/html");
+            } catch (const std::exception& e) {
+                spdlog::error("Runs page render error: {}", e.what());
+                res.status = 500;
+                res.set_content("Internal server error", "text/plain");
+            }
+            set_cors(res);
+        });
+
+        // ── Run detail page (unauthenticated) ─────────────────
+        svr.Get(R"(/runs/([^/]+))",
+            [this](const httplib::Request& req, httplib::Response& res) {
+                auto run_id = req.matches[1].str();
+
+                // Avoid matching /runs/xxx when it's /api/v1/runs/xxx.
+                if (run_id == "api" || run_id == "sse") return;
+
+                try {
+                    if (!deps.reader) {
+                        res.status = 503;
+                        res.set_content("No database", "text/plain");
+                        return;
+                    }
+
+                    auto detail = deps.reader->get_run_detail(run_id);
+                    if (!detail) {
+                        json err_data;
+                        err_data["error_title"] = "Not Found";
+                        err_data["error_message"] =
+                            "Run " + run_id + " not found.";
+                        auto html = render_template(
+                            templates::kErrorTemplate, err_data);
+                        res.status = 404;
+                        res.set_content(html, "text/html");
+                        return;
+                    }
+
+                    json data;
+                    data["run_id"] = detail->run.run_id;
+                    data["run_id_short"] = templates::truncate(
+                        detail->run.run_id);
+                    data["target_name"] = detail->run.target_name;
+                    data["status"] = detail->run.status;
+                    data["badge"] = templates::status_to_badge(
+                        detail->run.status);
+                    data["trigger_type"] = detail->run.trigger_type;
+                    data["start_ts"] = detail->run.start_ts;
+                    data["end_ts"] = detail->run.end_ts;
+                    data["duration_ms"] = detail->run.duration_ms;
+
+                    json jobs_arr = json::array();
+                    for (const auto& jd : detail->jobs) {
+                        json jj;
+                        jj["job_name"] = jd.job_name;
+                        jj["status"] = jd.status;
+                        jj["badge"] = templates::status_to_badge(jd.status);
+                        jj["exit_code"] = jd.exit_code;
+                        jj["duration_ms"] = jd.duration_ms;
+
+                        json steps_arr = json::array();
+                        for (const auto& s : jd.steps) {
+                            json sj;
+                            sj["step_name"] = s.step_name;
+                            sj["status"] = s.status;
+                            sj["badge"] = templates::status_to_badge(
+                                s.status);
+                            sj["exit_code"] = s.exit_code;
+                            sj["command"] = s.command;
+                            steps_arr.push_back(std::move(sj));
+                        }
+                        jj["steps"] = std::move(steps_arr);
+                        jobs_arr.push_back(std::move(jj));
+                    }
+                    data["jobs"] = std::move(jobs_arr);
+
+                    auto html = render_template(
+                        templates::kRunDetailTemplate, data);
+                    res.set_content(html, "text/html");
+                } catch (const std::exception& e) {
+                    spdlog::error("Run detail render error: {}", e.what());
+                    res.status = 500;
+                    res.set_content("Internal server error", "text/plain");
+                }
+                set_cors(res);
+            });
+
+        // ── Events page (unauthenticated) ─────────────────────
+        svr.Get("/events", [this](const httplib::Request& req,
+                                   httplib::Response& res) {
+            try {
+                int limit = 50;
+                std::string group;
+                if (req.has_param("limit"))
+                    limit = std::stoi(req.get_param_value("limit"));
+                if (req.has_param("watch_group"))
+                    group = req.get_param_value("watch_group");
+
+                json data;
+                json arr = json::array();
+                if (deps.reader) {
+                    auto events = deps.reader->query_watch_events(
+                        limit, group);
+                    for (const auto& e : events) {
+                        json j;
+                        j["event_uid"] = e.event_uid;
+                        j["event_uid_short"] = templates::truncate(
+                            e.event_uid);
+                        j["watch_group"] = e.watch_group;
+                        j["rule_name"] = e.rule_name;
+                        j["event_type"] = e.event_type;
+                        j["severity"] = e.severity;
+                        j["created_at"] = e.created_at;
+                        arr.push_back(std::move(j));
+                    }
+                }
+                data["events"] = std::move(arr);
+
+                auto html = render_template(
+                    templates::kEventsTemplate, data);
+                res.set_content(html, "text/html");
+            } catch (const std::exception& e) {
+                spdlog::error("Events page render error: {}", e.what());
+                res.status = 500;
+                res.set_content("Internal server error", "text/plain");
+            }
             set_cors(res);
         });
 

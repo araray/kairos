@@ -544,6 +544,9 @@ if(KAIROS_HTTP)
         ${CMAKE_SOURCE_DIR}/src/http/http_server.cpp
     )
     target_link_libraries(test_http_server PRIVATE httplib::httplib)
+    target_include_directories(test_http_server PRIVATE
+        ${inja_SOURCE_DIR}/include
+    )
 endif()
 gtest_discover_tests(test_http_server)
 
@@ -584,3 +587,43 @@ add_executable(test_mcp_tools_wiring
 )
 target_link_libraries(test_mcp_tools_wiring PRIVATE kairos_test_helpers)
 gtest_discover_tests(test_mcp_tools_wiring)
+
+# ── Phase 4 Batch 3: HTTP integration test (§30.6) ────────────
+
+# E2E test: start HTTP server, test dashboard + API + auth + CORS
+add_executable(test_http_integration
+    integration/http_integration_test.cpp
+)
+target_link_libraries(test_http_integration PRIVATE kairos_test_helpers)
+if(KAIROS_HTTP)
+    target_compile_definitions(test_http_integration PRIVATE KAIROS_HTTP_ENABLED)
+    target_sources(test_http_integration PRIVATE
+        ${CMAKE_SOURCE_DIR}/src/http/http_server.cpp
+    )
+    target_link_libraries(test_http_integration PRIVATE httplib::httplib)
+    # inja include path for template rendering.
+    target_include_directories(test_http_integration PRIVATE
+        ${inja_SOURCE_DIR}/include
+    )
+endif()
+gtest_discover_tests(test_http_integration)
+
+# ── Phase 4 Batch 3: OTelTracer tests (§21) ───────────────────
+
+# OTelTracer / NullTracer — span creation, attributes, hierarchy
+add_executable(test_otel_tracer
+    unit/observability/otel_tracer_test.cpp
+)
+target_link_libraries(test_otel_tracer PRIVATE kairos_test_helpers)
+if(KAIROS_OTEL)
+    target_compile_definitions(test_otel_tracer PRIVATE KAIROS_OTEL)
+    target_sources(test_otel_tracer PRIVATE
+        ${CMAKE_SOURCE_DIR}/src/observability/otel_tracer.cpp
+    )
+    target_link_libraries(test_otel_tracer PRIVATE
+        opentelemetry-cpp::trace
+        opentelemetry-cpp::ostream_span_exporter
+        opentelemetry-cpp::otlp_http_exporter
+    )
+endif()
+gtest_discover_tests(test_otel_tracer)
