@@ -656,3 +656,30 @@ add_executable(test_retention_auto_prune
 )
 target_link_libraries(test_retention_auto_prune PRIVATE kairos_test_helpers)
 gtest_discover_tests(test_retention_auto_prune)
+
+# ══════════════════════════════════════════════════════════════════════════
+# Phase 5 Batch 2: Docker runner + E2E tests + Log formatter masking
+# ══════════════════════════════════════════════════════════════════════════
+
+# ── Docker runner tests ────────────────────────────────────────────────
+
+add_executable(test_docker_runner
+    unit/exec/docker_runner_test.cpp
+)
+target_link_libraries(test_docker_runner PRIVATE kairos_test_helpers)
+if(KAIROS_DOCKER)
+    target_compile_definitions(test_docker_runner PRIVATE KAIROS_DOCKER_ENABLED)
+endif()
+gtest_discover_tests(test_docker_runner)
+
+# ── E2E daemon lifecycle tests (§30.6 Tier 4) ─────────────────────────
+
+add_executable(test_e2e_daemon_lifecycle
+    e2e/daemon_lifecycle_test.cpp
+)
+target_link_libraries(test_e2e_daemon_lifecycle PRIVATE kairos_test_helpers)
+gtest_discover_tests(test_e2e_daemon_lifecycle
+    PROPERTIES
+        LABELS "e2e"
+        TIMEOUT 120
+)

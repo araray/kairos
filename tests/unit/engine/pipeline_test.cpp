@@ -122,7 +122,7 @@ protected:
     void setup_runner_pool() {
         pool_ = std::make_unique<exec::RunnerPool>(
             exec::RunnerPoolConfig{.worker_count = 2, .queue_capacity = 32});
-        pool_->set_process_handle_factory([]() {
+        pool_->set_process_handle_factory([](const exec::ProcessSpec&) {
             auto p = std::make_unique<kairos::testing::FakeProcessHandle>();
             p->set_exit_code(0);
             p->set_stdout_data("ok\n");
@@ -135,7 +135,7 @@ protected:
     void setup_failing_runner_pool() {
         pool_ = std::make_unique<exec::RunnerPool>(
             exec::RunnerPoolConfig{.worker_count = 2, .queue_capacity = 32});
-        pool_->set_process_handle_factory([]() {
+        pool_->set_process_handle_factory([](const exec::ProcessSpec&) {
             auto p = std::make_unique<kairos::testing::FakeProcessHandle>();
             p->set_exit_code(1);
             p->set_stderr_data("error\n");

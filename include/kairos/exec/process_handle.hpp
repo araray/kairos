@@ -74,6 +74,30 @@ struct ProcessSpec {
     /// Maximum combined bytes of captured output.
     /// If exceeded, output is truncated (not the process killed).
     std::size_t max_output_bytes = 10 * 1024 * 1024;  // 10 MiB
+
+    // ── Runner type dispatch (§15.5–§15.6) ────────────────────────────
+
+    /// Runner type for dispatch. Empty or "local_shell" = default runner.
+    /// "docker" = DockerProcessHandle. "interpreter" = wrapped shell.
+    std::string runner_type;
+
+    // ── Docker runner fields (§15.3) ──────────────────────────────────
+
+    /// Docker container image (e.g., "python:3.11-slim").
+    /// Required when runner_type == "docker".
+    std::string docker_image;
+
+    /// Volume mounts in Docker bind-mount format: "host_path:container_path[:ro]".
+    std::vector<std::string> docker_volumes;
+
+    /// Docker network mode (default: "bridge"). Common: "host", "none", "bridge".
+    std::string docker_network = "bridge";
+
+    /// Automatically pull the image if not present locally.
+    bool docker_auto_pull = true;
+
+    /// Remove the container after execution completes (even on failure).
+    bool docker_remove = true;
 };
 
 // ── Process result ───────────────────────────────────────────────────────

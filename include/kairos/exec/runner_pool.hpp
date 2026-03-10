@@ -103,8 +103,11 @@ public:
     [[nodiscard]] std::size_t worker_count() const;
 
     /// Factory for ProcessHandle. Can be overridden for testing.
+    /// The factory receives the ProcessSpec so it can dispatch to the
+    /// appropriate ProcessHandle subclass (e.g., DockerProcessHandle
+    /// when runner_type == "docker").
     using ProcessHandleFactory = std::function<
-        std::unique_ptr<ProcessHandle>()>;
+        std::unique_ptr<ProcessHandle>(const ProcessSpec& spec)>;
     void set_process_handle_factory(ProcessHandleFactory factory);
 
 private:

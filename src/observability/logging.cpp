@@ -89,4 +89,20 @@ std::shared_ptr<spdlog::logger> get_logger() {
     return spdlog::default_logger();
 }
 
+void set_log_mask_values(const std::vector<std::string>& values) {
+    auto logger = spdlog::default_logger();
+    if (!logger) return;
+
+    // Iterate all sinks and set mask values on any KairosJsonFormatter.
+    for (auto& sink : logger->sinks()) {
+        // spdlog doesn't expose the formatter directly, but we can
+        // set a new formatter with mask values.  Since we can't inspect
+        // the existing formatter type, we create a new KairosJsonFormatter
+        // with mask values and replace it.
+        auto fmt = std::make_unique<KairosJsonFormatter>();
+        fmt->set_mask_values(values);
+        sink->set_formatter(std::move(fmt));
+    }
+}
+
 }  // namespace kairos::observability

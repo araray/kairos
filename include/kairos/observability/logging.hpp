@@ -15,6 +15,7 @@
 #include <memory>
 #include <string>
 #include <string_view>
+#include <vector>
 
 namespace kairos::observability {
 
@@ -48,5 +49,16 @@ void shutdown_logging();
 /// Get the shared kairos logger.  Returns the default spdlog logger
 /// which is set during initialize_logging().
 std::shared_ptr<spdlog::logger> get_logger();
+
+/// Set secret mask values on all active KairosJsonFormatters.
+/// This is the defense-in-depth masking path (§17.3): any log message
+/// containing secret values will have them replaced with "***".
+///
+/// The primary masking path is OutputMultiplexer (process output).
+/// This function provides a secondary masking layer for Kairos's own
+/// log messages that might accidentally include secret values.
+///
+/// @param values  Secret values, pre-sorted longest-first.
+void set_log_mask_values(const std::vector<std::string>& values);
 
 }  // namespace kairos::observability

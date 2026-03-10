@@ -56,6 +56,7 @@ ENABLE_TESTS="ON"
 ENABLE_HTTP="OFF"
 ENABLE_OTEL="OFF"
 ENABLE_VAULT="OFF"
+ENABLE_DOCKER="OFF"
 ENABLE_TUI="OFF"
 ENABLE_ASAN="OFF"
 ENABLE_UBSAN="OFF"
@@ -93,6 +94,7 @@ HEADER
     echo "    --http                 Build HTTP server + Web UI"
     echo "    --otel                 Build with OpenTelemetry tracing"
     echo "    --vault                Build with Ansible Vault support (OpenSSL)"
+    echo "    --docker               Build with Docker runner support"
     echo "    --tui                  Build TUI dashboard (FTXUI)"
     echo ""
     echo -e "  ${C_BOLD}SANITIZERS${C_RESET}"
@@ -106,8 +108,8 @@ HEADER
     echo "    --profile san          Debug + ASan + UBSan + tests"
     echo "    --profile release      Release + no tests"
     echo "    --profile ci           Debug + tests + ASan + UBSan"
-    echo "    --profile full         Release + HTTP + OTel + Vault + tests"
-    echo "    --profile full-debug   Debug + HTTP + OTel + Vault + tests"
+    echo "    --profile full         Release + HTTP + OTel + Vault + Docker + tests"
+    echo "    --profile full-debug   Debug + HTTP + OTel + Vault + Docker + tests"
     echo "    --profile full-san-debug  Debug + all features + ASan + UBSan"
     echo ""
     echo -e "  ${C_BOLD}TOOLCHAIN${C_RESET}"
@@ -168,6 +170,8 @@ while [[ $# -gt 0 ]]; do
         --otel)             ENABLE_OTEL="ON"; shift ;;
         --vault)            ENABLE_VAULT="ON"; shift ;;
         --no-vault)         ENABLE_VAULT="OFF"; shift ;;
+        --docker)           ENABLE_DOCKER="ON"; shift ;;
+        --no-docker)        ENABLE_DOCKER="OFF"; shift ;;
         --tui)              ENABLE_TUI="ON"; shift ;;
 
         # Sanitizers
@@ -241,6 +245,7 @@ if [[ -n "$PROFILE" ]]; then
             ENABLE_HTTP="ON"
             ENABLE_OTEL="ON"
             ENABLE_VAULT="ON"
+            ENABLE_DOCKER="ON"
             ENABLE_TESTS="ON"
             ;;
         full-san)
@@ -248,6 +253,7 @@ if [[ -n "$PROFILE" ]]; then
             ENABLE_HTTP="ON"
             ENABLE_OTEL="ON"
             ENABLE_VAULT="ON"
+            ENABLE_DOCKER="ON"
             ENABLE_TESTS="ON"
             ENABLE_ASAN="ON"
             ENABLE_UBSAN="ON"
@@ -257,6 +263,7 @@ if [[ -n "$PROFILE" ]]; then
             ENABLE_HTTP="ON"
             ENABLE_OTEL="ON"
             ENABLE_VAULT="ON"
+            ENABLE_DOCKER="ON"
             ENABLE_TESTS="ON"
             ;;
         full-san-debug)
@@ -264,6 +271,7 @@ if [[ -n "$PROFILE" ]]; then
             ENABLE_HTTP="ON"
             ENABLE_OTEL="ON"
             ENABLE_VAULT="ON"
+            ENABLE_DOCKER="ON"
             ENABLE_TESTS="ON"
             ENABLE_ASAN="ON"
             ENABLE_UBSAN="ON"
@@ -310,6 +318,7 @@ CMAKE_ARGS=(
     -DKAIROS_HTTP="${ENABLE_HTTP}"
     -DKAIROS_OTEL="${ENABLE_OTEL}"
     -DKAIROS_VAULT="${ENABLE_VAULT}"
+    -DKAIROS_DOCKER="${ENABLE_DOCKER}"
     -DKAIROS_TUI="${ENABLE_TUI}"
 )
 
@@ -382,6 +391,7 @@ features=""
 [[ "$ENABLE_HTTP"  == "ON" ]] && features+="http "
 [[ "$ENABLE_OTEL"  == "ON" ]] && features+="otel "
 [[ "$ENABLE_VAULT" == "ON" ]] && features+="vault "
+[[ "$ENABLE_DOCKER" == "ON" ]] && features+="docker "
 [[ "$ENABLE_TUI"   == "ON" ]] && features+="tui "
 _cfg "Features" "${features:-none}"
 

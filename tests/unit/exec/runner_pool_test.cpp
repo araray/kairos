@@ -27,7 +27,7 @@ TEST_F(RunnerPoolTest, SingleJobExecution) {
     config.queue_capacity = 16;
 
     RunnerPool pool(config);
-    pool.set_process_handle_factory(create_process_handle);
+    pool.set_process_handle_factory([](const ProcessSpec&) { return create_process_handle(); });
     pool.start(stop_source_.get_token());
 
     std::atomic<bool> completed{false};
@@ -67,7 +67,7 @@ TEST_F(RunnerPoolTest, MultipleJobsParallel) {
     config.queue_capacity = 32;
 
     RunnerPool pool(config);
-    pool.set_process_handle_factory(create_process_handle);
+    pool.set_process_handle_factory([](const ProcessSpec&) { return create_process_handle(); });
     pool.start(stop_source_.get_token());
 
     constexpr int kJobs = 10;
@@ -103,7 +103,7 @@ TEST_F(RunnerPoolTest, FailingJob) {
     config.worker_count = 1;
 
     RunnerPool pool(config);
-    pool.set_process_handle_factory(create_process_handle);
+    pool.set_process_handle_factory([](const ProcessSpec&) { return create_process_handle(); });
     pool.start(stop_source_.get_token());
 
     std::atomic<bool> completed{false};
@@ -136,7 +136,7 @@ TEST_F(RunnerPoolTest, QueueDepthTracking) {
     config.queue_capacity = 16;
 
     RunnerPool pool(config);
-    pool.set_process_handle_factory(create_process_handle);
+    pool.set_process_handle_factory([](const ProcessSpec&) { return create_process_handle(); });
     // Don't start yet — items will accumulate.
 
     EXPECT_EQ(pool.queue_depth(), 0u);
@@ -159,7 +159,7 @@ TEST_F(RunnerPoolTest, ShutdownDrainsQueue) {
     config.queue_capacity = 32;
 
     RunnerPool pool(config);
-    pool.set_process_handle_factory(create_process_handle);
+    pool.set_process_handle_factory([](const ProcessSpec&) { return create_process_handle(); });
     pool.start(stop_source_.get_token());
 
     std::atomic<int> completed_count{0};
@@ -189,7 +189,7 @@ TEST_F(RunnerPoolTest, OutputCapture) {
     config.worker_count = 1;
 
     RunnerPool pool(config);
-    pool.set_process_handle_factory(create_process_handle);
+    pool.set_process_handle_factory([](const ProcessSpec&) { return create_process_handle(); });
     pool.start(stop_source_.get_token());
 
     std::atomic<bool> completed{false};

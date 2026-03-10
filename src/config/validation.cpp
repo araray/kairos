@@ -141,6 +141,10 @@ std::vector<ValidationError> validate_config(const confy::Config& cfg) {
         }
     } catch (...) {}
 
+    // ─── Docker runner (§15.3) ─────────────────────────────────────
+    check_enum(cfg, "kairos.runners.docker.network_mode",
+               {"bridge", "host", "none"}, errors);
+
     return errors;
 }
 

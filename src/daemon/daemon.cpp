@@ -42,6 +42,10 @@
 #include "kairos/watch/watch_engine.hpp"
 #include "kairos/watch/file_watcher.hpp"
 
+#ifdef KAIROS_DOCKER_ENABLED
+#include "kairos/exec/docker_process_handle.hpp"
+#endif
+
 #ifdef KAIROS_HTTP_ENABLED
 #include "kairos/http/http_server.hpp"
 #endif
@@ -328,9 +332,15 @@ int run_daemon(std::shared_ptr<const kairos::config::ConfigState> config) {
     };
     exec::RunnerPool runner_pool(pool_cfg);
 
-    runner_pool.set_process_handle_factory([]() {
-        return exec::create_process_handle();
-    });
+    runner_pool.set_process_handle_factory(
+        [](const exec::ProcessSpec& spec) -> std::unique_ptr<exec::ProcessHandle> {
+#ifdef KAIROS_DOCKER_ENABLED
+            if (spec.runner_type == "docker") {
+                return exec::create_docker_process_handle();
+            }
+#endif
+            return exec::create_process_handle();
+        });
 
     runner_pool.start(stop_token);
     log->info("Runner pool started with {} workers", worker_count);
@@ -364,6 +374,11 @@ int run_daemon(std::shared_ptr<const kairos::config::ConfigState> config) {
             [](const std::string& a, const std::string& b) {
                 return a.size() > b.size();
             });
+
+        // Defense-in-depth: set mask values on log formatter (§17.3).
+        // This catches any accidental secret leakage in Kairos's own
+        // log messages, complementing OutputMultiplexer's primary masking.
+        observability::set_log_mask_values(secret_values);
     }
 
     engine::PipelineConfig pipeline_cfg;

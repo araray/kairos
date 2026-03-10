@@ -93,9 +93,15 @@ void KairosJsonFormatter::format(const spdlog::details::log_msg& msg,
     json_escape(std::string_view(msg.logger_name.data(), msg.logger_name.size()), dest);
     dest.push_back('"');
 
-    // "msg":"…"
+    // "msg":"…" — with secret masking (§17.3 defense-in-depth).
+    std::string_view payload(msg.payload.data(), msg.payload.size());
     fmt::format_to(std::back_inserter(dest), ",\"msg\":\"");
-    json_escape(std::string_view(msg.payload.data(), msg.payload.size()), dest);
+    if (has_mask_values()) {
+        std::string masked = apply_masking(payload);
+        json_escape(masked, dest);
+    } else {
+        json_escape(payload, dest);
+    }
     dest.push_back('"');
 
     // "thread":"…"
@@ -113,7 +119,37 @@ void KairosJsonFormatter::format(const spdlog::details::log_msg& msg,
 }
 
 std::unique_ptr<spdlog::formatter> KairosJsonFormatter::clone() const {
-    return std::make_unique<KairosJsonFormatter>();
+    auto cloned = std::make_unique<KairosJsonFormatter>();
+    std::lock_guard lock(mask_mutex_);
+    cloned->mask_values_ = mask_values_;
+    return cloned;
+}
+
+void KairosJsonFormatter::set_mask_values(std::vector<std::string> values) {
+    std::lock_guard lock(mask_mutex_);
+    mask_values_ = std::move(values);
+}
+
+bool KairosJsonFormatter::has_mask_values() const {
+    std::lock_guard lock(mask_mutex_);
+    return !mask_values_.empty();
+}
+
+std::string KairosJsonFormatter::apply_masking(std::string_view input) const {
+    std::string result(input);
+    std::lock_guard lock(mask_mutex_);
+
+    // Mask values are pre-sorted longest-first to prevent partial
+    // match interference (e.g., "password123" masked before "password").
+    for (const auto& secret : mask_values_) {
+        if (secret.empty()) continue;
+        std::string::size_type pos = 0;
+        while ((pos = result.find(secret, pos)) != std::string::npos) {
+            result.replace(pos, secret.size(), "***");
+            pos += 3;  // Skip past "***".
+        }
+    }
+    return result;
 }
 
 }  // namespace kairos::observability

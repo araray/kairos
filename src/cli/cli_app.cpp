@@ -1865,7 +1865,7 @@ int run(int argc, char** argv) {
             .queue_capacity = 256,
         };
         exec::RunnerPool runner_pool(pool_cfg);
-        runner_pool.set_process_handle_factory([]() {
+        runner_pool.set_process_handle_factory([](const exec::ProcessSpec&) {
             return exec::create_process_handle();
         });
         runner_pool.start(stop_token);
@@ -2483,7 +2483,7 @@ int run(int argc, char** argv) {
             .queue_capacity = 256,
         };
         exec::RunnerPool runner_pool(pool_cfg);
-        runner_pool.set_process_handle_factory([]() {
+        runner_pool.set_process_handle_factory([](const exec::ProcessSpec&) {
             return exec::create_process_handle();
         });
         runner_pool.start(stop_token);

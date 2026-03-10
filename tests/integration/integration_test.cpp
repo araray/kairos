@@ -125,7 +125,7 @@ TEST_F(IntegrationTest, SchedulerFiresTriggerPipelineExecutes) {
     exec::RunnerPool runner_pool(pool_cfg);
 
     // Use fake process factory for deterministic results.
-    runner_pool.set_process_handle_factory([]() {
+    runner_pool.set_process_handle_factory([](const exec::ProcessSpec&) {
         auto proc = std::make_unique<FakeProcessHandle>();
         proc->set_exit_code(0);
         proc->set_stdout_data("hello\n");
@@ -303,7 +303,7 @@ TEST_F(IntegrationTest, WatchTriggerFlowsThroughPipeline) {
 
     exec::RunnerPoolConfig pool_cfg{.worker_count = 2, .queue_capacity = 64};
     exec::RunnerPool runner_pool(pool_cfg);
-    runner_pool.set_process_handle_factory([]() {
+    runner_pool.set_process_handle_factory([](const exec::ProcessSpec&) {
         auto proc = std::make_unique<FakeProcessHandle>();
         proc->set_exit_code(0);
         proc->set_stdout_data("deployed\n");

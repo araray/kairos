@@ -103,7 +103,7 @@ void RunnerPool::worker_loop(std::stop_token stop, std::size_t worker_id) {
             active_count_.fetch_sub(1, std::memory_order_relaxed);
             continue;
         }
-        auto proc = process_factory_();
+        auto proc = process_factory_(item.process_spec);
 
         // Attach output callback if provided.
         if (item.output_callback) {

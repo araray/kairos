@@ -184,6 +184,14 @@ else()
     target_sources(kairos_core PRIVATE src/security/secret_store_stub.cpp)
 endif()
 
+# ── Optional: Docker runner support (KAIROS_DOCKER=ON) ───────────────────
+if(KAIROS_DOCKER)
+    target_sources(kairos_core PRIVATE src/exec/docker_process_handle.cpp)
+    target_compile_definitions(kairos_core PUBLIC KAIROS_DOCKER_ENABLED)
+else()
+    target_sources(kairos_core PRIVATE src/exec/docker_process_handle_stub.cpp)
+endif()
+
 # ── Tests ──────────────────────────────────────────────────────────────────
 if(KAIROS_BUILD_TESTS)
     enable_testing()

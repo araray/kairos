@@ -56,7 +56,7 @@ protected:
         pool_ = std::make_unique<kairos::exec::RunnerPool>(
             kairos::exec::RunnerPoolConfig{.worker_count = 4,
                                             .queue_capacity = 64});
-        pool_->set_process_handle_factory([]() {
+        pool_->set_process_handle_factory([](const kairos::exec::ProcessSpec&) {
             auto proc = std::make_unique<FakeProcessHandle>();
             proc->set_exit_code(0);
             proc->set_stdout_data("ok\n");

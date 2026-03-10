@@ -37,6 +37,14 @@ confy::Value build_kairos_defaults() {
                 {"default_timeout_s",  3600},
                 {"default_shell",      ""},          // empty = platform default
                 {"kill_timeout_s",     10},
+                // Docker runner settings (§15.3).
+                {"docker", {
+                    {"socket_path",    ""},           // empty = auto-detect
+                    {"default_image",  ""},           // required per-job if empty
+                    {"auto_pull",      true},
+                    {"network_mode",   "bridge"},
+                    {"remove_on_exit", true},
+                }},
             }},
 
             // ─── Scheduler ────────────────────────────────────────────

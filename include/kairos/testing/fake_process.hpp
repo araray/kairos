@@ -187,7 +187,7 @@ public:
     {
         // Capture this by value for use in lambda.
         auto registry = registry_;
-        return [registry]() -> std::unique_ptr<kairos::exec::ProcessHandle> {
+        return [registry](const kairos::exec::ProcessSpec&) -> std::unique_ptr<kairos::exec::ProcessHandle> {
             // Return a generic FakeProcessHandle; actual behavior is set
             // by the test via spec matching in the runner.
             auto proc = std::make_unique<FakeProcessHandle>();

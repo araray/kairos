@@ -160,4 +160,84 @@ TEST(LogLevel, InvalidReturnsInfo) {
     EXPECT_EQ(parse_log_level("nonsense"), spdlog::level::info);
 }
 
+// ══════════════════════════════════════════════════════════════════════════════
+// Log formatter masking (§17.3 defense-in-depth)
+// ══════════════════════════════════════════════════════════════════════════════
+
+TEST(JsonFormatterMasking, NoMaskingByDefault) {
+    KairosJsonFormatter fmt;
+    EXPECT_FALSE(fmt.has_mask_values());
+}
+
+TEST(JsonFormatterMasking, SetMaskValuesActivatesMasking) {
+    KairosJsonFormatter fmt;
+    fmt.set_mask_values({"secret123", "password"});
+    EXPECT_TRUE(fmt.has_mask_values());
+}
+
+TEST(JsonFormatterMasking, EmptyMaskValuesDeactivatesMasking) {
+    KairosJsonFormatter fmt;
+    fmt.set_mask_values({"secret123"});
+    EXPECT_TRUE(fmt.has_mask_values());
+    fmt.set_mask_values({});
+    EXPECT_FALSE(fmt.has_mask_values());
+}
+
+TEST(JsonFormatterMasking, MasksSecretInLogMessage) {
+    KairosJsonFormatter fmt;
+    fmt.set_mask_values({"s3cr3t_p4ssw0rd"});
+
+    // Build a log message that contains the secret.
+    spdlog::details::log_msg msg("test_logger", spdlog::level::info,
+                                  "DB password is s3cr3t_p4ssw0rd for host");
+
+    spdlog::memory_buf_t dest;
+    fmt.format(msg, dest);
+
+    std::string output(dest.data(), dest.size());
+
+    // Should contain "***" but NOT the actual secret.
+    EXPECT_NE(output.find("***"), std::string::npos);
+    EXPECT_EQ(output.find("s3cr3t_p4ssw0rd"), std::string::npos);
+}
+
+TEST(JsonFormatterMasking, LongestFirstPreventsPartialMatch) {
+    KairosJsonFormatter fmt;
+    // "password123" should be masked before "password" (longest first).
+    fmt.set_mask_values({"password123", "password"});
+
+    spdlog::details::log_msg msg("test_logger", spdlog::level::info,
+                                  "value is password123 here");
+
+    spdlog::memory_buf_t dest;
+    fmt.format(msg, dest);
+
+    std::string output(dest.data(), dest.size());
+
+    // "password123" should be fully replaced with "***",
+    // not partially matched as "***123".
+    EXPECT_EQ(output.find("password123"), std::string::npos);
+    EXPECT_EQ(output.find("password"), std::string::npos);
+    EXPECT_NE(output.find("***"), std::string::npos);
+}
+
+TEST(JsonFormatterMasking, ClonePreservesMaskValues) {
+    KairosJsonFormatter fmt;
+    fmt.set_mask_values({"secret_val"});
+
+    auto cloned = fmt.clone();
+    auto* cloned_fmt = dynamic_cast<KairosJsonFormatter*>(cloned.get());
+    ASSERT_NE(cloned_fmt, nullptr);
+    EXPECT_TRUE(cloned_fmt->has_mask_values());
+
+    // Verify masking works on the clone.
+    spdlog::details::log_msg msg("test", spdlog::level::info,
+                                  "key=secret_val");
+    spdlog::memory_buf_t dest;
+    cloned_fmt->format(msg, dest);
+
+    std::string output(dest.data(), dest.size());
+    EXPECT_EQ(output.find("secret_val"), std::string::npos);
+}
+
 }  // namespace kairos::observability
