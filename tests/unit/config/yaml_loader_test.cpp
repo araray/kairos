@@ -780,6 +780,164 @@ jobs:
               "job('health_check').last_run_successful");
 }
 
+// ═══════════════════════════════════════════════════════════════════════
+//  STANDALONE WORKFLOW DESUGARING
+// ═══════════════════════════════════════════════════════════════════════
+
+TEST(YamlLoaderTest, StandaloneWorkflowWithExplicitFlag) {
+    auto r = load_workflow_string(R"(
+name: "loterias"
+standalone: true
+triggers:
+  - type: cron
+    spec: "55 23 * * *"
+steps:
+  - name: "update"
+    run: "/usr/bin/update-loterias"
+    env:
+      KAIROS_JOB_NAME: "loterias"
+)");
+
+    ASSERT_TRUE(r.ok()) << r.errors[0].message;
+    ASSERT_EQ(r.workflows.size(), 1u);
+
+    const auto& wf = r.workflows[0];
+    EXPECT_EQ(wf.workflow_name, "loterias");
+
+    // Desugaring should produce exactly one job named after the workflow.
+    ASSERT_EQ(wf.jobs.size(), 1u);
+    EXPECT_EQ(wf.jobs[0].job_name, "loterias");
+
+    ASSERT_EQ(wf.jobs[0].steps.size(), 1u);
+    EXPECT_EQ(wf.jobs[0].steps[0].step_name, "update");
+    EXPECT_EQ(wf.jobs[0].steps[0].command, "/usr/bin/update-loterias");
+
+    // Env should be hoisted into the job's step.
+    EXPECT_EQ(wf.jobs[0].steps[0].env.at("KAIROS_JOB_NAME"), "loterias");
+
+    // Trigger should still be parsed.
+    ASSERT_EQ(r.triggers.size(), 1u);
+}
+
+TEST(YamlLoaderTest, StandaloneWorkflowAutoDetected) {
+    // No explicit 'standalone: true' — inferred from steps at top level
+    // without a jobs mapping.
+    auto r = load_workflow_string(R"(
+name: "quick"
+steps:
+  - name: "do_it"
+    run: "echo hello"
+)");
+
+    ASSERT_TRUE(r.ok()) << r.errors[0].message;
+    ASSERT_EQ(r.workflows.size(), 1u);
+    ASSERT_EQ(r.workflows[0].jobs.size(), 1u);
+    EXPECT_EQ(r.workflows[0].jobs[0].job_name, "quick");
+    EXPECT_EQ(r.workflows[0].jobs[0].steps[0].command, "echo hello");
+}
+
+TEST(YamlLoaderTest, StandaloneWorkflowHoistsCondition) {
+    auto r = load_workflow_string(R"(
+name: "guarded"
+standalone: true
+condition: 'job("cleanup").last_success'
+steps:
+  - name: "work"
+    run: "do-work"
+)");
+
+    ASSERT_TRUE(r.ok()) << r.errors[0].message;
+    const auto& job = r.workflows[0].jobs[0];
+    ASSERT_TRUE(job.condition_expr.has_value());
+    EXPECT_EQ(*job.condition_expr, "job(\"cleanup\").last_success");
+}
+
+TEST(YamlLoaderTest, StandaloneWorkflowHoistsEnvAndWorkingDir) {
+    auto r = load_workflow_string(R"(
+name: "envtest"
+standalone: true
+working_dir: "/tmp/work"
+env:
+  FOO: bar
+steps:
+  - name: "step1"
+    run: "echo $FOO"
+)");
+
+    ASSERT_TRUE(r.ok()) << r.errors[0].message;
+    const auto& job = r.workflows[0].jobs[0];
+    EXPECT_EQ(job.working_dir, "/tmp/work");
+    EXPECT_EQ(job.env.at("FOO"), "bar");
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+//  COMMAND ALIAS FOR RUN
+// ═══════════════════════════════════════════════════════════════════════
+
+TEST(YamlLoaderTest, StepCommandAlias) {
+    auto r = load_workflow_string(R"(
+name: "alias_test"
+jobs:
+  test_job:
+    steps:
+      - name: "with_run"
+        run: "echo run"
+      - name: "with_command"
+        command: "echo command"
+)");
+
+    ASSERT_TRUE(r.ok()) << r.errors[0].message;
+    const auto& steps = r.workflows[0].jobs[0].steps;
+    ASSERT_EQ(steps.size(), 2u);
+    EXPECT_EQ(steps[0].command, "echo run");
+    EXPECT_EQ(steps[1].command, "echo command");
+}
+
+TEST(YamlLoaderTest, StepRunTakesPrecedenceOverCommand) {
+    // If both 'run' and 'command' are present, 'run' wins.
+    auto r = load_workflow_string(R"(
+name: "precedence_test"
+jobs:
+  test_job:
+    steps:
+      - name: "both"
+        run: "from_run"
+        command: "from_command"
+)");
+
+    ASSERT_TRUE(r.ok()) << r.errors[0].message;
+    EXPECT_EQ(r.workflows[0].jobs[0].steps[0].command, "from_run");
+}
+
+TEST(YamlLoaderTest, StandaloneWithCommandAlias) {
+    // The original user YAML that triggered the issue.
+    auto r = load_workflow_string(R"(
+name: loterias
+standalone: true
+triggers:
+  - type: cron
+    spec: "55 23 * * *"
+steps:
+  - name: update
+    command: /av/data/repos/kairos/utils/job_wrapper.sh /av/data/repos/loterias/auto-update.job.sh
+    env:
+      KAIROS_JOB_NAME: loterias
+)");
+
+    ASSERT_TRUE(r.ok()) << r.errors[0].message;
+
+    const auto& wf = r.workflows[0];
+    EXPECT_EQ(wf.workflow_name, "loterias");
+    ASSERT_EQ(wf.jobs.size(), 1u);
+
+    const auto& step = wf.jobs[0].steps[0];
+    EXPECT_EQ(step.step_name, "update");
+    EXPECT_TRUE(step.command.find("job_wrapper.sh") != std::string::npos);
+    EXPECT_EQ(step.env.at("KAIROS_JOB_NAME"), "loterias");
+
+    ASSERT_EQ(r.triggers.size(), 1u);
+}
+
 TEST(YamlLoaderTest, WatchGroupRuleWithJobTrigger) {
     auto r = load_watch_groups_string(R"(
 watch_groups:

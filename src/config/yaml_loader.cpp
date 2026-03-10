@@ -188,12 +188,14 @@ StepDef parse_step(const YAML::Node& node, const std::string& job_id,
     step.step_name = opt_string(node, "name",
                                 "step_" + std::to_string(step_index));
 
-    // Command: "run" key.
+    // Command: "run" key (also accept "command" as alias).
     if (node["run"] && node["run"].IsScalar()) {
         step.command = node["run"].as<std::string>();
+    } else if (node["command"] && node["command"].IsScalar()) {
+        step.command = node["command"].as<std::string>();
     } else {
         errors.push_back({file, path + ".run",
-                          "Step must have a 'run' field with a command string"});
+                          "Step must have a 'run' or 'command' field with a command string"});
     }
 
     // Working directory.
@@ -427,16 +429,76 @@ YamlLoadResult parse_workflow_node(
         return result;
     }
 
+    // ── Standalone desugaring ─────────────────────────────────────
+    // If the workflow has top-level 'steps' but no 'jobs', or if
+    // 'standalone: true' is set, synthesize a single-job 'jobs' map
+    // using the workflow name as the job key.
+    //
+    // This lets users write compact single-job workflows:
+    //   name: loterias
+    //   standalone: true
+    //   steps:
+    //     - name: update
+    //       run: some-command
+    //
+    // Which desugars to:
+    //   name: loterias
+    //   jobs:
+    //     loterias:
+    //       steps: [...]
+    //       condition: <from top-level>
+    //       env: <from top-level>
+    //       working_dir: <from top-level>
+
+    YAML::Node effective_root = root;  // shallow copy (refcount)
+    bool is_standalone = opt_bool(root, "standalone", false);
+
+    // Also auto-detect: has 'steps' at top level but no 'jobs'.
+    if (!is_standalone && root["steps"] && root["steps"].IsSequence()
+        && (!root["jobs"] || !root["jobs"].IsMap())) {
+        is_standalone = true;
+    }
+
+    if (is_standalone && root["steps"] && root["steps"].IsSequence()) {
+        // Build a synthetic job node from top-level fields.
+        YAML::Node job_node;
+        job_node["steps"] = root["steps"];
+
+        // Hoist top-level job-like fields into the synthetic job.
+        if (root["condition"] && root["condition"].IsScalar()) {
+            job_node["condition"] = root["condition"];
+        }
+        if (root["env"] && root["env"].IsMap()) {
+            job_node["env"] = root["env"];
+        }
+        if (root["working_dir"] && root["working_dir"].IsScalar()) {
+            job_node["working_dir"] = root["working_dir"];
+        }
+        if (root["continue_on_error"]) {
+            job_node["continue_on_error"] = root["continue_on_error"];
+        }
+
+        // Wrap in a jobs map keyed by workflow name.
+        YAML::Node jobs_map;
+        jobs_map[wf_name] = job_node;
+
+        // Mutate effective_root so the rest of the parser sees 'jobs'.
+        effective_root = YAML::Clone(root);
+        effective_root["jobs"] = jobs_map;
+        // Remove top-level 'steps' to avoid confusion.
+        effective_root.remove("steps");
+    }
+
     // ── Jobs ────────────────────────────────────────────────────
-    if (!root["jobs"] || !root["jobs"].IsMap()) {
+    if (!effective_root["jobs"] || !effective_root["jobs"].IsMap()) {
         result.errors.push_back({file, "jobs",
-            "Workflow must have a 'jobs' mapping"});
+            "Workflow must have a 'jobs' mapping (or use 'standalone: true' with top-level 'steps')"});
         return result;
     }
 
     // Collect job names for the workflow hash.
     std::vector<std::string> job_names;
-    for (const auto& kv : root["jobs"]) {
+    for (const auto& kv : effective_root["jobs"]) {
         job_names.push_back(kv.first.as<std::string>());
     }
 
@@ -456,7 +518,7 @@ YamlLoadResult parse_workflow_node(
     // Map from YAML key → job_id (for needs resolution).
     std::unordered_map<std::string, std::string> key_to_id;
 
-    for (const auto& kv : root["jobs"]) {
+    for (const auto& kv : effective_root["jobs"]) {
         std::string key = kv.first.as<std::string>();
         auto job = parse_job(key, kv.second, wf_id,
                              result.errors, file);
