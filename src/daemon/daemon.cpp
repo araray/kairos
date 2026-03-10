@@ -562,7 +562,7 @@ int run_daemon(std::shared_ptr<const kairos::config::ConfigState> config) {
             const std::string& name) -> std::string {
             auto run_id = core::generate_run_id();
             engine::TriggerEvent evt;
-            evt.type = engine::TriggerType::Manual;
+            evt.type = engine::TriggerType::ManualRun;
             evt.target_id = name;
             evt.trigger_id = "http-api";
             evt.correlation_id = run_id;
@@ -707,7 +707,7 @@ int run_daemon(std::shared_ptr<const kairos::config::ConfigState> config) {
                 for (const auto& wg : watch_groups) {
                     db_writer.enqueue(persist::PruneWatchSamples{
                         .watch_group = wg.group_name,
-                        .max_samples = max_samples_per_group,
+                        .max_epochs = max_samples_per_group,
                     });
                 }
 

@@ -192,8 +192,7 @@ struct HttpServer::Impl {
                         json j;
                         j["name"] = wf->workflow_name;
                         j["job_count"] = wf->jobs.size();
-                        j["trigger_type"] = wf->trigger_type.empty()
-                            ? "manual" : wf->trigger_type;
+                        j["trigger_type"] = "manual";
                         arr.push_back(std::move(j));
                     }
                 }

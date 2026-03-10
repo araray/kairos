@@ -189,7 +189,7 @@ TEST_F(RetentionPruneTest, PruneWatchSamplesKeepsMaxEpochs) {
     // Keep only 3 most recent epochs.
     writer_->enqueue(PruneWatchSamples{
         .watch_group = "logs",
-        .max_samples = 3,
+        .max_epochs = 3,
     });
     flush_writer();
 
@@ -206,7 +206,7 @@ TEST_F(RetentionPruneTest, PruneWatchSamplesNothingToDelete) {
     // Keep up to 10 — nothing to prune.
     writer_->enqueue(PruneWatchSamples{
         .watch_group = "logs",
-        .max_samples = 10,
+        .max_epochs = 10,
     });
     flush_writer();
 
@@ -227,7 +227,7 @@ TEST_F(RetentionPruneTest, PruneWatchSamplesMultipleGroups) {
     // Prune group_a to keep 2.
     writer_->enqueue(PruneWatchSamples{
         .watch_group = "group_a",
-        .max_samples = 2,
+        .max_epochs = 2,
     });
     flush_writer();
 
@@ -260,7 +260,7 @@ TEST_F(RetentionPruneTest, FullRetentionCycle) {
     //   2. Prune watch samples to keep 5 most recent.
     writer_->enqueue(PruneWatchSamples{
         .watch_group = "data",
-        .max_samples = 5,
+        .max_epochs = 5,
     });
     flush_writer();
 
