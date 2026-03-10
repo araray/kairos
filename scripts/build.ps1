@@ -36,7 +36,7 @@ param(
     [switch]$Asan,
 
     # Profiles
-    [ValidateSet("", "dev", "san", "release", "ci", "full", "full-debug", "full-san-debug")]
+    [ValidateSet("", "dev", "san", "release", "ci", "full", "full-debug", "full-san-debug", "package")]
     [string]$Profile = "",
 
     # Toolchain
@@ -54,6 +54,12 @@ param(
     [switch]$Install,
     [switch]$DryRun,
     [switch]$Verbose,
+
+    # Packaging
+    [switch]$Package,
+    [switch]$PackageDeb,
+    [switch]$PackageRpm,
+    [switch]$PackageZip,
 
     # Help
     [switch]$ShowHelp
@@ -148,11 +154,19 @@ if ($ShowHelp)
     Write-Host "    -DryRun                Print CMake command without executing"
     Write-Host "    -Verbose               Verbose build output"
     Write-Host ""
+    Write-Host "  PACKAGING  (run after build via CPack)"
+    Write-Host "    -Package               Generate all packages (ZIP)"
+    Write-Host "    -PackageDeb            Generate .deb package (WSL/cross)"
+    Write-Host "    -PackageRpm            Generate .rpm package (WSL/cross)"
+    Write-Host "    -PackageZip            Generate .zip archive"
+    Write-Host ""
     Write-Host "  EXAMPLES"
     Write-Host "    .\scripts\build.ps1                             # Quick debug build"
     Write-Host "    .\scripts\build.ps1 -Release -Prefix C:\kairos  # Release + install"
     Write-Host "    .\scripts\build.ps1 -Profile san                # Sanitizer build"
     Write-Host "    .\scripts\build.ps1 -Profile full               # Release + HTTP"
+    Write-Host "    .\scripts\build.ps1 -Release -NoTests -PackageZip  # Release + ZIP"
+    Write-Host "    .\scripts\build.ps1 -Profile package            # Release + all packages"
     Write-Host ""
     exit 0
 }
@@ -196,6 +210,9 @@ switch ($Profile)
     }
     "full-san-debug"
     { $BuildType = "Debug"; $EnableHttp = "ON"; $EnableOtel = "ON"; $EnableVault = "ON"; $EnableTests = "ON"; $EnableAsan = "ON"
+    }
+    "package"
+    { $BuildType = "Release"; $EnableHttp = "ON"; $EnableVault = "ON"; $EnableTests = "OFF"; $Package = [switch]::Present
     }
 }
 
@@ -299,6 +316,25 @@ if ($EnableAsan -eq "ON")
 if ($Profile)
 { CfgLine "Profile" $Profile "magenta"
 }
+
+$pkgList = @()
+if ($Package)
+{ $pkgList = @("DEB", "RPM", "ZIP")
+} else
+{
+    if ($PackageDeb)
+    { $pkgList += "DEB"
+    }
+    if ($PackageRpm)
+    { $pkgList += "RPM"
+    }
+    if ($PackageZip)
+    { $pkgList += "ZIP"
+    }
+}
+if ($pkgList.Count -gt 0)
+{ CfgLine "Packaging" ($pkgList -join " ") "cyan"
+}
 Write-Host ""
 
 # =============================================================================
@@ -359,6 +395,22 @@ if ($DryRun)
     }
     if ($Install)
     { Write-Host "  cmake --install `"$BuildDir`" --config $BuildType"
+    }
+    if ($Package)
+    {
+        Write-Host "  cd `"$BuildDir`""
+        Write-Host "  cpack -G ZIP  # generates ZIP"
+    } else
+    {
+        if ($PackageDeb)
+        { Write-Host "  cpack -G DEB -B `"$BuildDir`""
+        }
+        if ($PackageRpm)
+        { Write-Host "  cpack -G RPM -B `"$BuildDir`""
+        }
+        if ($PackageZip)
+        { Write-Host "  cpack -G ZIP -B `"$BuildDir`""
+        }
     }
     Write-Host ""; exit 0
 }
@@ -515,6 +567,73 @@ if ($Install)
 }
 
 # =============================================================================
+# Package (optional)
+# =============================================================================
+$pkgGenList = @()
+if ($Package)
+{ $pkgGenList = @("ZIP")
+} else
+{
+    if ($PackageDeb)
+    { $pkgGenList += "DEB"
+    }
+    if ($PackageRpm)
+    { $pkgGenList += "RPM"
+    }
+    if ($PackageZip)
+    { $pkgGenList += "ZIP"
+    }
+}
+
+$generatedPackages = @()
+if ($pkgGenList.Count -gt 0)
+{
+    Hdr "Package"
+    foreach ($gen in $pkgGenList)
+    {
+        Log "Generating $gen package..."
+        $pkgStart = Get-Date
+
+        Push-Location $BuildDir
+        & cpack -G $gen 2>&1 | ForEach-Object {
+            if ($_ -match "CPack Error|Error")
+            { Write-Host "  $esc[31m$_$esc[0m"
+            } else
+            { Write-Host "  $esc[2m$_$esc[0m"
+            }
+        }
+        $pkgRc = $LASTEXITCODE
+        Pop-Location
+
+        $pkgTime = [math]::Round(((Get-Date) - $pkgStart).TotalSeconds, 1)
+
+        if ($pkgRc -eq 0)
+        {
+            $ext = switch ($gen)
+            { "DEB"
+                { "*.deb"
+                } "RPM"
+                { "*.rpm"
+                } "ZIP"
+                { "*.zip"
+                }
+            }
+            $found = Get-ChildItem -Path $BuildDir -Filter $ext -ErrorAction SilentlyContinue |
+                Sort-Object LastWriteTime -Descending | Select-Object -First 1
+            if ($found)
+            {
+                $generatedPackages += $found.FullName
+                Ok "$($found.Name) (${pkgTime}s)"
+            } else
+            { Ok "$gen generated (${pkgTime}s)"
+            }
+        } else
+        { Warn "$gen packaging failed"
+        }
+    }
+}
+
+# =============================================================================
 # Summary
 # =============================================================================
 Write-Host ""
@@ -537,6 +656,18 @@ if ($EnableTests -eq "ON")
 {
     $testCount = (Get-ChildItem -Path $BuildDir -Recurse -Filter "test_*.exe" -ErrorAction SilentlyContinue).Count
     CfgLine "Test binaries" "$testCount executables"
+}
+
+if ($generatedPackages.Count -gt 0)
+{
+    Write-Host ""
+    Write-Host "  $esc[1mPackages:$esc[0m"
+    foreach ($pkg in $generatedPackages)
+    {
+        $size = (Get-Item $pkg).Length / 1MB
+        $sizeStr = "{0:N1} MB" -f $size
+        Write-Host "    $esc[36m$pkg$esc[0m  $esc[2m($sizeStr)$esc[0m"
+    }
 }
 
 Write-Host ""

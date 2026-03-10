@@ -69,6 +69,10 @@ PROFILE=""
 INSTALL_PREFIX=""
 EXTRA_CMAKE_ARGS=()
 COMPILER=""                 # Empty = system default
+PACKAGE_DEB=false
+PACKAGE_RPM=false
+PACKAGE_ZIP=false
+PACKAGE_ALL=false
 
 # ── Help ──────────────────────────────────────────────────────────────────────
 show_help() {
@@ -111,6 +115,7 @@ HEADER
     echo "    --profile full         Release + HTTP + OTel + Vault + Docker + tests"
     echo "    --profile full-debug   Debug + HTTP + OTel + Vault + Docker + tests"
     echo "    --profile full-san-debug  Debug + all features + ASan + UBSan"
+    echo "    --profile package      Release + HTTP + Vault + Docker + DEB/RPM/ZIP"
     echo ""
     echo -e "  ${C_BOLD}TOOLCHAIN${C_RESET}"
     echo "    --compiler gcc         Use GCC (sets CC/CXX)"
@@ -129,6 +134,12 @@ HEADER
     echo "    --verbose              Verbose build output"
     echo "    -- <args...>           Pass extra arguments to CMake"
     echo ""
+    echo -e "  ${C_BOLD}PACKAGING${C_RESET}  ${C_DIM}(run after build via CPack)${C_RESET}"
+    echo "    --package              Generate all packages (DEB + RPM + ZIP)"
+    echo "    --package-deb          Generate .deb package"
+    echo "    --package-rpm          Generate .rpm package (needs rpmbuild)"
+    echo "    --package-zip          Generate .zip archive"
+    echo ""
     echo -e "  ${C_BOLD}EXAMPLES${C_RESET}"
     echo "    ${C_DIM}# Quick debug build${C_RESET}"
     echo "    ./scripts/build.sh"
@@ -144,6 +155,12 @@ HEADER
     echo ""
     echo "    ${C_DIM}# Vault + HTTP (requires OpenSSL)${C_RESET}"
     echo "    ./scripts/build.sh --http --vault"
+    echo ""
+    echo "    ${C_DIM}# Release build + generate DEB package${C_RESET}"
+    echo "    ./scripts/build.sh --release --no-tests --http --package-deb"
+    echo ""
+    echo "    ${C_DIM}# Full release + all packages${C_RESET}"
+    echo "    ./scripts/build.sh --profile full --package"
     echo ""
     echo "    ${C_DIM}# Clang debug, pass extra flags${C_RESET}"
     echo "    ./scripts/build.sh --compiler clang -- -DCMAKE_VERBOSE_MAKEFILE=ON"
@@ -207,6 +224,12 @@ while [[ $# -gt 0 ]]; do
         --install)          DO_INSTALL=true; shift ;;
         --dry-run)          DRY_RUN=true; shift ;;
         --verbose)          VERBOSE=true; shift ;;
+
+        # Packaging
+        --package)          PACKAGE_ALL=true; shift ;;
+        --package-deb)      PACKAGE_DEB=true; shift ;;
+        --package-rpm)      PACKAGE_RPM=true; shift ;;
+        --package-zip)      PACKAGE_ZIP=true; shift ;;
 
         # Help
         -h|--help)          show_help; exit 0 ;;
@@ -276,8 +299,16 @@ if [[ -n "$PROFILE" ]]; then
             ENABLE_ASAN="ON"
             ENABLE_UBSAN="ON"
             ;;
+        package)
+            BUILD_TYPE="Release"
+            ENABLE_HTTP="ON"
+            ENABLE_VAULT="ON"
+            ENABLE_DOCKER="ON"
+            ENABLE_TESTS="OFF"
+            PACKAGE_ALL=true
+            ;;
         *)
-            _die "Unknown profile: $PROFILE (choose: dev, san, release, ci, full, full-san, full-debug, full-san-debug)"
+            _die "Unknown profile: $PROFILE (choose: dev, san, release, ci, full, full-san, full-debug, full-san-debug, package)"
             ;;
     esac
 fi
@@ -410,6 +441,19 @@ if [[ -n "$PROFILE" ]]; then
     _cfg "Profile" "$PROFILE" "$C_MAGENTA"
 fi
 
+# Packaging
+pkg_list=""
+if [[ "$PACKAGE_ALL" == true ]]; then
+    pkg_list="DEB RPM ZIP"
+else
+    [[ "$PACKAGE_DEB" == true ]] && pkg_list+="DEB "
+    [[ "$PACKAGE_RPM" == true ]] && pkg_list+="RPM "
+    [[ "$PACKAGE_ZIP" == true ]] && pkg_list+="ZIP "
+fi
+if [[ -n "$pkg_list" ]]; then
+    _cfg "Packaging" "$pkg_list" "$C_CYAN"
+fi
+
 echo ""
 
 # ── Dry-run mode ──────────────────────────────────────────────────────────────
@@ -425,6 +469,20 @@ if [[ "$DRY_RUN" == true ]]; then
     fi
     if [[ "$DO_INSTALL" == true ]]; then
         echo -e "  ${C_DIM}cmake${C_RESET} --install ${BUILD_DIR}"
+    fi
+    if [[ "$PACKAGE_ALL" == true ]]; then
+        echo -e "  ${C_DIM}cd${C_RESET} ${BUILD_DIR}"
+        echo -e "  ${C_DIM}cpack${C_RESET}  ${C_DIM}# generates DEB + RPM + ZIP${C_RESET}"
+    else
+        if [[ "$PACKAGE_DEB" == true ]]; then
+            echo -e "  ${C_DIM}cpack${C_RESET} -G DEB -B ${BUILD_DIR}"
+        fi
+        if [[ "$PACKAGE_RPM" == true ]]; then
+            echo -e "  ${C_DIM}cpack${C_RESET} -G RPM -B ${BUILD_DIR}"
+        fi
+        if [[ "$PACKAGE_ZIP" == true ]]; then
+            echo -e "  ${C_DIM}cpack${C_RESET} -G ZIP -B ${BUILD_DIR}"
+        fi
     fi
     echo ""
     exit 0
@@ -493,6 +551,60 @@ if [[ "$DO_INSTALL" == true ]]; then
     _ok "Installed"
 fi
 
+# ── Package (optional) ───────────────────────────────────────────────────────
+DO_PACKAGE=false
+if [[ "$PACKAGE_ALL" == true || "$PACKAGE_DEB" == true || "$PACKAGE_RPM" == true || "$PACKAGE_ZIP" == true ]]; then
+    DO_PACKAGE=true
+fi
+
+if [[ "$DO_PACKAGE" == true ]]; then
+    _hdr "Package"
+
+    # Resolve which generators to run.
+    generators=()
+    if [[ "$PACKAGE_ALL" == true ]]; then
+        generators=(DEB RPM ZIP)
+    else
+        [[ "$PACKAGE_DEB" == true ]] && generators+=(DEB)
+        [[ "$PACKAGE_RPM" == true ]] && generators+=(RPM)
+        [[ "$PACKAGE_ZIP" == true ]] && generators+=(ZIP)
+    fi
+
+    pkg_files=()
+    for gen in "${generators[@]}"; do
+        _log "Generating ${gen} package..."
+
+        # RPM needs rpmbuild.
+        if [[ "$gen" == "RPM" ]] && ! command -v rpmbuild &>/dev/null; then
+            _warn "rpmbuild not found — skipping RPM (install: sudo apt install rpm)"
+            continue
+        fi
+
+        SECONDS=0
+        if (cd "${BUILD_DIR}" && cpack -G "$gen") 2>&1 | while IFS= read -r line; do
+            if [[ "$line" == *"CPack Error"* || "$line" == *"Error"* ]]; then
+                echo -e "  ${C_RED}${line}${C_RESET}"
+            else
+                echo -e "  ${C_DIM}${line}${C_RESET}"
+            fi
+        done; then
+            pkg_time=$SECONDS
+            # Find generated packages.
+            case "$gen" in
+                DEB) pattern="*.deb" ;;
+                RPM) pattern="*.rpm" ;;
+                ZIP) pattern="*.zip" ;;
+            esac
+            while IFS= read -r -d '' f; do
+                pkg_files+=("$f")
+                _ok "$(basename "$f") (${pkg_time}s)"
+            done < <(find "${BUILD_DIR}" -maxdepth 1 -name "$pattern" -newer "${BUILD_DIR}/CMakeCache.txt" -print0 2>/dev/null)
+        else
+            _warn "${gen} packaging failed"
+        fi
+    done
+fi
+
 # ── Summary ───────────────────────────────────────────────────────────────────
 echo ""
 echo -e "${C_BG_GREEN}${C_BOLD}${C_WHITE} BUILD SUCCEEDED ${C_RESET}"
@@ -512,9 +624,27 @@ if [[ "$ENABLE_TESTS" == "ON" ]]; then
     echo -e "  ${C_DIM}Test binaries${C_RESET} ${test_count} executables"
 fi
 
+if [[ "${#pkg_files[@]}" -gt 0 ]] 2>/dev/null; then
+    echo ""
+    echo -e "  ${C_BOLD}Packages:${C_RESET}"
+    for pkg in "${pkg_files[@]}"; do
+        local_size=$(du -h "$pkg" 2>/dev/null | cut -f1)
+        echo -e "    ${C_CYAN}${pkg}${C_RESET}  ${C_DIM}(${local_size})${C_RESET}"
+    done
+fi
+
 echo ""
 echo -e "  ${C_DIM}Next steps:${C_RESET}"
 echo -e "    ${C_CYAN}./scripts/test.sh${C_RESET}                 # Run all tests"
 echo -e "    ${C_CYAN}${BUILD_DIR}/kairos version${C_RESET}"
 echo -e "    ${C_CYAN}${BUILD_DIR}/kairos start --config deploy/kairos.toml.example${C_RESET}"
+
+if [[ "${#pkg_files[@]}" -gt 0 ]] 2>/dev/null; then
+    for pkg in "${pkg_files[@]}"; do
+        case "$pkg" in
+            *.deb) echo -e "    ${C_CYAN}sudo dpkg -i ${pkg}${C_RESET}" ;;
+            *.rpm) echo -e "    ${C_CYAN}sudo rpm -i ${pkg}${C_RESET}" ;;
+        esac
+    done
+fi
 echo ""
