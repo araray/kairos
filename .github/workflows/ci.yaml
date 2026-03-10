@@ -1,0 +1,179 @@
+# File: .github/workflows/ci.yml
+#
+# Kairos CI/CD Pipeline
+#
+# Matrix: Linux (GCC + Clang), macOS (AppleClang), Windows (MSVC)
+# Packages: DEB + RPM on Linux, Docker image on main branch.
+#
+# Spec reference: §28.9
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  release:
+    types: [published]
+
+env:
+  BUILD_TYPE: Release
+
+jobs:
+  # ── Build and Test ─────────────────────────────────────────────────────
+  build-and-test:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            compiler: gcc
+            cxx: g++-13
+            cc: gcc-13
+            preset: debug-gcc
+            sanitizer: address
+          - os: ubuntu-24.04
+            compiler: clang
+            cxx: clang++-17
+            cc: clang-17
+            preset: debug-clang
+            sanitizer: none
+          - os: macos-14
+            compiler: appleclang
+            cxx: clang++
+            cc: clang
+            preset: macos-release
+            sanitizer: none
+          - os: windows-2022
+            compiler: msvc
+            preset: debug-msvc
+            sanitizer: none
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install dependencies (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libsqlite3-dev libsystemd-dev \
+              pkg-config libssl-dev
+
+      - name: Install dependencies (macOS)
+        if: runner.os == 'macOS'
+        run: brew install sqlite openssl@3
+
+      - name: Configure
+        run: |
+          cmake -S . -B build \
+            -DCMAKE_BUILD_TYPE=${{ env.BUILD_TYPE }} \
+            -DKAIROS_BUILD_TESTS=ON \
+            -DKAIROS_HTTP=ON \
+            -DKAIROS_VAULT=${{ runner.os == 'Windows' && 'OFF' || 'ON' }} \
+            -DKAIROS_DOCKER=${{ runner.os == 'Windows' && 'OFF' || 'ON' }}
+        env:
+          CXX: ${{ matrix.cxx }}
+          CC: ${{ matrix.cc }}
+
+      - name: Build
+        run: cmake --build build --parallel
+
+      - name: Test
+        run: ctest --test-dir build --output-on-failure --timeout 120
+
+      - name: Upload build artifacts
+        if: matrix.compiler == 'gcc' && github.ref == 'refs/heads/main'
+        uses: actions/upload-artifact@v4
+        with:
+          name: kairos-linux-x86_64
+          path: build/kairos
+
+  # ── Package (DEB + RPM) ────────────────────────────────────────────────
+  package:
+    needs: build-and-test
+    runs-on: ubuntu-24.04
+    if: github.ref == 'refs/heads/main' || github.event_name == 'release'
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libsqlite3-dev libsystemd-dev \
+              pkg-config libssl-dev rpm
+
+      - name: Configure
+        run: |
+          cmake -S . -B build \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DKAIROS_HTTP=ON \
+            -DKAIROS_VAULT=ON \
+            -DKAIROS_DOCKER=ON \
+            -DKAIROS_BUILD_TESTS=OFF
+
+      - name: Build
+        run: cmake --build build --parallel
+
+      - name: Package (DEB)
+        run: cd build && cpack -G DEB
+
+      - name: Package (RPM)
+        run: cd build && cpack -G RPM
+
+      - name: Upload packages
+        uses: actions/upload-artifact@v4
+        with:
+          name: packages
+          path: |
+            build/*.deb
+            build/*.rpm
+
+      - name: Attach to release
+        if: github.event_name == 'release'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            build/*.deb
+            build/*.rpm
+
+  # ── Docker Image ───────────────────────────────────────────────────────
+  docker:
+    needs: build-and-test
+    runs-on: ubuntu-24.04
+    if: github.ref == 'refs/heads/main' || github.event_name == 'release'
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build Docker image
+        run: |
+          docker build -f deploy/docker/Dockerfile \
+            -t kairos:latest \
+            -t kairos:${{ github.sha }} \
+            .
+
+      - name: Test Docker image
+        run: |
+          docker run --rm kairos:latest version
+
+      - name: Push to GHCR
+        if: github.event_name == 'release'
+        run: |
+          echo "${{ secrets.GITHUB_TOKEN }}" | \
+            docker login ghcr.io -u ${{ github.actor }} --password-stdin
+          docker tag kairos:latest ghcr.io/${{ github.repository }}:latest
+          docker tag kairos:latest ghcr.io/${{ github.repository }}:${{ github.event.release.tag_name }}
+          docker push ghcr.io/${{ github.repository }}:latest
+          docker push ghcr.io/${{ github.repository }}:${{ github.event.release.tag_name }}

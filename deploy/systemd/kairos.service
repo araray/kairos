@@ -1,0 +1,56 @@
+# File: deploy/systemd/kairos.service
+#
+# Kairos Orchestration Daemon — systemd unit file
+#
+# Install to:  /etc/systemd/system/kairos.service
+#               (or /usr/lib/systemd/system/ via package manager)
+# Enable:      sudo systemctl enable --now kairos
+# Status:      sudo systemctl status kairos
+# Logs:        journalctl -u kairos -f
+#
+# Spec reference: §27.4
+
+[Unit]
+Description=Kairos Orchestration Daemon
+Documentation=https://github.com/araray/kairos
+After=network.target
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+[Service]
+Type=notify
+ExecStart=/usr/bin/kairos start --config /etc/kairos/kairos.toml
+ExecReload=/bin/kill -HUP $MAINPID
+
+# Run as dedicated user (created by package postinst).
+User=kairos
+Group=kairos
+
+# Watchdog: if kairos doesn't ping within 60s, systemd restarts it.
+WatchdogSec=60
+Restart=on-failure
+RestartSec=5
+
+# Security hardening.
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/var/lib/kairos /var/log/kairos /run/kairos
+PrivateTmp=true
+PrivateDevices=true
+
+# Resource limits.
+LimitNOFILE=65536
+LimitNPROC=4096
+MemoryMax=2G
+
+# Environment.
+Environment=KAIROS_CONFIG=/etc/kairos/kairos.toml
+
+# Logging: stdout → journald.
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=kairos
+
+[Install]
+WantedBy=multi-user.target

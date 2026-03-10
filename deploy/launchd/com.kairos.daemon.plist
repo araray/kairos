@@ -1,0 +1,72 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+    "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  File: deploy/launchd/com.kairos.daemon.plist
+
+  Kairos Orchestration Daemon — launchd property list
+
+  Install (user agent):
+    cp com.kairos.daemon.plist ~/Library/LaunchAgents/
+    launchctl load ~/Library/LaunchAgents/com.kairos.daemon.plist
+
+  Install (system daemon):
+    sudo cp com.kairos.daemon.plist /Library/LaunchDaemons/
+    sudo launchctl load /Library/LaunchDaemons/com.kairos.daemon.plist
+
+  Unload:
+    launchctl unload ~/Library/LaunchAgents/com.kairos.daemon.plist
+
+  Spec reference: §27.5
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.kairos.daemon</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/local/bin/kairos</string>
+        <string>start</string>
+        <string>--config</string>
+        <string>/usr/local/etc/kairos/kairos.toml</string>
+    </array>
+
+    <!-- Run at load (immediately) and keep alive. -->
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <dict>
+        <key>SuccessfulExit</key>
+        <false/>
+    </dict>
+
+    <!-- Restart after 5 seconds on failure. -->
+    <key>ThrottleInterval</key>
+    <integer>5</integer>
+
+    <!-- Logging: stdout/stderr to files (macOS has no journald). -->
+    <key>StandardOutPath</key>
+    <string>/usr/local/var/log/kairos/kairos.stdout.log</string>
+    <key>StandardErrorPath</key>
+    <string>/usr/local/var/log/kairos/kairos.stderr.log</string>
+
+    <!-- Working directory. -->
+    <key>WorkingDirectory</key>
+    <string>/usr/local/var/lib/kairos</string>
+
+    <!-- Environment variables. -->
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>KAIROS_CONFIG</key>
+        <string>/usr/local/etc/kairos/kairos.toml</string>
+    </dict>
+
+    <!-- Resource limits. -->
+    <key>SoftResourceLimits</key>
+    <dict>
+        <key>NumberOfFiles</key>
+        <integer>65536</integer>
+    </dict>
+</dict>
+</plist>

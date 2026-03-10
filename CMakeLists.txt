@@ -63,6 +63,7 @@ add_library(kairos_core STATIC
     src/config/yaml_loader.cpp
     src/mcp/transport.cpp
     src/mcp/handler.cpp
+    src/migration/migration_tool.cpp
 )
 
 # ── Native watch backends (platform-specific) ─────────────────────────────
@@ -192,24 +193,34 @@ else()
     target_sources(kairos_core PRIVATE src/exec/docker_process_handle_stub.cpp)
 endif()
 
+# ── Optional: systemd integration (Linux only) ───────────────────────────
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    find_package(PkgConfig QUIET)
+    if(PkgConfig_FOUND)
+        pkg_check_modules(SYSTEMD QUIET libsystemd)
+        if(SYSTEMD_FOUND)
+            target_compile_definitions(kairos PRIVATE KAIROS_SYSTEMD)
+            target_link_libraries(kairos PRIVATE ${SYSTEMD_LIBRARIES})
+            target_include_directories(kairos PRIVATE ${SYSTEMD_INCLUDE_DIRS})
+            message(STATUS "systemd: sd_notify integration enabled")
+        else()
+            message(STATUS "systemd: libsystemd not found — sd_notify stubs used")
+        endif()
+    endif()
+endif()
+
+# ── Windows Service integration ───────────────────────────────────────────
+if(WIN32)
+    target_sources(kairos PRIVATE src/daemon/win32_service.cpp)
+    target_link_libraries(kairos PRIVATE advapi32)
+endif()
+
 # ── Tests ──────────────────────────────────────────────────────────────────
 if(KAIROS_BUILD_TESTS)
     enable_testing()
     add_subdirectory(tests)
 endif()
 
-# ── Install ────────────────────────────────────────────────────────────────
-include(GNUInstallDirs)
-
-install(TARGETS kairos
-    RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
-)
-
-install(DIRECTORY include/kairos
-    DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
-    FILES_MATCHING PATTERN "*.hpp"
-)
-
-install(FILES deploy/kairos.toml.example
-    DESTINATION ${CMAKE_INSTALL_DATADIR}/kairos
-)
+# ── Install + Packaging ────────────────────────────────────────────────────
+include(cmake/KairosInstall.cmake)
+include(cmake/KairosCPack.cmake)

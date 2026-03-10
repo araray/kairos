@@ -683,3 +683,15 @@ gtest_discover_tests(test_e2e_daemon_lifecycle
         LABELS "e2e"
         TIMEOUT 120
 )
+
+# ── Migration tool tests (§31) ────────────────────────────────────────────
+
+add_executable(test_migration
+    unit/migration/migration_test.cpp
+)
+target_link_libraries(test_migration PRIVATE kairos_test_helpers)
+gtest_discover_tests(test_migration
+    PROPERTIES
+        LABELS "migration"
+        TIMEOUT 60
+)

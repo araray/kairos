@@ -1,0 +1,47 @@
+#!/bin/bash
+# File: deploy/deb/postinst
+# DEB post-install script for Kairos
+#
+# Creates the kairos system user, required directories with correct
+# ownership, installs the systemd service, and provisions a default
+# config if none exists.
+#
+# Spec reference: §28.7
+set -e
+
+# Create kairos user if it doesn't exist.
+if ! id -u kairos >/dev/null 2>&1; then
+    useradd --system --no-create-home --shell /usr/sbin/nologin kairos
+fi
+
+# Create required directories.
+install -d -o kairos -g kairos -m 750 /var/lib/kairos
+install -d -o kairos -g kairos -m 750 /var/log/kairos
+install -d -o kairos -g kairos -m 750 /run/kairos
+install -d -o kairos -g kairos -m 750 /etc/kairos
+
+# Install systemd service.
+if [ -d /run/systemd/system ]; then
+    systemctl daemon-reload
+    systemctl enable kairos.service || true
+fi
+
+# Install default config if none exists.
+if [ ! -f /etc/kairos/kairos.toml ]; then
+    if [ -f /usr/share/kairos/kairos.toml.example ]; then
+        install -D -m 644 -o kairos -g kairos \
+            /usr/share/kairos/kairos.toml.example \
+            /etc/kairos/kairos.toml
+    fi
+fi
+
+# Initialize database if it doesn't exist.
+if [ ! -f /var/lib/kairos/kairos.db ]; then
+    su -s /bin/sh kairos -c \
+        "kairos init-db --config /etc/kairos/kairos.toml" 2>/dev/null || true
+fi
+
+echo "Kairos installed successfully."
+echo "  Start:   sudo systemctl start kairos"
+echo "  Status:  sudo systemctl status kairos"
+echo "  Logs:    journalctl -u kairos -f"

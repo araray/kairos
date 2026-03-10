@@ -1,0 +1,20 @@
+#!/bin/bash
+# File: deploy/deb/prerm
+# DEB pre-remove script for Kairos
+#
+# Stops the running daemon and disables the systemd service before
+# package removal.  Does NOT delete user data (/var/lib/kairos) or
+# configuration (/etc/kairos) — that would be handled by a purge script.
+#
+# Spec reference: §28.7
+set -e
+
+# Stop and disable the service if systemd is available.
+if [ -d /run/systemd/system ]; then
+    systemctl stop kairos.service 2>/dev/null || true
+    systemctl disable kairos.service 2>/dev/null || true
+    systemctl daemon-reload
+fi
+
+# Remove the PID file if it exists.
+rm -f /run/kairos/kairos.pid

@@ -4,6 +4,7 @@
 // ╚════════════════════════════════════════════════════════════════════════════╝
 
 #include "kairos/cli/cli_app.hpp"
+#include "kairos/cli/cli_migrate.hpp"
 #include "kairos/cli/table.hpp"
 #include "kairos/config/config_store.hpp"
 #include "kairos/config/yaml_loader.hpp"
@@ -43,12 +44,14 @@
 #include <thread>
 #include <unordered_map>
 
+
 #ifndef _WIN32
 #include <cerrno>
 #include <csignal>
 #include <cstring>
 #include <sys/types.h>
 #include <signal.h>
+#include "kairos/daemon/win32_service.hpp"
 #endif
 
 namespace fs = std::filesystem;
@@ -185,6 +188,12 @@ int run(int argc, char** argv) {
     bool foreground = false;
     cmd_start->add_flag("-f,--foreground", foreground,
                         "Run in foreground (default behavior)");
+
+#ifndef _WIN32
+    bool as_service = false;
+    cmd_start->add_flag("--service", as_service,
+        "Run as Windows Service (internal — do not use directly)");
+#endif
 
     // ── init-db ───────────────────────────────────────────────────────
     auto* cmd_initdb = app.add_subcommand("init-db",
@@ -378,6 +387,61 @@ int run(int argc, char** argv) {
     cmd_completions->add_option("shell", completions_shell,
         "Shell type: bash, zsh, or fish")->required();
 
+    // ── migrate-config ───────────────────────────────────────────────
+    auto* cmd_migrate_config = app.add_subcommand("migrate-config",
+        "Migrate config from a legacy tool to Kairos format");
+    std::string mc_source;
+    std::string mc_source_config;
+    std::string mc_source_watches;
+    std::string mc_source_workflows;
+    std::string mc_output_dir = ".";
+    bool mc_dry_run = false;
+    cmd_migrate_config->add_option("--source", mc_source,
+        "Source tool: avscheduler, eventwatcher, or localflow")->required();
+    cmd_migrate_config->add_option("--source-config", mc_source_config,
+        "Path to source config file (TOML)");
+    cmd_migrate_config->add_option("--source-watches", mc_source_watches,
+        "Path to source watch-groups file (EventWatcher only)");
+    cmd_migrate_config->add_option("--source-workflows", mc_source_workflows,
+        "Path to source workflows directory (LocalFlow only)");
+    cmd_migrate_config->add_option("--output-dir", mc_output_dir,
+        "Output directory for generated Kairos config");
+    cmd_migrate_config->add_flag("--dry-run", mc_dry_run,
+        "Show what would be generated without writing files");
+
+    // ── migrate-db ───────────────────────────────────────────────────
+    auto* cmd_migrate_db = app.add_subcommand("migrate-db",
+        "Import run history from a legacy tool database");
+    std::string md_source;
+    std::string md_source_db;
+    std::string md_target_db;
+    bool md_dry_run = false;
+    cmd_migrate_db->add_option("--source", md_source,
+        "Source tool: avscheduler or eventwatcher")->required();
+    cmd_migrate_db->add_option("--source-db", md_source_db,
+        "Path to source SQLite database")->required();
+    cmd_migrate_db->add_option("--target-db", md_target_db,
+        "Path to target Kairos database")->required();
+    cmd_migrate_db->add_flag("--dry-run", md_dry_run,
+        "Show what would be imported without writing to target");
+
+    // ── service (Windows only, hidden on POSIX) ──────────────────────
+    auto* cmd_service = app.add_subcommand("service",
+        "Windows Service management (install/uninstall)");
+    cmd_service->require_subcommand(1);
+#ifndef _WIN32
+    cmd_service->group("");  // Hidden on non-Windows.
+#endif
+
+    auto* svc_install = cmd_service->add_subcommand("install",
+        "Install Kairos as a Windows Service");
+    std::string svc_install_config;
+    svc_install->add_option("--config", svc_install_config,
+        "Config file path for the service");
+
+    auto* svc_uninstall = cmd_service->add_subcommand("uninstall",
+        "Uninstall the Kairos Windows Service");
+
     // ── Parse ─────────────────────────────────────────────────────────
     try {
         app.parse(argc, argv);
@@ -457,6 +521,16 @@ int run(int argc, char** argv) {
             cfg->global.get<int>("kairos.logging.async_queue_size", 8192));
 
         observability::initialize_logging(log_cfg);
+
+        // Add this block inside cmd_start->parsed(), before run_daemon():
+    #ifdef _WIN32
+            if (as_service) {
+                // Windows Service mode — delegate to SCM dispatcher.
+                int rc = daemon::run_as_windows_service(cfg);
+                observability::shutdown_logging();
+                return rc;
+            }
+    #endif
 
         int rc = daemon::run_daemon(cfg);
         // Shutdown logging AFTER run_daemon() returns — all its stack
@@ -3189,6 +3263,46 @@ complete -c kairos -n "__fish_seen_subcommand_from logs" -l step -d "Filter by s
             return 1;
         }
         return 0;
+    }
+
+    // ── migrate-config ───────────────────────────────────────────────
+    if (cmd_migrate_config->parsed()) {
+        return handle_migrate_config(mc_source, mc_source_config,
+            mc_source_watches, mc_source_workflows, mc_output_dir,
+            mc_dry_run, json_output);
+    }
+
+    // ── migrate-db ───────────────────────────────────────────────────
+    if (cmd_migrate_db->parsed()) {
+        return handle_migrate_db(md_source, md_source_db, md_target_db,
+            md_dry_run, json_output);
+    }
+
+    // ── service install/uninstall (Windows only) ─────────────────────
+    if (svc_install->parsed()) {
+#ifdef _WIN32
+        auto exe = fs::canonical(argv[0]);
+        auto cfg_path = svc_install_config.empty()
+            ? fs::path() : fs::path(svc_install_config);
+        bool ok = daemon::install_service(exe, cfg_path);
+        return ok ? 0 : 1;
+#else
+        std::cerr << "Service management is only available on Windows.\n"
+                  << "On Linux, use: sudo systemctl enable kairos\n"
+                  << "On macOS, use: launchctl load "
+                     "~/Library/LaunchAgents/com.kairos.daemon.plist\n";
+        return 1;
+#endif
+    }
+
+    if (svc_uninstall->parsed()) {
+#ifdef _WIN32
+        bool ok = daemon::uninstall_service();
+        return ok ? 0 : 1;
+#else
+        std::cerr << "Service management is only available on Windows.\n";
+        return 1;
+#endif
     }
 
     // ── mcp ───────────────────────────────────────────────────────
