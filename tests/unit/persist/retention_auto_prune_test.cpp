@@ -262,6 +262,8 @@ TEST_F(RetentionPruneTest, FullRetentionCycle) {
     writer_->enqueue(PruneOlderThan{
         .cutoff_date = iso_days_ago(30),
     });
+    flush_writer();
+
     //   2. Prune watch samples to keep 5 most recent.
     writer_->enqueue(PruneWatchSamples{
         .watch_group = "data",
