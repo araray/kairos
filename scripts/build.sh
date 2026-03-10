@@ -243,6 +243,15 @@ if [[ -n "$PROFILE" ]]; then
             ENABLE_VAULT="ON"
             ENABLE_TESTS="ON"
             ;;
+        full-san)
+            BUILD_TYPE="Release"
+            ENABLE_HTTP="ON"
+            ENABLE_OTEL="ON"
+            ENABLE_VAULT="ON"
+            ENABLE_TESTS="ON"
+            ENABLE_ASAN="ON"
+            ENABLE_UBSAN="ON"
+            ;;
         full-debug)
             BUILD_TYPE="Debug"
             ENABLE_HTTP="ON"
@@ -260,7 +269,7 @@ if [[ -n "$PROFILE" ]]; then
             ENABLE_UBSAN="ON"
             ;;
         *)
-            _die "Unknown profile: $PROFILE (choose: dev, san, release, ci, full, full-debug, full-san-debug)"
+            _die "Unknown profile: $PROFILE (choose: dev, san, release, ci, full, full-san, full-debug, full-san-debug)"
             ;;
     esac
 fi
