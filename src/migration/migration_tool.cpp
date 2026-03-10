@@ -973,6 +973,16 @@ DbMigrationResult migrate_db(const DbMigrationOptions& opts) {
     // Validate inputs.
     DbMigrationResult r;
 
+    // LocalFlow is stateless — no database to migrate.  Short-circuit
+    // before file existence checks since there is no source_db.
+    if (opts.source == SourceTool::kLocalFlow) {
+        r.messages.push_back({MigrationMessage::Level::kInfo,
+            "localflow",
+            "LocalFlow has no database — nothing to migrate"});
+        r.success = true;
+        return r;
+    }
+
     if (!fs::exists(opts.source_db)) {
         r.messages.push_back({MigrationMessage::Level::kError,
             opts.source_db.string(),
