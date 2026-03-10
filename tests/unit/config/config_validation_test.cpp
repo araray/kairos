@@ -1,6 +1,10 @@
 /// tests/unit/config/config_validation_test.cpp
 // ╔════════════════════════════════════════════════════════════════════════════╗
 // ║  config_validation_test.cpp — Semantic validation tests                   ║
+// ║                                                                           ║
+// ║  Tests that validate_config() catches invalid values and passes valid     ║
+// ║  configurations. Uses LoadOptions::overrides (not Config::set()) to      ║
+// ║  inject test values — this is the canonical confy-cpp pattern.           ║
 // ╚════════════════════════════════════════════════════════════════════════════╝
 
 #include "kairos/config/config_store.hpp"
@@ -18,11 +22,12 @@ protected:
         return confy::Config::load(opts);
     }
 
-    /// Build a Config and override a specific key.
+    /// Build a Config and override a specific key via LoadOptions::overrides.
     confy::Config make_config_with(const std::string& key, const confy::Value& val) {
-        auto cfg = make_default_config();
-        cfg.set(key, val);
-        return cfg;
+        confy::LoadOptions opts;
+        opts.defaults = build_kairos_defaults();
+        opts.overrides[key] = val;
+        return confy::Config::load(opts);
     }
 };
 
@@ -117,6 +122,52 @@ TEST_F(ValidationTest, InvalidColorModeFails) {
         if (e.key_path == "kairos.platform.color") found = true;
     }
     EXPECT_TRUE(found);
+}
+
+// ── Phase 5 Batch 1: Vault validation tests ──────────────────────────
+
+TEST_F(ValidationTest, VaultEnabledWithoutFileFails) {
+    confy::LoadOptions opts;
+    opts.defaults = build_kairos_defaults();
+    opts.overrides["kairos.vault.enabled"] = true;
+    // kairos.vault.file is empty (default) → should fail
+    auto cfg = confy::Config::load(opts);
+    auto errors = validate_config(cfg);
+    bool found = false;
+    for (const auto& e : errors) {
+        if (e.key_path == "kairos.vault.file") found = true;
+    }
+    EXPECT_TRUE(found) << "Should require vault.file when vault.enabled=true";
+}
+
+TEST_F(ValidationTest, VaultDisabledWithoutFileOk) {
+    // vault.enabled=false (default) — no file needed
+    auto cfg = make_default_config();
+    auto errors = validate_config(cfg);
+    for (const auto& e : errors) {
+        EXPECT_NE(e.key_path, "kairos.vault.file")
+            << "Should not require vault.file when vault.enabled=false";
+    }
+}
+
+TEST_F(ValidationTest, PruneIntervalPositive) {
+    auto cfg = make_config_with("kairos.persistence.prune_interval_hours", 0);
+    auto errors = validate_config(cfg);
+    bool found = false;
+    for (const auto& e : errors) {
+        if (e.key_path == "kairos.persistence.prune_interval_hours") found = true;
+    }
+    EXPECT_TRUE(found) << "prune_interval_hours must be > 0";
+}
+
+TEST_F(ValidationTest, MaxSamplesPerGroupPositive) {
+    auto cfg = make_config_with("kairos.persistence.max_samples_per_group", -5);
+    auto errors = validate_config(cfg);
+    bool found = false;
+    for (const auto& e : errors) {
+        if (e.key_path == "kairos.persistence.max_samples_per_group") found = true;
+    }
+    EXPECT_TRUE(found) << "max_samples_per_group must be > 0";
 }
 
 }  // namespace kairos::config

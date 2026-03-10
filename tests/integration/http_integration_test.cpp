@@ -40,7 +40,7 @@
 
 #include <chrono>
 #include <memory>
-#include <stop_source>
+#include <stop_token>
 #include <thread>
 
 namespace kairos::http::test {
