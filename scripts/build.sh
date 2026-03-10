@@ -106,7 +106,9 @@ HEADER
     echo "    --profile san          Debug + ASan + UBSan + tests"
     echo "    --profile release      Release + no tests"
     echo "    --profile ci           Debug + tests + ASan + UBSan"
-    echo "    --profile full         Release + HTTP + tests"
+    echo "    --profile full         Release + HTTP + OTel + Vault + tests"
+    echo "    --profile full-debug   Debug + HTTP + OTel + Vault + tests"
+    echo "    --profile full-san-debug  Debug + all features + ASan + UBSan"
     echo ""
     echo -e "  ${C_BOLD}TOOLCHAIN${C_RESET}"
     echo "    --compiler gcc         Use GCC (sets CC/CXX)"
@@ -258,7 +260,7 @@ if [[ -n "$PROFILE" ]]; then
             ENABLE_UBSAN="ON"
             ;;
         *)
-            _die "Unknown profile: $PROFILE (choose: dev, san, release, ci, full)"
+            _die "Unknown profile: $PROFILE (choose: dev, san, release, ci, full, full-debug, full-san-debug)"
             ;;
     esac
 fi
@@ -302,21 +304,32 @@ CMAKE_ARGS=(
     -DKAIROS_TUI="${ENABLE_TUI}"
 )
 
-# Sanitizer flags
+# Sanitizer flags — accumulate then pass once (multiple -D overwrites).
+SAN_CXX_FLAGS=""
+SAN_C_FLAGS=""
+SAN_LINK_FLAGS=""
 if [[ "$ENABLE_ASAN" == "ON" ]]; then
-    CMAKE_ARGS+=(-DCMAKE_CXX_FLAGS="-fsanitize=address -fno-omit-frame-pointer")
-    CMAKE_ARGS+=(-DCMAKE_C_FLAGS="-fsanitize=address -fno-omit-frame-pointer")
-    CMAKE_ARGS+=(-DCMAKE_EXE_LINKER_FLAGS="-fsanitize=address")
+    SAN_CXX_FLAGS+="-fsanitize=address -fno-omit-frame-pointer "
+    SAN_C_FLAGS+="-fsanitize=address -fno-omit-frame-pointer "
+    SAN_LINK_FLAGS+="-fsanitize=address "
 fi
 if [[ "$ENABLE_UBSAN" == "ON" ]]; then
-    CMAKE_ARGS+=(-DCMAKE_CXX_FLAGS="${CMAKE_CXX_FLAGS:-} -fsanitize=undefined")
-    CMAKE_ARGS+=(-DCMAKE_C_FLAGS="${CMAKE_C_FLAGS:-} -fsanitize=undefined")
-    CMAKE_ARGS+=(-DCMAKE_EXE_LINKER_FLAGS="${CMAKE_EXE_LINKER_FLAGS:-} -fsanitize=undefined")
+    SAN_CXX_FLAGS+="-fsanitize=undefined "
+    SAN_C_FLAGS+="-fsanitize=undefined "
+    SAN_LINK_FLAGS+="-fsanitize=undefined "
 fi
 if [[ "$ENABLE_TSAN" == "ON" ]]; then
-    CMAKE_ARGS+=(-DCMAKE_CXX_FLAGS="-fsanitize=thread")
-    CMAKE_ARGS+=(-DCMAKE_C_FLAGS="-fsanitize=thread")
-    CMAKE_ARGS+=(-DCMAKE_EXE_LINKER_FLAGS="-fsanitize=thread")
+    if [[ "$ENABLE_ASAN" == "ON" ]]; then
+        _die "TSan and ASan are mutually exclusive"
+    fi
+    SAN_CXX_FLAGS+="-fsanitize=thread "
+    SAN_C_FLAGS+="-fsanitize=thread "
+    SAN_LINK_FLAGS+="-fsanitize=thread "
+fi
+if [[ -n "$SAN_CXX_FLAGS" ]]; then
+    CMAKE_ARGS+=(-DCMAKE_CXX_FLAGS="${SAN_CXX_FLAGS% }")
+    CMAKE_ARGS+=(-DCMAKE_C_FLAGS="${SAN_C_FLAGS% }")
+    CMAKE_ARGS+=(-DCMAKE_EXE_LINKER_FLAGS="${SAN_LINK_FLAGS% }")
 fi
 
 if [[ -n "$INSTALL_PREFIX" ]]; then

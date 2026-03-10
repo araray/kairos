@@ -161,8 +161,18 @@ if(KAIROS_OTEL)
     target_link_libraries(kairos_core PUBLIC
         opentelemetry-cpp::trace
         opentelemetry-cpp::ostream_span_exporter
-        opentelemetry-cpp::otlp_http_exporter
     )
+    # OTLP HTTP exporter is only available when the system SDK is installed
+    # (FetchContent builds omit it to avoid protobuf/abseil dependency).
+    if(KAIROS_OTEL_OTLP)
+        target_link_libraries(kairos_core PUBLIC
+            opentelemetry-cpp::otlp_http_exporter
+        )
+        target_compile_definitions(kairos_core PUBLIC KAIROS_OTEL_OTLP)
+        message(STATUS "OTel: OTLP HTTP exporter enabled")
+    else()
+        message(STATUS "OTel: ostream exporter only (no OTLP)")
+    endif()
 endif()
 
 # ── Optional: Ansible Vault support (KAIROS_VAULT=ON) ─────────────────────

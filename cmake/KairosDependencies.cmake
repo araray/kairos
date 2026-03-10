@@ -107,37 +107,61 @@ if(KAIROS_HTTP)
     FetchContent_MakeAvailable(httplib inja)
 endif()
 
-# ── Optional: OpenTelemetry tracing ────────────────────────────────────
-if(KAIROS_OTEL)
-
 # ── Optional: Ansible Vault support (OpenSSL) ─────────────────────────
 if(KAIROS_VAULT)
     find_package(OpenSSL REQUIRED)
     message(STATUS "OpenSSL found: ${OPENSSL_VERSION}")
 endif()
 
+# ── Optional: OpenTelemetry tracing ────────────────────────────────────
+if(KAIROS_OTEL)
+    # Strategy:
+    #   1. Try find_package — system SDK has OTLP with all deps resolved.
+    #   2. FetchContent fallback — build WITHOUT OTLP (which needs
+    #      protobuf + abseil). Use ostream exporter instead.
+    #      Users wanting OTLP export should install the SDK system-wide.
+    #
+    # The KAIROS_OTEL_OTLP variable tracks whether OTLP is available.
+    # otel_tracer.cpp checks #ifdef KAIROS_OTEL_OTLP at compile time.
 
-    # The OTel C++ SDK is heavy (protobuf, gRPC for OTLP).
-    # We use find_package so users can install it system-wide,
-    # or set CMAKE_PREFIX_PATH to a local build.
-    # For OTLP HTTP export (lighter), only libcurl is needed.
     find_package(opentelemetry-cpp QUIET)
-    if(NOT opentelemetry-cpp_FOUND)
-        message(WARNING
+    if(opentelemetry-cpp_FOUND)
+        message(STATUS "opentelemetry-cpp found (system)")
+        # System SDK — assume OTLP HTTP exporter is available.
+        set(KAIROS_OTEL_OTLP ON CACHE BOOL "OTLP HTTP exporter available" FORCE)
+    else()
+        message(STATUS
             "opentelemetry-cpp not found — building from source via FetchContent. "
-            "This will significantly increase build time (~60s). "
-            "Consider installing the SDK system-wide for faster builds.")
+            "OTLP export disabled (requires protobuf + abseil). "
+            "Traces will use ostream exporter (stderr). "
+            "Install the SDK system-wide for OTLP support.")
 
         FetchContent_Declare(opentelemetry-cpp
             GIT_REPOSITORY https://github.com/open-telemetry/opentelemetry-cpp.git
             GIT_TAG        v1.14.2
             GIT_SHALLOW    TRUE
         )
-        set(WITH_OTLP_HTTP ON CACHE BOOL "" FORCE)
+        # No OTLP — avoids protobuf/abseil dependency entirely.
+        set(WITH_OTLP_HTTP OFF CACHE BOOL "" FORCE)
         set(WITH_OTLP_GRPC OFF CACHE BOOL "" FORCE)
+        set(WITH_OTLP OFF CACHE BOOL "" FORCE)
         set(BUILD_TESTING OFF CACHE BOOL "" FORCE)
         set(WITH_EXAMPLES OFF CACHE BOOL "" FORCE)
         set(WITH_BENCHMARK OFF CACHE BOOL "" FORCE)
+        set(WITH_ABSEIL OFF CACHE BOOL "" FORCE)
+        set(OPENTELEMETRY_INSTALL OFF CACHE BOOL "" FORCE)
+
+        # OTel v1.14.2 unconditionally does find_package(Protobuf) at
+        # top level. If it finds protobuf >= 3.22 on the system, it
+        # demands abseil-cpp — even with WITH_OTLP=OFF. Block it.
+        set(CMAKE_DISABLE_FIND_PACKAGE_Protobuf TRUE)
+        set(CMAKE_DISABLE_FIND_PACKAGE_protobuf TRUE)
+
         FetchContent_MakeAvailable(opentelemetry-cpp)
+
+        # Restore protobuf discoverability for the rest of the project.
+        unset(CMAKE_DISABLE_FIND_PACKAGE_Protobuf)
+        unset(CMAKE_DISABLE_FIND_PACKAGE_protobuf)
+        set(KAIROS_OTEL_OTLP OFF CACHE BOOL "OTLP HTTP exporter not available" FORCE)
     endif()
 endif()

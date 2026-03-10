@@ -6,7 +6,8 @@
 // ║  Provides the real implementation of Tracer and SpanHandle.             ║
 // ║                                                                          ║
 // ║  Design:                                                                ║
-// ║    - Uses OTLP HTTP exporter (lighter than gRPC — no protobuf/gRPC).   ║
+// ║    - OTLP HTTP exporter when KAIROS_OTEL_OTLP is defined (system SDK). ║
+// ║    - ostream exporter fallback (FetchContent — no protobuf needed).    ║
 // ║    - TracerProvider is initialized once and stored as a shared_ptr.     ║
 // ║    - OTelSpanHandle wraps opentelemetry::trace::Span.                  ║
 // ║    - OTelTracer wraps opentelemetry::trace::Tracer.                    ║
@@ -24,10 +25,14 @@
 
 #include "kairos/observability/tracer.hpp"
 
+#ifdef KAIROS_OTEL_OTLP
 #include <opentelemetry/exporters/otlp/otlp_http_exporter_factory.h>
 #include <opentelemetry/exporters/otlp/otlp_http_exporter_options.h>
+#endif
+#include <opentelemetry/exporters/ostream/span_exporter_factory.h>
 #include <opentelemetry/sdk/trace/batch_span_processor_factory.h>
 #include <opentelemetry/sdk/trace/batch_span_processor_options.h>
+#include <opentelemetry/sdk/trace/simple_processor_factory.h>
 #include <opentelemetry/sdk/trace/tracer_provider_factory.h>
 #include <opentelemetry/sdk/resource/resource.h>
 #include <opentelemetry/trace/provider.h>
@@ -181,7 +186,9 @@ private:
 /// Real tracer implementation backed by the OpenTelemetry C++ SDK.
 ///
 /// Initialization:
-///   1. Create OTLP HTTP exporter → endpoint (e.g., localhost:4318)
+///   1. Create exporter:
+///      - OTLP HTTP (when KAIROS_OTEL_OTLP defined) → collector endpoint
+///      - ostream (fallback) → stderr
 ///   2. Create BatchSpanProcessor → batches spans for export
 ///   3. Create TracerProvider → owns the processor
 ///   4. Get a named Tracer ("kairos") → creates spans
@@ -190,9 +197,11 @@ public:
     OTelTracer(std::string_view endpoint,
                std::string_view service_name)
     {
-        // ── Configure OTLP HTTP exporter ──────────────────────────
-        namespace otlp = opentelemetry::exporter::otlp;
         namespace sdk_trace = opentelemetry::sdk::trace;
+
+#ifdef KAIROS_OTEL_OTLP
+        // ── OTLP HTTP exporter (system SDK with protobuf) ─────────
+        namespace otlp = opentelemetry::exporter::otlp;
 
         otlp::OtlpHttpExporterOptions exporter_opts;
         exporter_opts.url = std::string(endpoint);
@@ -205,7 +214,6 @@ public:
         }
         // If the endpoint doesn't end with /v1/traces, append it.
         if (exporter_opts.url.find("/v1/traces") == std::string::npos) {
-            // Add /v1/traces path if it looks like just host:port.
             if (exporter_opts.url.back() != '/') {
                 exporter_opts.url += "/";
             }
@@ -215,7 +223,7 @@ public:
         auto exporter = otlp::OtlpHttpExporterFactory::Create(
             exporter_opts);
 
-        // ── Configure batch span processor ────────────────────────
+        // Batch processor for OTLP (async, batched export).
         sdk_trace::BatchSpanProcessorOptions processor_opts;
         processor_opts.max_queue_size = 2048;
         processor_opts.schedule_delay_millis =
@@ -224,6 +232,19 @@ public:
 
         auto processor = sdk_trace::BatchSpanProcessorFactory::Create(
             std::move(exporter), processor_opts);
+#else
+        // ── ostream exporter (FetchContent fallback — no protobuf) ─
+        // Exports spans to stderr in human-readable format.
+        // Suitable for local development and debugging.
+        (void)endpoint;  // Unused without OTLP.
+
+        auto exporter =
+            opentelemetry::exporter::trace::OStreamSpanExporterFactory::Create();
+
+        // Simple processor for ostream (synchronous, no batching).
+        auto processor = sdk_trace::SimpleSpanProcessorFactory::Create(
+            std::move(exporter));
+#endif
 
         // ── Configure resource (service name) ─────────────────────
         auto resource = opentelemetry::sdk::resource::Resource::Create({

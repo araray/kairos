@@ -193,9 +193,16 @@ select_build_dir() {
         return 1
     fi
 
-    echo ""
-    echo -e "${C_BOLD}Multiple build directories found:${C_RESET}"
-    echo ""
+    # ── IMPORTANT ──────────────────────────────────────────────────
+    # This function is called via command substitution:
+    #   BUILD_DIR=$(select_build_dir ...)
+    # Therefore ALL interactive output (menu, prompts, errors) MUST
+    # go to stderr (>&2). Only the final selected path goes to stdout.
+    # ───────────────────────────────────────────────────────────────
+
+    echo "" >&2
+    echo -e "${C_BOLD}Multiple build directories found:${C_RESET}" >&2
+    echo "" >&2
     for i in "${!dirs[@]}"; do
         local dir="${dirs[$i]}"
         local rel_dir="${dir#${PROJECT_ROOT}/}"
@@ -211,39 +218,49 @@ select_build_dir() {
         fi
 
         if [[ -n "$build_type" ]]; then
-            echo -e "  ${C_CYAN}$((i + 1))${C_RESET}) ${C_BOLD}${rel_dir}${C_RESET}  ${C_DIM}[${build_type}]${C_RESET}${marker}"
+            echo -e "  ${C_CYAN}$((i + 1))${C_RESET}) ${C_BOLD}${rel_dir}${C_RESET}  ${C_DIM}[${build_type}]${C_RESET}${marker}" >&2
         else
-            echo -e "  ${C_CYAN}$((i + 1))${C_RESET}) ${C_BOLD}${rel_dir}${C_RESET}${marker}"
+            echo -e "  ${C_CYAN}$((i + 1))${C_RESET}) ${C_BOLD}${rel_dir}${C_RESET}${marker}" >&2
         fi
     done
-    echo ""
+    echo "" >&2
 
     local choice
     while true; do
-        echo -ne "${C_YELLOW}Select build directory${C_RESET} (1-${count}, or ${C_DIM}Enter${C_RESET} for last used): "
+        echo -ne "${C_YELLOW}Select build directory${C_RESET} (1-${count}, or ${C_DIM}Enter${C_RESET} for last used): " >&2
         read -r choice
 
+        # Enter with a valid cache → use cached directory.
         if [[ -z "$choice" ]] && [[ -f "$BUILD_CACHE" ]]; then
             local cached_dir
             cached_dir="$(cat "$BUILD_CACHE")"
             for dir in "${dirs[@]}"; do
                 if [[ "$dir" == "$cached_dir" ]]; then
-                    echo "$cached_dir"
+                    echo "$cached_dir"  # → stdout (captured by caller)
                     return 0
                 fi
             done
-            echo -e "${C_YELLOW}Cached directory no longer valid, please select manually.${C_RESET}"
+            echo -e "${C_YELLOW}Cached directory no longer valid, please select manually.${C_RESET}" >&2
             continue
         fi
 
-        if [[ "$choice" =~ ^[0-9]+$ ]] && [[ "$choice" -ge 1 ]] && [[ "$choice" -le "$count" ]]; then
-            local selected="${dirs[$((choice - 1))]}"
+        # Enter with no cache → pick the first directory.
+        if [[ -z "$choice" ]] && [[ ! -f "$BUILD_CACHE" ]]; then
+            local selected="${dirs[0]}"
             echo "$selected" > "$BUILD_CACHE"
-            echo "$selected"
+            echo "$selected"  # → stdout
             return 0
         fi
 
-        echo -e "${C_RED}Invalid selection. Enter a number between 1 and ${count}.${C_RESET}"
+        # Numeric selection.
+        if [[ "$choice" =~ ^[0-9]+$ ]] && [[ "$choice" -ge 1 ]] && [[ "$choice" -le "$count" ]]; then
+            local selected="${dirs[$((choice - 1))]}"
+            echo "$selected" > "$BUILD_CACHE"
+            echo "$selected"  # → stdout
+            return 0
+        fi
+
+        echo -e "${C_RED}Invalid selection. Enter a number between 1 and ${count}.${C_RESET}" >&2
     done
 }
 
@@ -293,7 +310,12 @@ if [[ ! -f "${BUILD_DIR}/CTestTestfile.cmake" ]]; then
     _err "Build directory is invalid: ${BUILD_DIR}"
     echo -e "  ${C_DIM}Missing CTestTestfile.cmake${C_RESET}"
     echo ""
-    echo -e "  ${C_YELLOW}Hint:${C_RESET} Run ${C_BOLD}./scripts/build.sh${C_RESET} first."
+    if [[ -f "${BUILD_DIR}/CMakeCache.txt" ]]; then
+        echo -e "  ${C_YELLOW}Hint:${C_RESET} Directory exists but tests were not configured."
+        echo -e "        Run ${C_BOLD}./scripts/build.sh --tests${C_RESET} first."
+    else
+        echo -e "  ${C_YELLOW}Hint:${C_RESET} Run ${C_BOLD}./scripts/build.sh${C_RESET} first."
+    fi
     exit 1
 fi
 

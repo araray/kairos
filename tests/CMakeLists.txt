@@ -623,8 +623,13 @@ if(KAIROS_OTEL)
     target_link_libraries(test_otel_tracer PRIVATE
         opentelemetry-cpp::trace
         opentelemetry-cpp::ostream_span_exporter
-        opentelemetry-cpp::otlp_http_exporter
     )
+    if(KAIROS_OTEL_OTLP)
+        target_link_libraries(test_otel_tracer PRIVATE
+            opentelemetry-cpp::otlp_http_exporter
+        )
+        target_compile_definitions(test_otel_tracer PRIVATE KAIROS_OTEL_OTLP)
+    endif()
 endif()
 gtest_discover_tests(test_otel_tracer)
 

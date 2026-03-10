@@ -162,28 +162,47 @@ function Select-BuildDir {
     if ($Dirs.Count -eq 0) { return "" }
     Write-Host ""; Write-Host "$esc[1mMultiple build directories found:$esc[0m"; Write-Host ""
     for ($i = 0; $i -lt $Dirs.Count; $i++) {
-        $dir = $Dirs[$i]; $relDir = $dir.Replace("$ProjectRoot\", "")
+        $dir = $Dirs[$i]; $relDir = $dir.Replace("$ProjectRoot\", "").Replace("$ProjectRoot/", "")
         $marker = ""
         if ((Test-Path $BuildCache) -and (Get-Content $BuildCache -ErrorAction SilentlyContinue) -eq $dir) {
             $marker = " $esc[32m(last used)$esc[0m"
         }
-        Write-Host "  $esc[36m$($i + 1)$esc[0m) $esc[1m$relDir$esc[0m$marker"
+        # Read build type from CMakeCache.txt.
+        $buildType = ""
+        $cacheFile = Join-Path $dir "CMakeCache.txt"
+        if (Test-Path $cacheFile) {
+            $line = Get-Content $cacheFile | Where-Object { $_ -match "^CMAKE_BUILD_TYPE:" }
+            if ($line -match "=(.+)$") { $buildType = $Matches[1] }
+        }
+        $typeTag = if ($buildType) { " $esc[2m[$buildType]$esc[0m" } else { "" }
+        Write-Host "  $esc[36m$($i + 1)$esc[0m) $esc[1m$relDir$esc[0m$typeTag$marker"
     }
     Write-Host ""
     while ($true) {
         Write-Host "$esc[33mSelect build directory$esc[0m (1-$($Dirs.Count), or Enter for last used): " -NoNewline
         $choice = Read-Host
-        if ([string]::IsNullOrWhiteSpace($choice) -and (Test-Path $BuildCache)) {
-            $cached = Get-Content $BuildCache -ErrorAction SilentlyContinue
-            if ($cached -and ($Dirs -contains $cached)) { return $cached }
+
+        # Bare Enter: try cache, then fall back to first option.
+        if ([string]::IsNullOrWhiteSpace($choice)) {
+            if (Test-Path $BuildCache) {
+                $cached = Get-Content $BuildCache -ErrorAction SilentlyContinue
+                if ($cached -and ($Dirs -contains $cached)) { return $cached }
+                Write-Host "$esc[33mCached directory no longer valid, please select manually.$esc[0m"
+                continue
+            }
+            # No cache — pick first directory.
+            $selected = $Dirs[0]
+            Set-Content -Path $BuildCache -Value $selected
+            return $selected
         }
+
         $num = 0
         if ([int]::TryParse($choice, [ref]$num) -and $num -ge 1 -and $num -le $Dirs.Count) {
             $selected = $Dirs[$num - 1]
             Set-Content -Path $BuildCache -Value $selected
             return $selected
         }
-        Write-Host "$esc[31mInvalid selection.$esc[0m"
+        Write-Host "$esc[31mInvalid selection. Enter a number between 1 and $($Dirs.Count).$esc[0m"
     }
 }
 

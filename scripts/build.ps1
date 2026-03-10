@@ -36,7 +36,7 @@ param(
     [switch]$Asan,
 
     # Profiles
-    [ValidateSet("", "dev", "san", "release", "ci", "full")]
+    [ValidateSet("", "dev", "san", "release", "ci", "full", "full-debug", "full-san-debug")]
     [string]$Profile = "",
 
     # Toolchain
@@ -128,7 +128,9 @@ if ($ShowHelp)
     Write-Host "    -Profile san           Debug + ASan + tests"
     Write-Host "    -Profile release       Release, no tests"
     Write-Host "    -Profile ci            Debug + ASan + tests"
-    Write-Host "    -Profile full          Release + HTTP + tests"
+    Write-Host "    -Profile full          Release + HTTP + OTel + Vault + tests"
+    Write-Host "    -Profile full-debug    Debug + HTTP + OTel + Vault + tests"
+    Write-Host "    -Profile full-san-debug  Debug + all features + ASan"
     Write-Host ""
     Write-Host "  TOOLCHAIN"
     Write-Host "    -Compiler msvc         Use MSVC (default)"
@@ -188,6 +190,12 @@ switch ($Profile)
     }
     "full"
     { $BuildType = "Release"; $EnableHttp = "ON"; $EnableOtel = "ON"; $EnableVault = "ON"; $EnableTests = "ON"
+    }
+    "full-debug"
+    { $BuildType = "Debug"; $EnableHttp = "ON"; $EnableOtel = "ON"; $EnableVault = "ON"; $EnableTests = "ON"
+    }
+    "full-san-debug"
+    { $BuildType = "Debug"; $EnableHttp = "ON"; $EnableOtel = "ON"; $EnableVault = "ON"; $EnableTests = "ON"; $EnableAsan = "ON"
     }
 }
 
