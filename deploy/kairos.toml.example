@@ -1,71 +1,431 @@
 # ╔════════════════════════════════════════════════════════════════════════════╗
-# ║  kairos.toml — Example Kairos Configuration                               ║
-# ║                                                                           ║
-# ║  Copy this file to ~/.config/kairos/kairos.toml (Linux)                   # ║  or ~/Library/Application Support/kairos/kairos.toml (macOS)              ║
-# ║  or %APPDATA%\kairos\kairos.toml (Windows)                               ║
-# ║                                                                           ║
-# ║  All keys are namespaced under [kairos].                                  ║
-# ║  Environment variables override with KAIROS_ prefix                       ║
-# ║  (e.g., KAIROS_LOGGING_LEVEL=debug).                                     ║
+# ║  kairos.toml — Kairos Orchestration Daemon Configuration Reference       ║
+# ║                                                                          ║
+# ║  This file documents EVERY configuration key with its default value,     ║
+# ║  valid range, environment variable equivalent, and description.          ║
+# ║                                                                          ║
+# ║  Config file locations (searched in order):                              ║
+# ║    1. --config <path> CLI flag                                           ║
+# ║    2. KAIROS_CONFIG_FILE environment variable                            ║
+# ║    3. Platform default:                                                  ║
+# ║       Linux:   $XDG_CONFIG_HOME/kairos/kairos.toml                       ║
+# ║                (~/.config/kairos/kairos.toml)                            ║
+# ║       macOS:   ~/Library/Application Support/kairos/kairos.toml          ║
+# ║       Windows: %APPDATA%\kairos\kairos.toml                             ║
+# ║    4. ./kairos.toml (current directory)                                  ║
+# ║                                                                          ║
+# ║  Layered precedence (lowest → highest):                                  ║
+# ║    1. Hardcoded defaults (this file documents them)                      ║
+# ║    2. Config file (this TOML file)                                       ║
+# ║    3. .env file (in config directory)                                    ║
+# ║    4. Environment variables (KAIROS_ prefix)                             ║
+# ║    5. CLI overrides (--set key=value)                                    ║
+# ║                                                                          ║
+# ║  Environment variable mapping:                                           ║
+# ║    kairos.logging.level     → KAIROS_LOGGING_LEVEL                       ║
+# ║    kairos.runners.worker_pool_size → KAIROS_RUNNERS_WORKER__POOL__SIZE   ║
+# ║    (dots → underscores; underscores in key names → double underscore)    ║
 # ╚════════════════════════════════════════════════════════════════════════════╝
 
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# § CORE — mandatory paths and directory layout
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
 [kairos]
-# Core paths (mandatory — must be set via config, env, or CLI).
+
+# Data directory for runtime state (database, lock file, samples).
+# MANDATORY — must be set via config, env, or CLI.
+#   Env: KAIROS_DATA__DIR
+#   Validation: must be a writable directory (created on first start)
 data_dir = "~/.local/share/kairos"
+
+# Path to the SQLite database file.
+# MANDATORY — must be set via config, env, or CLI.
+#   Env: KAIROS_DB__PATH
+#   Validation: parent directory must exist and be writable
 db_path  = "~/.local/share/kairos/kairos.db"
 
-# Directories for workflow and watch-group YAML definitions.
-workflows_dir    = "workflows"
+# Directory containing workflow YAML definitions (*.yaml, *.yml).
+# Relative paths are resolved relative to the config file location.
+#   Env: KAIROS_WORKFLOWS__DIR
+#   Default: "workflows"
+workflows_dir = "workflows"
+
+# Directory containing watch-group YAML definitions (*.yaml, *.yml).
+# Relative paths are resolved relative to the config file location.
+#   Env: KAIROS_WATCH__GROUPS__DIR
+#   Default: "watch_groups"
 watch_groups_dir = "watch_groups"
 
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# § LOGGING — structured log output
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
 [kairos.logging]
-level              = "info"        # trace|debug|info|warn|error|critical
-format             = "auto"        # auto|json|text (auto = json if not TTY)
-# file             = "/var/log/kairos/kairos.log"  # uncomment to enable file logging
-max_file_size_mb   = 100
-max_files          = 5
-async_queue_size   = 8192
+
+# Log verbosity level.
+#   Values: trace | debug | info | warn | error | critical
+#   Env: KAIROS_LOGGING_LEVEL
+#   Default: "info"
+#   CLI override: --log-level <level>
+level = "info"
+
+# Log format.
+#   "auto"  — JSON when stdout is not a TTY (piped/redirected), text in terminal
+#   "json"  — Always JSON: {"ts":"…","level":"info","msg":"…","run_id":"…"}
+#   "text"  — Always text: [2026-03-08 14:30:05] [INFO] [kairos] message
+#   Env: KAIROS_LOGGING_FORMAT
+#   Default: "auto"
+format = "auto"
+
+# Log file path. When set, logs are written to this file in addition to stdout.
+# The file uses rotating JSON format regardless of the `format` setting.
+#   Env: KAIROS_LOGGING_FILE
+#   Default: "" (disabled)
+# file = "/var/log/kairos/kairos.log"
+
+# Maximum size of each log file before rotation (megabytes).
+#   Env: KAIROS_LOGGING_MAX__FILE__SIZE__MB
+#   Default: 100
+#   Range: 1–10000
+max_file_size_mb = 100
+
+# Maximum number of rotated log files to retain.
+#   Env: KAIROS_LOGGING_MAX__FILES
+#   Default: 5
+#   Range: 1–100
+max_files = 5
+
+# Size of the async logging queue (spdlog).
+# Higher values reduce the chance of log drops under heavy load.
+#   Env: KAIROS_LOGGING_ASYNC__QUEUE__SIZE
+#   Default: 8192
+#   Range: 1024–1048576
+async_queue_size = 8192
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# § RUNNERS — process execution engine
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 [kairos.runners]
-worker_pool_size   = 4
-default_timeout_s  = 3600
-kill_timeout_s     = 10
-# default_shell    = "/bin/bash"   # empty = platform default
+
+# Number of concurrent worker threads in the runner pool.
+# Each worker can execute one step at a time.
+#   Env: KAIROS_RUNNERS_WORKER__POOL__SIZE
+#   Default: 4
+#   Range: 1–64
+worker_pool_size = 4
+
+# Default timeout for individual steps (seconds).
+# Can be overridden per-step in workflow YAML.
+#   Env: KAIROS_RUNNERS_DEFAULT__TIMEOUT__S
+#   Default: 3600 (1 hour)
+#   Range: 1–86400
+default_timeout_s = 3600
+
+# Grace period between SIGTERM and SIGKILL when terminating a timed-out process.
+#   Env: KAIROS_RUNNERS_KILL__TIMEOUT__S
+#   Default: 10
+#   Range: 1–300
+kill_timeout_s = 10
+
+# Default shell for command execution.
+# Empty string = platform default (/bin/sh on POSIX, cmd.exe on Windows).
+#   Env: KAIROS_RUNNERS_DEFAULT__SHELL
+#   Default: "" (platform default)
+# default_shell = "/bin/bash"
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# § SCHEDULER — time-based trigger engine
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 [kairos.scheduler]
+
+# Resolution of the scheduler's timer tick (milliseconds).
+# Lower values increase precision but use more CPU.
+# The scheduler sleeps until the next fire time, then wakes at this resolution.
+#   Env: KAIROS_SCHEDULER_TICK__RESOLUTION__MS
+#   Default: 100
+#   Range: 10–10000
 tick_resolution_ms = 100
-misfire_grace_s    = 300
+
+# Default grace period for misfire detection (seconds).
+# If a trigger fires later than this grace period after its scheduled time,
+# it is considered a misfire and handled per the trigger's misfire_policy.
+#   Env: KAIROS_SCHEDULER_MISFIRE__GRACE__S
+#   Default: 300 (5 minutes)
+#   Range: 1–86400
+misfire_grace_s = 300
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# § WATCH — filesystem monitoring engine
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 [kairos.watch]
-default_mode       = "hybrid"      # native|sample|hybrid
-sample_interval_s  = 30
-max_depth          = 10
-hash_policy        = "mtime+size"  # mtime+size|sha256
-follow_symlinks    = false
-exclude_patterns   = [".git", "node_modules", "__pycache__", ".DS_Store"]
+
+# Default watch mode for new watch groups (overridable per group in YAML).
+#   "native"  — inotify/FSEvents/RDCW only (real-time, may miss overflow)
+#   "sample"  — periodic scan+diff only (reliable, not real-time)
+#   "hybrid"  — native + periodic verification (recommended)
+#   Env: KAIROS_WATCH_DEFAULT__MODE
+#   Default: "hybrid"
+default_mode = "hybrid"
+
+# Default interval between sample scans (seconds).
+# Overridable per watch group in YAML (sample_rate field).
+#   Env: KAIROS_WATCH_SAMPLE__INTERVAL__S
+#   Default: 30
+#   Range: 5–86400
+sample_interval_s = 30
+
+# Maximum directory recursion depth for scanning.
+#   Env: KAIROS_WATCH_MAX__DEPTH
+#   Default: 10
+#   Range: 1–100
+max_depth = 10
+
+# Hash policy for file change detection.
+#   "mtime+size" — fast: uses file modification time + size (no content read)
+#   "sha256"     — precise: computes SHA-256 of file content (slower)
+#   Env: KAIROS_WATCH_HASH__POLICY
+#   Default: "mtime+size"
+hash_policy = "mtime+size"
+
+# Whether to follow symlinks during directory scanning.
+# Cycle detection is always active when symlinks are followed.
+#   Env: KAIROS_WATCH_FOLLOW__SYMLINKS
+#   Default: false
+follow_symlinks = false
+
+# Global exclude patterns (applied to all watch groups in addition to
+# per-group exclude_globs). Uses glob syntax.
+#   Env: KAIROS_WATCH_EXCLUDE__PATTERNS (comma-separated)
+#   Default: [".git", "node_modules", "__pycache__", ".DS_Store"]
+exclude_patterns = [".git", "node_modules", "__pycache__", ".DS_Store"]
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# § PERSISTENCE — SQLite database
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 [kairos.persistence]
-retention_days     = 90
-batch_size         = 100
-flush_interval_ms  = 1000
-wal_mode           = true
+
+# Retention period for run history (days).
+# Runs, jobs, steps, and log chunks older than this are pruned automatically.
+#   Env: KAIROS_PERSISTENCE_RETENTION__DAYS
+#   Default: 90
+#   Range: 1–3650
+retention_days = 90
+
+# Batch size for async DB writer (number of statements per batch commit).
+#   Env: KAIROS_PERSISTENCE_BATCH__SIZE
+#   Default: 100
+#   Range: 1–10000
+batch_size = 100
+
+# Maximum time between DB writer flush operations (milliseconds).
+# The writer flushes either when the batch is full or this interval elapses.
+#   Env: KAIROS_PERSISTENCE_FLUSH__INTERVAL__MS
+#   Default: 1000
+#   Range: 100–60000
+flush_interval_ms = 1000
+
+# Enable WAL (Write-Ahead Logging) mode for SQLite.
+# WAL mode allows concurrent readers while writing. Strongly recommended.
+#   Env: KAIROS_PERSISTENCE_WAL__MODE
+#   Default: true
+wal_mode = true
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# § MCP — Model Context Protocol (agent interface)
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 [kairos.mcp]
-enabled            = false
-transport          = "stdio"
-log_chunk_size     = 4096
+
+# Enable MCP server for AI agent integration.
+# When enabled, `kairos mcp` starts a stdio JSON-RPC 2.0 server.
+#   Env: KAIROS_MCP_ENABLED
+#   Default: false
+enabled = false
+
+# MCP transport type. Currently only "stdio" is supported.
+#   Env: KAIROS_MCP_TRANSPORT
+#   Default: "stdio"
+transport = "stdio"
+
+# Maximum size of log chunks sent in MCP notifications (bytes).
+# Larger chunks reduce notification count but increase memory per message.
+#   Env: KAIROS_MCP_LOG__CHUNK__SIZE
+#   Default: 4096
+#   Range: 512–65536
+log_chunk_size = 4096
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# § PLATFORM — OS-specific settings
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 [kairos.platform]
-# pid_file         = ""            # auto-detected
-# default_shell    = ""            # platform default
-color              = "auto"        # auto|always|never
+
+# PID/lock file path. When empty, defaults to <data_dir>/kairos.lock.
+# Used for single-instance enforcement.
+#   Env: KAIROS_PLATFORM_PID__FILE
+#   Default: "" (auto-detected)
+# pid_file = ""
+
+# Default shell for step execution (overrides platform default).
+# Empty = /bin/sh on POSIX, cmd.exe on Windows.
+#   Env: KAIROS_PLATFORM_DEFAULT__SHELL
+#   Default: "" (platform default)
+# default_shell = "/bin/bash"
+
+# ANSI color mode for CLI output.
+#   "auto"   — colors when stdout is a TTY and NO_COLOR is not set
+#   "always" — always use ANSI colors
+#   "never"  — never use colors
+#   Env: KAIROS_PLATFORM_COLOR
+#   Default: "auto"
+#   Note: the NO_COLOR environment variable (https://no-color.org/) is respected.
+color = "auto"
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# § HTTP — optional HTTP API and Web UI
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 [kairos.http]
-enabled            = false
-listen_addr        = "127.0.0.1"
-listen_port        = 8420
-# api_token        = ""            # set for API authentication
+
+# Enable HTTP server. Requires KAIROS_HTTP=ON at build time.
+#   Env: KAIROS_HTTP_ENABLED
+#   Default: false
+enabled = false
+
+# Listen address. Use "127.0.0.1" for local-only, "0.0.0.0" for all interfaces.
+#   Env: KAIROS_HTTP_LISTEN__ADDR
+#   Default: "127.0.0.1"
+listen_addr = "127.0.0.1"
+
+# Listen port.
+#   Env: KAIROS_HTTP_LISTEN__PORT
+#   Default: 8420
+#   Range: 1–65535
+listen_port = 8420
+
+# API authentication token. When set, all requests must include
+# Authorization: Bearer <token>. When empty, no auth is required.
+#   Env: KAIROS_HTTP_API__TOKEN
+#   Default: "" (no auth)
+# api_token = ""
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# § DAEMON — lifecycle management
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 [kairos.daemon]
+
+# Maximum time to wait for graceful shutdown (seconds).
+# After this, the daemon force-terminates.
+#   Env: KAIROS_DAEMON_SHUTDOWN__TIMEOUT__S
+#   Default: 90
+#   Range: 5–600
 shutdown_timeout_s = 90
-pipeline_drain_s   = 30
+
+# Maximum time to wait for the pipeline to drain during shutdown (seconds).
+# In-flight runs are allowed to complete within this window.
+#   Env: KAIROS_DAEMON_PIPELINE__DRAIN__S
+#   Default: 30
+#   Range: 1–300
+pipeline_drain_s = 30
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# § TELEMETRY — metrics and observability
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+[kairos.telemetry]
+
+# Interval between periodic metrics snapshots to SQLite (seconds).
+# Set to 0 to disable metrics persistence.
+#   Env: KAIROS_TELEMETRY_METRICS__SNAPSHOT__INTERVAL__SECONDS
+#   Default: 60
+#   Range: 0–3600
+metrics_snapshot_interval_seconds = 60
+
+# Retention period for metrics snapshots (days).
+# Snapshots older than this are pruned automatically.
+#   Env: KAIROS_TELEMETRY_METRICS__RETENTION__DAYS
+#   Default: 7
+#   Range: 1–365
+metrics_retention_days = 7
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# § KEL — expression language safety limits
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+[kairos.kel]
+
+# Maximum number of AST nodes in a parsed expression.
+# Prevents pathologically large expressions.
+#   Env: KAIROS_KEL_MAX__AST__NODES
+#   Default: 1024
+#   Range: 16–65536
+max_ast_nodes = 1024
+
+# Maximum nesting depth of the AST.
+# Prevents stack overflow from deeply nested parenthesized expressions.
+#   Env: KAIROS_KEL_MAX__AST__DEPTH
+#   Default: 32
+#   Range: 4–256
+max_ast_depth = 32
+
+# Maximum total evaluation time (milliseconds).
+# Prevents runaway evaluations (e.g., from expensive database queries in
+# job().finished_within or previous()).
+#   Env: KAIROS_KEL_MAX__EVAL__TIME__MS
+#   Default: 100
+#   Range: 10–10000
+max_eval_time_ms = 100
+
+# Maximum string result length (bytes).
+# Prevents memory exhaustion from string concatenation.
+#   Env: KAIROS_KEL_MAX__STRING__LENGTH
+#   Default: 65536 (64 KB)
+#   Range: 256–1048576
+max_string_length = 65536
+
+# Maximum list result length (elements).
+# Prevents memory exhaustion from list operations.
+#   Env: KAIROS_KEL_MAX__LIST__LENGTH
+#   Default: 10000
+#   Range: 10–1000000
+max_list_length = 10000
+
+# Maximum number of arguments per function call.
+# Hardcoded ceiling (not configurable beyond this).
+#   Note: hardcoded at 16, this key exists for documentation.
+# max_function_args = 16
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# § SECURITY — secret management
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+[kairos.security]
+
+# Path to the Ansible Vault encrypted secrets file.
+# Requires KAIROS_VAULT=ON at build time and OpenSSL.
+#   Env: KAIROS_SECURITY_VAULT__FILE
+#   Default: "" (disabled)
+# vault_file = "/etc/kairos/secrets.vault"
+
+# Path to the vault password file (alternative to KAIROS_VAULT_PASSWORD env var).
+#   Env: KAIROS_SECURITY_VAULT__PASSWORD__FILE
+#   Default: "" (use env var instead)
+# vault_password_file = "/etc/kairos/.vault-pass"
