@@ -691,9 +691,24 @@ int run_daemon(std::shared_ptr<const kairos::config::ConfigState> config) {
             if (prune_elapsed >= prune_interval_s && retention_days > 0) {
                 // 1. Prune old runs (CASCADE deletes run_jobs, run_steps,
                 //    log_chunks via ON DELETE CASCADE).
-                std::string cutoff_date =
-                    "datetime('now', '-" + std::to_string(retention_days) +
-                    " days')";
+                // Compute actual ISO 8601 cutoff timestamp — SQLite
+                // parameters are literal values, not evaluated SQL.
+                auto wall_now = std::chrono::system_clock::now();
+                auto cutoff_tp = wall_now -
+                    std::chrono::hours(retention_days * 24);
+                auto cutoff_tt = std::chrono::system_clock::to_time_t(
+                    cutoff_tp);
+                std::tm cutoff_tm{};
+#ifdef _WIN32
+                gmtime_s(&cutoff_tm, &cutoff_tt);
+#else
+                gmtime_r(&cutoff_tt, &cutoff_tm);
+#endif
+                char cutoff_buf[32];
+                std::strftime(cutoff_buf, sizeof(cutoff_buf),
+                              "%Y-%m-%dT%H:%M:%SZ", &cutoff_tm);
+                std::string cutoff_date(cutoff_buf);
+
                 db_writer.enqueue(persist::PruneOlderThan{
                     .cutoff_date = cutoff_date,
                 });
