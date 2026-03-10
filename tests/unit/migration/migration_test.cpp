@@ -276,14 +276,14 @@ command = "echo hello"
 }
 
 TEST_F(MigrationTest, AVSchedulerConfigConditionWarning) {
-    auto source = write_temp("avs/config.toml", R"(
+    auto source = write_temp("avs/config.toml", R"TOML(
 [jobs.analysis]
 type = "PYTHON"
 schedule_type = "cron"
 schedule = "0 3 * * *"
 command = "python3 analyze.py"
 condition = "any(dep.last_run_successful for dep in [build, test])"
-)");
+)TOML");
 
     auto out = test_dir_ / "output_warn";
 

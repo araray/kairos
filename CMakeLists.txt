@@ -134,6 +134,7 @@ target_link_libraries(kairos_platform PUBLIC kairos_core)
 add_executable(kairos
     src/main.cpp
     src/cli/cli_app.cpp
+    src/cli/cli_migrate.cpp
     src/daemon/daemon.cpp
     src/daemon/command_reader.cpp
 )
