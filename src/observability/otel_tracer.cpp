@@ -30,6 +30,7 @@
 #include <opentelemetry/exporters/otlp/otlp_http_exporter_options.h>
 #endif
 #include <opentelemetry/exporters/ostream/span_exporter_factory.h>
+#include <opentelemetry/common/attribute_value.h>
 #include <opentelemetry/sdk/trace/batch_span_processor_factory.h>
 #include <opentelemetry/sdk/trace/batch_span_processor_options.h>
 #include <opentelemetry/sdk/trace/simple_processor_factory.h>
@@ -255,8 +256,12 @@ public:
         });
 
         // ── Create tracer provider ────────────────────────────────
-        provider_ = sdk_trace::TracerProviderFactory::Create(
+        // TracerProviderFactory::Create returns unique_ptr<sdk TracerProvider>.
+        // We need nostd::shared_ptr<trace::TracerProvider> for the global.
+        auto provider_uptr = sdk_trace::TracerProviderFactory::Create(
             std::move(processor), resource);
+        provider_ = opentelemetry::nostd::shared_ptr<
+            opentelemetry::trace::TracerProvider>(provider_uptr.release());
 
         // Set as global provider (allows OTel propagation to work).
         opentelemetry::trace::Provider::SetTracerProvider(provider_);
@@ -327,11 +332,27 @@ public:
         // Create a link to the target span's context.
         opentelemetry::nostd::shared_ptr<opentelemetry::trace::Span> span;
         if (otel_link && otel_link->otel_span()) {
-            // Create with span link.
+            // Create with span link. Use explicit types to satisfy
+            // the OTel SDK's template deduction requirements.
             auto link_ctx = otel_link->otel_span()->GetContext();
+
+            // The StartSpan overload wants:
+            //   (name, attributes_init_list, links_init_list, opts)
+            // We pass empty attributes and one link with empty link-attrs.
+            using AttrKV = std::pair<
+                opentelemetry::nostd::string_view,
+                opentelemetry::common::AttributeValue>;
+            using LinkKV = std::pair<
+                opentelemetry::trace::SpanContext,
+                std::initializer_list<AttrKV>>;
+
+            std::initializer_list<AttrKV> empty_attrs = {};
+            std::initializer_list<LinkKV> links = {{link_ctx, {}}};
+
             span = tracer_->StartSpan(
                 opentelemetry::nostd::string_view(name.data(), name.size()),
-                {{link_ctx}},
+                empty_attrs,
+                links,
                 opts);
         } else {
             span = tracer_->StartSpan(

@@ -16,6 +16,7 @@
 #pragma once
 
 #include <cstring>
+#include <functional>
 #include <optional>
 #include <string>
 #include <string_view>
