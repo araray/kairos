@@ -65,23 +65,31 @@ protected:
         query_reader_ = std::make_unique<persist::QueryReader>(*db_);
 
         // Populate a test workflow in the registry.
-        std::vector<engine::WorkflowDef> workflows;
-        engine::WorkflowDef wf;
-        wf.workflow_name = "test-deploy";
-        wf.trigger_type = "manual";
-        engine::JobDef job;
-        job.job_name = "build";
         engine::StepDef step;
+        step.step_id = "stp-001";
         step.step_name = "compile";
         step.command = "make all";
+
+        engine::JobDef job;
+        job.job_id = "job-build";
+        job.job_name = "build";
         job.steps.push_back(std::move(step));
-        wf.jobs.push_back(std::move(job));
-        workflows.push_back(std::move(wf));
+
+        // Build a DAG for the single job.
+        auto dag = engine::make_standalone_dag("job-build", "build");
+
+        std::vector<engine::WorkflowDef> workflows;
+        workflows.push_back(engine::WorkflowDef{
+            .workflow_id = "wfl-test",
+            .workflow_name = "test-deploy",
+            .jobs = {std::move(job)},
+            .dag = std::move(dag),
+        });
 
         registry_ = std::make_shared<engine::WorkflowRegistry>(
             std::move(workflows),
-            std::vector<engine::TriggerDef>{},
-            std::vector<engine::StandaloneJobDef>{},
+            std::vector<engine::TimerEntry>{},
+            std::vector<engine::JobDef>{},
             std::vector<watch::WatchGroupDef>{});
 
         // Create metrics.
