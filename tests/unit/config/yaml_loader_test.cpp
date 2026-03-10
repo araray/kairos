@@ -781,10 +781,10 @@ jobs:
 }
 
 // ═══════════════════════════════════════════════════════════════════════
-//  STANDALONE WORKFLOW DESUGARING
+//  STANDALONE JOB PARSING
 // ═══════════════════════════════════════════════════════════════════════
 
-TEST(YamlLoaderTest, StandaloneWorkflowWithExplicitFlag) {
+TEST(YamlLoaderTest, StandaloneJobWithExplicitFlag) {
     auto r = load_workflow_string(R"(
 name: "loterias"
 standalone: true
@@ -799,27 +799,27 @@ steps:
 )");
 
     ASSERT_TRUE(r.ok()) << r.errors[0].message;
-    ASSERT_EQ(r.workflows.size(), 1u);
 
-    const auto& wf = r.workflows[0];
-    EXPECT_EQ(wf.workflow_name, "loterias");
+    // Standalone produces a job, NOT a workflow.
+    EXPECT_EQ(r.workflows.size(), 0u);
+    ASSERT_EQ(r.standalone_jobs.size(), 1u);
 
-    // Desugaring should produce exactly one job named after the workflow.
-    ASSERT_EQ(wf.jobs.size(), 1u);
-    EXPECT_EQ(wf.jobs[0].job_name, "loterias");
+    const auto& job = r.standalone_jobs[0];
+    EXPECT_EQ(job.job_name, "loterias");
+    EXPECT_TRUE(job.job_id.starts_with("job-"));
 
-    ASSERT_EQ(wf.jobs[0].steps.size(), 1u);
-    EXPECT_EQ(wf.jobs[0].steps[0].step_name, "update");
-    EXPECT_EQ(wf.jobs[0].steps[0].command, "/usr/bin/update-loterias");
+    ASSERT_EQ(job.steps.size(), 1u);
+    EXPECT_EQ(job.steps[0].step_name, "update");
+    EXPECT_EQ(job.steps[0].command, "/usr/bin/update-loterias");
 
-    // Env should be hoisted into the job's step.
-    EXPECT_EQ(wf.jobs[0].steps[0].env.at("KAIROS_JOB_NAME"), "loterias");
+    // Env should be on the step (from step-level env).
+    EXPECT_EQ(job.steps[0].env.at("KAIROS_JOB_NAME"), "loterias");
 
-    // Trigger should still be parsed.
+    // Trigger should target the standalone job.
     ASSERT_EQ(r.triggers.size(), 1u);
 }
 
-TEST(YamlLoaderTest, StandaloneWorkflowAutoDetected) {
+TEST(YamlLoaderTest, StandaloneJobAutoDetected) {
     // No explicit 'standalone: true' — inferred from steps at top level
     // without a jobs mapping.
     auto r = load_workflow_string(R"(
@@ -830,13 +830,13 @@ steps:
 )");
 
     ASSERT_TRUE(r.ok()) << r.errors[0].message;
-    ASSERT_EQ(r.workflows.size(), 1u);
-    ASSERT_EQ(r.workflows[0].jobs.size(), 1u);
-    EXPECT_EQ(r.workflows[0].jobs[0].job_name, "quick");
-    EXPECT_EQ(r.workflows[0].jobs[0].steps[0].command, "echo hello");
+    EXPECT_EQ(r.workflows.size(), 0u);
+    ASSERT_EQ(r.standalone_jobs.size(), 1u);
+    EXPECT_EQ(r.standalone_jobs[0].job_name, "quick");
+    EXPECT_EQ(r.standalone_jobs[0].steps[0].command, "echo hello");
 }
 
-TEST(YamlLoaderTest, StandaloneWorkflowHoistsCondition) {
+TEST(YamlLoaderTest, StandaloneJobHoistsCondition) {
     auto r = load_workflow_string(R"(
 name: "guarded"
 standalone: true
@@ -847,12 +847,12 @@ steps:
 )");
 
     ASSERT_TRUE(r.ok()) << r.errors[0].message;
-    const auto& job = r.workflows[0].jobs[0];
+    const auto& job = r.standalone_jobs[0];
     ASSERT_TRUE(job.condition_expr.has_value());
     EXPECT_EQ(*job.condition_expr, "job(\"cleanup\").last_success");
 }
 
-TEST(YamlLoaderTest, StandaloneWorkflowHoistsEnvAndWorkingDir) {
+TEST(YamlLoaderTest, StandaloneJobHoistsEnvAndWorkingDir) {
     auto r = load_workflow_string(R"(
 name: "envtest"
 standalone: true
@@ -865,9 +865,40 @@ steps:
 )");
 
     ASSERT_TRUE(r.ok()) << r.errors[0].message;
-    const auto& job = r.workflows[0].jobs[0];
+    const auto& job = r.standalone_jobs[0];
     EXPECT_EQ(job.working_dir, "/tmp/work");
     EXPECT_EQ(job.env.at("FOO"), "bar");
+}
+
+TEST(YamlLoaderTest, StandaloneJobInDir) {
+    TmpDir tmp;
+
+    // One regular workflow, one standalone job.
+    tmp.write("wf.yaml", R"(
+name: "normal_wf"
+jobs:
+  build:
+    steps:
+      - run: "make"
+)");
+
+    tmp.write("cron_job.yaml", R"(
+name: "nightly_backup"
+standalone: true
+triggers:
+  - type: cron
+    spec: "0 3 * * *"
+steps:
+  - name: "backup"
+    run: "/usr/local/bin/backup.sh"
+)");
+
+    auto r = load_workflows_dir(tmp.path());
+    ASSERT_TRUE(r.ok()) << r.errors[0].message;
+    EXPECT_EQ(r.workflows.size(), 1u);
+    EXPECT_EQ(r.standalone_jobs.size(), 1u);
+    EXPECT_EQ(r.standalone_jobs[0].job_name, "nightly_backup");
+    EXPECT_EQ(r.triggers.size(), 1u);
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -926,11 +957,14 @@ steps:
 
     ASSERT_TRUE(r.ok()) << r.errors[0].message;
 
-    const auto& wf = r.workflows[0];
-    EXPECT_EQ(wf.workflow_name, "loterias");
-    ASSERT_EQ(wf.jobs.size(), 1u);
+    // Should be a standalone job, not a workflow.
+    EXPECT_EQ(r.workflows.size(), 0u);
+    ASSERT_EQ(r.standalone_jobs.size(), 1u);
 
-    const auto& step = wf.jobs[0].steps[0];
+    const auto& job = r.standalone_jobs[0];
+    EXPECT_EQ(job.job_name, "loterias");
+
+    const auto& step = job.steps[0];
     EXPECT_EQ(step.step_name, "update");
     EXPECT_TRUE(step.command.find("job_wrapper.sh") != std::string::npos);
     EXPECT_EQ(step.env.at("KAIROS_JOB_NAME"), "loterias");

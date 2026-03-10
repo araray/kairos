@@ -429,28 +429,24 @@ YamlLoadResult parse_workflow_node(
         return result;
     }
 
-    // ── Standalone desugaring ─────────────────────────────────────
-    // If the workflow has top-level 'steps' but no 'jobs', or if
-    // 'standalone: true' is set, synthesize a single-job 'jobs' map
-    // using the workflow name as the job key.
+    // ── Standalone job detection ──────────────────────────────────
+    // A standalone job is a YAML file with top-level 'steps' (and
+    // optionally 'standalone: true'). It produces a JobDef in
+    // result.standalone_jobs — NOT a workflow.
     //
-    // This lets users write compact single-job workflows:
+    // This lets users write compact job definitions:
     //   name: loterias
     //   standalone: true
+    //   triggers:
+    //     - type: cron
+    //       spec: "55 23 * * *"
     //   steps:
     //     - name: update
-    //       run: some-command
+    //       command: ./auto-update.job.sh
     //
-    // Which desugars to:
-    //   name: loterias
-    //   jobs:
-    //     loterias:
-    //       steps: [...]
-    //       condition: <from top-level>
-    //       env: <from top-level>
-    //       working_dir: <from top-level>
+    // The job appears in `kairos jobs list` and can be run with
+    // `kairos jobs run loterias`.
 
-    YAML::Node effective_root = root;  // shallow copy (refcount)
     bool is_standalone = opt_bool(root, "standalone", false);
 
     // Also auto-detect: has 'steps' at top level but no 'jobs'.
@@ -459,12 +455,23 @@ YamlLoadResult parse_workflow_node(
         is_standalone = true;
     }
 
-    if (is_standalone && root["steps"] && root["steps"].IsSequence()) {
-        // Build a synthetic job node from top-level fields.
+    if (is_standalone) {
+        if (!root["steps"] || !root["steps"].IsSequence()) {
+            result.errors.push_back({file, "steps",
+                "Standalone job must have a 'steps' sequence"});
+            return result;
+        }
+
+        // Use a synthetic workflow ID for job hashing (standalone jobs
+        // use "__standalone__" as the parent workflow context).
+        const std::string standalone_wf_id = "__standalone__";
+
+        // Build the JobDef by reusing parse_job with a synthetic node.
+        // Construct a YAML node that looks like a job definition.
         YAML::Node job_node;
+        job_node["name"] = wf_name;
         job_node["steps"] = root["steps"];
 
-        // Hoist top-level job-like fields into the synthetic job.
         if (root["condition"] && root["condition"].IsScalar()) {
             job_node["condition"] = root["condition"];
         }
@@ -478,27 +485,31 @@ YamlLoadResult parse_workflow_node(
             job_node["continue_on_error"] = root["continue_on_error"];
         }
 
-        // Wrap in a jobs map keyed by workflow name.
-        YAML::Node jobs_map;
-        jobs_map[wf_name] = job_node;
+        auto job = parse_job(wf_name, job_node, standalone_wf_id,
+                             result.errors, file);
 
-        // Mutate effective_root so the rest of the parser sees 'jobs'.
-        effective_root = YAML::Clone(root);
-        effective_root["jobs"] = jobs_map;
-        // Remove top-level 'steps' to avoid confusion.
-        effective_root.remove("steps");
+        // Parse triggers targeting this standalone job.
+        auto triggers = parse_triggers(
+            root["triggers"], job.job_id, job.job_name,
+            TriggerEvent::TargetKind::StandaloneJob,
+            result.errors, file);
+
+        result.triggers = std::move(triggers);
+        result.standalone_jobs.push_back(std::move(job));
+        return result;
     }
 
-    // ── Jobs ────────────────────────────────────────────────────
-    if (!effective_root["jobs"] || !effective_root["jobs"].IsMap()) {
+    // ── Jobs (multi-job workflow) ───────────────────────────────
+    if (!root["jobs"] || !root["jobs"].IsMap()) {
         result.errors.push_back({file, "jobs",
-            "Workflow must have a 'jobs' mapping (or use 'standalone: true' with top-level 'steps')"});
+            "Workflow must have a 'jobs' mapping "
+            "(or use top-level 'steps' for a standalone job)"});
         return result;
     }
 
     // Collect job names for the workflow hash.
     std::vector<std::string> job_names;
-    for (const auto& kv : effective_root["jobs"]) {
+    for (const auto& kv : root["jobs"]) {
         job_names.push_back(kv.first.as<std::string>());
     }
 
@@ -518,7 +529,7 @@ YamlLoadResult parse_workflow_node(
     // Map from YAML key → job_id (for needs resolution).
     std::unordered_map<std::string, std::string> key_to_id;
 
-    for (const auto& kv : effective_root["jobs"]) {
+    for (const auto& kv : root["jobs"]) {
         std::string key = kv.first.as<std::string>();
         auto job = parse_job(key, kv.second, wf_id,
                              result.errors, file);
@@ -620,6 +631,7 @@ YamlLoadResult load_workflow_file(const fs::path& path) {
 
         // Merge into result.
         result.workflows = std::move(r.workflows);
+        result.standalone_jobs = std::move(r.standalone_jobs);
         result.triggers = std::move(r.triggers);
         result.errors = std::move(r.errors);
 
@@ -689,9 +701,12 @@ YamlLoadResult load_workflows_dir(const fs::path& dir) {
             }
         }
 
-        // Merge triggers and errors.
+        // Merge triggers, standalone jobs, and errors.
         result.triggers.insert(result.triggers.end(),
             r.triggers.begin(), r.triggers.end());
+        result.standalone_jobs.insert(result.standalone_jobs.end(),
+            std::make_move_iterator(r.standalone_jobs.begin()),
+            std::make_move_iterator(r.standalone_jobs.end()));
         result.errors.insert(result.errors.end(),
             r.errors.begin(), r.errors.end());
     }
@@ -957,6 +972,7 @@ YamlLoadResult load_all(const fs::path& workflows_dir,
     if (fs::exists(workflows_dir) && fs::is_directory(workflows_dir)) {
         auto wr = load_workflows_dir(workflows_dir);
         result.workflows = std::move(wr.workflows);
+        result.standalone_jobs = std::move(wr.standalone_jobs);
         result.triggers = std::move(wr.triggers);
         result.errors = std::move(wr.errors);
     }

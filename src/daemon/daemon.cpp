@@ -143,8 +143,9 @@ static std::shared_ptr<engine::WorkflowRegistry> load_registry_from_yaml(
         std::move(yaml_result.standalone_jobs),
         std::move(yaml_result.watch_groups));
 
-    log->info("Registry loaded: {} workflows, {} triggers, {} watch groups",
+    log->info("Registry loaded: {} workflows, {} standalone jobs, {} triggers, {} watch groups",
               registry->workflow_count(),
+              registry->standalone_job_count(),
               registry->trigger_count(),
               registry->watch_group_count());
 
