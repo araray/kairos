@@ -9,11 +9,23 @@
 
 #include <algorithm>
 
+#ifdef _WIN32
+#include <fcntl.h>
+#include <io.h>
+#endif
+
 namespace kairos::mcp {
 
 // ── Public API ─────────────────────────────────────────────────────────────
 
 void StdioTransport::run() {
+#ifdef _WIN32
+    // Windows consoles default to text mode (CR+LF translation).
+    // MCP uses raw JSON-RPC over stdio — binary mode is required
+    // to prevent mangling of line endings in JSON payloads.
+    (void)_setmode(_fileno(stdin),  _O_BINARY);
+    (void)_setmode(_fileno(stdout), _O_BINARY);
+#endif
     std::string line;
     while (!stopped_.load(std::memory_order_relaxed)) {
         // Read one line from input.

@@ -10,19 +10,55 @@
 #include <regex>
 
 #ifdef _WIN32
-// Windows: environment block is available via GetEnvironmentStringsW.
-// Deferred to Win32 platform work.
+// Windows: environment block via GetEnvironmentStringsW → UTF-8 conversion.
+#define WIN32_LEAN_AND_MEAN
+#define NOMINMAX
+#include <Windows.h>
 #else
 extern char** environ;
 #endif
 
 namespace kairos::exec {
 
+// ── Internal helper for Win32 UTF-16 → UTF-8 conversion ─────────────────
+
+#ifdef _WIN32
+namespace {
+std::string wstring_to_utf8(const std::wstring& wstr) {
+    if (wstr.empty()) return {};
+    int needed = ::WideCharToMultiByte(
+        CP_UTF8, 0, wstr.data(), static_cast<int>(wstr.size()),
+        nullptr, 0, nullptr, nullptr);
+    if (needed <= 0) return {};
+    std::string result(static_cast<std::size_t>(needed), '\0');
+    ::WideCharToMultiByte(
+        CP_UTF8, 0, wstr.data(), static_cast<int>(wstr.size()),
+        result.data(), needed, nullptr, nullptr);
+    return result;
+}
+}  // anonymous namespace
+#endif
+
 // ── Capture current environment ──────────────────────────────────────────
 
 std::unordered_map<std::string, std::string> capture_current_env() {
     std::unordered_map<std::string, std::string> env;
-#ifndef _WIN32
+#ifdef _WIN32
+    wchar_t* env_block = ::GetEnvironmentStringsW();
+    if (env_block) {
+        for (const wchar_t* p = env_block; *p; p += wcslen(p) + 1) {
+            std::wstring entry(p);
+            auto pos = entry.find(L'=');
+            // Skip entries starting with '=' (Windows internal vars like =C:).
+            if (pos != std::wstring::npos && pos > 0) {
+                std::string key = wstring_to_utf8(entry.substr(0, pos));
+                std::string val = wstring_to_utf8(entry.substr(pos + 1));
+                env[key] = val;
+            }
+        }
+        ::FreeEnvironmentStringsW(env_block);
+    }
+#else
     if (environ == nullptr) return env;
     for (char** p = environ; *p != nullptr; ++p) {
         std::string entry(*p);

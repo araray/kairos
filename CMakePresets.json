@@ -80,6 +80,28 @@
         "CMAKE_CXX_COMPILER": "g++",
         "KAIROS_SANITIZERS": "thread"
       }
+    },
+    {
+      "name": "debug-msvc",
+      "displayName": "Debug (MSVC)",
+      "description": "Debug build using Visual Studio 2022 generator.",
+      "inherits": "base",
+      "generator": "Visual Studio 17 2022",
+      "architecture": { "value": "x64", "strategy": "set" },
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug"
+      }
+    },
+    {
+      "name": "release-msvc",
+      "displayName": "Release (MSVC)",
+      "description": "Release build using Visual Studio 2022 generator.",
+      "inherits": "base",
+      "generator": "Visual Studio 17 2022",
+      "architecture": { "value": "x64", "strategy": "set" },
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release"
+      }
     }
   ],
 
@@ -103,6 +125,16 @@
       "name": "debug-san",
       "configurePreset": "debug-san",
       "configuration": "Debug"
+    },
+    {
+      "name": "debug-msvc",
+      "configurePreset": "debug-msvc",
+      "configuration": "Debug"
+    },
+    {
+      "name": "release-msvc",
+      "configurePreset": "release-msvc",
+      "configuration": "Release"
     }
   ],
 
@@ -120,6 +152,11 @@
         "ASAN_OPTIONS": "detect_leaks=1:halt_on_error=1",
         "UBSAN_OPTIONS": "print_stacktrace=1:halt_on_error=1"
       }
+    },
+    {
+      "name": "msvc",
+      "configurePreset": "debug-msvc",
+      "output": { "outputOnFailure": true }
     }
   ]
 }

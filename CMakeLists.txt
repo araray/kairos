@@ -29,7 +29,7 @@ include(cmake/KairosOptions.cmake)
 # SQLite's bundled amalgamation triggers known false-positive UBSan
 # findings in its B-tree MemPage pointer casts — we suppress UBSan
 # for that specific translation unit after FetchContent populates it.
-if(KAIROS_SANITIZERS)
+if(KAIROS_SANITIZERS AND NOT MSVC)
     string(REPLACE "," ";" _san_list "${KAIROS_SANITIZERS}")
     string(REPLACE ";" "," _san_flags "${_san_list}")
     set(_san_compile "-fsanitize=${_san_flags} -fno-omit-frame-pointer")
@@ -39,6 +39,8 @@ if(KAIROS_SANITIZERS)
     set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} ${_san_link}")
     set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} ${_san_link}")
     message(STATUS "Sanitizers enabled: ${_san_flags}")
+elseif(KAIROS_SANITIZERS AND MSVC)
+    message(STATUS "Sanitizers skipped (MSVC uses /fsanitize= via build.ps1 -Asan)")
 endif()
 
 # ── Dependencies ───────────────────────────────────────────────────────────
@@ -49,7 +51,7 @@ include(cmake/KairosDependencies.cmake)
 # positives in btree.c MemPage pointer casts (line ~78114 in sqlite3.c).
 # Suppress undefined-behavior sanitizer for the amalgamation only.
 # The sqlite3 target is created by SQLiteCpp's CMakeLists.txt.
-if(KAIROS_SANITIZERS AND TARGET sqlite3)
+if(KAIROS_SANITIZERS AND NOT MSVC AND TARGET sqlite3)
     string(FIND "${KAIROS_SANITIZERS}" "undefined" _has_ubsan)
     if(NOT _has_ubsan EQUAL -1)
         target_compile_options(sqlite3 PRIVATE -fno-sanitize=undefined)
@@ -141,6 +143,7 @@ if(WIN32)
         src/platform/signals_win32.cpp
         src/platform/threading_win32.cpp
         src/platform/instance_lock_win32.cpp
+        src/exec/process_handle_win32.cpp
     )
     target_link_libraries(kairos_platform PRIVATE Shell32 Ole32)
 else()

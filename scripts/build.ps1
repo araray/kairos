@@ -219,6 +219,20 @@ switch ($Profile)
     }
 }
 
+# ── Windows platform adjustments ─────────────────────────────────────────
+# OTel (requires protobuf/abseil) and Vault (requires OpenSSL) are
+# not supported on Windows builds.  Disable them silently.
+if ($IsWindows -or ($env:OS -eq "Windows_NT")) {
+    if ($EnableOtel -eq "ON") {
+        Write-Host "  (i) OTel disabled on Windows (protobuf/abseil not available)" -ForegroundColor Yellow
+        $EnableOtel = "OFF"
+    }
+    if ($EnableVault -eq "ON") {
+        Write-Host "  (i) Vault disabled on Windows (OpenSSL not available)" -ForegroundColor Yellow
+        $EnableVault = "OFF"
+    }
+}
+
 if ($Debug)
 { $BuildType = "Debug"
 }

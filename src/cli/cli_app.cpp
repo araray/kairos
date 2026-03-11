@@ -27,6 +27,7 @@
 #include "kairos/persist/migration.hpp"
 #include "kairos/persist/query_reader.hpp"
 #include "kairos/platform/platform.hpp"
+#include "kairos/platform/time_compat.hpp"
 #include "kairos/testing/fake_clock.hpp"
 #include "kairos/watch/real_scanner.hpp"
 #include "kairos/watch/watch_engine.hpp"
@@ -54,6 +55,9 @@
 #include <cstring>
 #include <sys/types.h>
 #include <signal.h>
+#endif
+
+#ifdef _WIN32
 #include "kairos/daemon/win32_service.hpp"
 #endif
 
@@ -360,7 +364,7 @@ int run(int argc, char** argv) {
     cmd_start->add_flag("-f,--foreground", foreground,
                         "Run in foreground (default behavior)");
 
-#ifndef _WIN32
+#ifdef _WIN32
     bool as_service = false;
     cmd_start->add_flag("--service", as_service,
         "Run as Windows Service (internal — do not use directly)");
