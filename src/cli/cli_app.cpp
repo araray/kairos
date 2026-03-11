@@ -40,7 +40,9 @@
 
 #include <filesystem>
 #include <fstream>
+#include <iomanip>
 #include <iostream>
+#include <sstream>
 #include <string>
 #include <thread>
 #include <unordered_map>
@@ -158,6 +160,174 @@ std::shared_ptr<const config::ConfigState> load_config_or_die(
         return nullptr;
     }
     return result.state;
+}
+
+// ── Helpers for enriched CLI output ─────────────────────────────────────
+
+/// Parse an ISO-8601 timestamp to system_clock time_point.
+/// Returns epoch if parsing fails.
+static std::chrono::system_clock::time_point
+parse_iso8601(const std::string& ts)
+{
+    if (ts.empty()) return {};
+    std::tm tm{};
+    std::istringstream ss(ts);
+    ss >> std::get_time(&tm, "%Y-%m-%dT%H:%M:%S");
+    if (ss.fail()) return {};
+    return std::chrono::system_clock::from_time_t(std::mktime(&tm));
+}
+
+/// Format a time_point as relative string ("2h ago", "just now", etc.)
+static std::string format_relative(
+    std::chrono::system_clock::time_point tp)
+{
+    if (tp.time_since_epoch().count() == 0) return "--";
+    auto now = std::chrono::system_clock::now();
+    auto diff = std::chrono::duration_cast<std::chrono::seconds>(
+        now - tp).count();
+    if (diff < 0) {
+        // Future time.
+        diff = -diff;
+        if (diff < 60)   return fmt::format("in {}s", diff);
+        if (diff < 3600)  return fmt::format("in {}m", diff / 60);
+        if (diff < 86400) return fmt::format("in {}h {}m", diff / 3600,
+                                              (diff % 3600) / 60);
+        return fmt::format("in {}d", diff / 86400);
+    }
+    if (diff < 5)     return "just now";
+    if (diff < 60)    return fmt::format("{}s ago", diff);
+    if (diff < 3600)  return fmt::format("{}m ago", diff / 60);
+    if (diff < 86400) return fmt::format("{}h ago", diff / 3600);
+    return fmt::format("{}d ago", diff / 86400);
+}
+
+/// Format a time_point as relative string from ISO-8601 string.
+static std::string format_relative_ts(const std::string& ts)
+{
+    return format_relative(parse_iso8601(ts));
+}
+
+/// Compute next fire time for a trigger and return as ISO-8601 + relative.
+struct NextFireInfo {
+    std::string iso;           ///< ISO-8601 timestamp
+    std::string relative;      ///< "in 15m", "in 2h 30m"
+    std::string schedule_expr; ///< Cron expression, interval, or date
+};
+
+static NextFireInfo compute_next_fire(const engine::TimerEntry& t)
+{
+    NextFireInfo info;
+    auto now = std::chrono::system_clock::now();
+
+    info.schedule_expr = std::visit([](const auto& s) -> std::string {
+        using T = std::decay_t<decltype(s)>;
+        if constexpr (std::is_same_v<T, engine::CronTrigger>)
+            return s.expression;
+        if constexpr (std::is_same_v<T, engine::IntervalTrigger>) {
+            auto secs = s.interval.count() / 1000;
+            if (secs < 60) return fmt::format("every {}s", secs);
+            if (secs < 3600) return fmt::format("every {}m", secs / 60);
+            return fmt::format("every {}h", secs / 3600);
+        }
+        if constexpr (std::is_same_v<T, engine::DateTrigger>) {
+            if (s.fired) return "(exhausted)";
+            // Format fire_at as ISO.
+            auto tt = std::chrono::system_clock::to_time_t(s.fire_at);
+            std::tm tm{};
+#ifdef _WIN32
+            localtime_s(&tm, &tt);
+#else
+            localtime_r(&tt, &tm);
+#endif
+            char buf[32];
+            std::strftime(buf, sizeof(buf), "%Y-%m-%dT%H:%M:%S", &tm);
+            return std::string(buf);
+        }
+    }, t.spec);
+
+    // Compute next fire.
+    auto next = std::visit([&](const auto& s) ->
+        std::chrono::system_clock::time_point {
+        using T = std::decay_t<decltype(s)>;
+        if constexpr (std::is_same_v<T, engine::CronTrigger>) {
+            try { return s.next_fire_after(now); }
+            catch (...) { return {}; }
+        }
+        if constexpr (std::is_same_v<T, engine::IntervalTrigger>) {
+            // For standalone CLI: next fire is now + interval.
+            return now + s.interval;
+        }
+        if constexpr (std::is_same_v<T, engine::DateTrigger>) {
+            return s.fired ? std::chrono::system_clock::time_point{}
+                           : s.fire_at;
+        }
+    }, t.spec);
+
+    if (next.time_since_epoch().count() == 0) {
+        info.iso = "--";
+        info.relative = "--";
+        return info;
+    }
+
+    // Format as ISO.
+    auto tt = std::chrono::system_clock::to_time_t(next);
+    std::tm tm{};
+#ifdef _WIN32
+    localtime_s(&tm, &tt);
+#else
+    localtime_r(&tt, &tm);
+#endif
+    char buf[32];
+    std::strftime(buf, sizeof(buf), "%Y-%m-%dT%H:%M:%S", &tm);
+    info.iso = buf;
+    info.relative = format_relative(next);
+    return info;
+}
+
+/// Try to open a read-only DB reader. Returns nullptr if DB doesn't exist.
+static std::unique_ptr<SQLite::Database> try_open_db(
+    const std::shared_ptr<const config::ConfigState>& cfg)
+{
+    std::error_code ec;
+    if (!fs::exists(cfg->db_path, ec)) return nullptr;
+    try {
+        return persist::open_database(cfg->db_path);
+    } catch (...) {
+        return nullptr;
+    }
+}
+
+/// Get last run status for a target by name.
+struct LastRunInfo {
+    std::string status;     ///< "SUCCESS", "FAILED", etc. or "--"
+    std::string run_id;
+    std::string when;       ///< Relative time string
+    int64_t duration_ms = 0;
+};
+
+static LastRunInfo last_run_for_target(
+    persist::QueryReader* reader, const std::string& target_name)
+{
+    if (!reader) return {"--", "", "--", 0};
+    auto runs = reader->query_recent_runs(1, "", target_name);
+    if (runs.empty()) return {"--", "", "never", 0};
+    const auto& r = runs[0];
+    return {r.status, r.run_id, format_relative_ts(r.start_ts),
+            r.duration_ms};
+}
+
+/// Find triggers targeting a specific target (by name or id).
+static std::vector<const engine::TimerEntry*> triggers_for_target(
+    const engine::WorkflowRegistry& reg,
+    const std::string& target_id,
+    const std::string& target_name)
+{
+    std::vector<const engine::TimerEntry*> result;
+    for (const auto& t : reg.triggers()) {
+        if (t.target_id == target_id || t.target_name == target_name)
+            result.push_back(&t);
+    }
+    return result;
 }
 
 }  // anonymous namespace
@@ -303,6 +473,23 @@ int run(int argc, char** argv) {
         "Run ID")->required();
     cmd_logs->add_flag("-f,--follow", logs_follow,
         "Follow log output (poll until run completes)");
+
+    // ── triggers ──────────────────────────────────────────────────
+    auto* cmd_triggers = app.add_subcommand("triggers",
+        "Manage schedule triggers");
+    cmd_triggers->require_subcommand(1);
+
+    auto* triggers_list = cmd_triggers->add_subcommand("list",
+        "List all configured triggers with next fire times");
+    int triggers_limit = 50;
+    triggers_list->add_option("-n,--limit", triggers_limit,
+        "Max number of triggers to show (default: 50)");
+
+    auto* triggers_next = cmd_triggers->add_subcommand("next",
+        "Show the next N triggers to fire");
+    int triggers_next_n = 10;
+    triggers_next->add_option("-n,--limit", triggers_next_n,
+        "Number of upcoming triggers (default: 10)");
 
     // ── workflows ────────────────────────────────────────────────
     auto* cmd_workflows = app.add_subcommand("workflows",
@@ -683,6 +870,22 @@ int run(int argc, char** argv) {
                     {"description", r.description}
                 });
             }
+            json events_arr = json::array();
+            auto db = try_open_db(cfg);
+            if (db) {
+                persist::QueryReader reader(*db);
+                auto events = reader.query_watch_events(
+                    20, found->group_name);
+                for (const auto& e : events) {
+                    events_arr.push_back({
+                        {"rule_name", e.rule_name},
+                        {"event_type", e.event_type},
+                        {"severity", e.severity},
+                        {"created_at", e.created_at},
+                        {"affected_files", e.affected_files_json}
+                    });
+                }
+            }
             std::cout << json{
                 {"name", found->group_name},
                 {"id", found->group_id},
@@ -693,7 +896,8 @@ int run(int argc, char** argv) {
                 {"watch_items", paths},
                 {"rules", rules},
                 {"exclude_globs", found->exclude_globs},
-                {"enabled", found->enabled}
+                {"enabled", found->enabled},
+                {"recent_events", events_arr}
             }.dump(2) << "\n";
         } else {
             std::cout << "Watch Group: " << found->group_name << "\n";
@@ -719,6 +923,42 @@ int run(int argc, char** argv) {
                           << r.condition
                           << " [" << r.severity << "]\n";
             }
+
+            // Event history from DB.
+            auto db = try_open_db(cfg);
+            if (db) {
+                persist::QueryReader reader(*db);
+                auto events = reader.query_watch_events(
+                    10, found->group_name);
+                if (!events.empty()) {
+                    bool use_color = cli::supports_color();
+                    std::cout << "\nRecent Events (" << events.size()
+                              << "):\n\n";
+                    cli::Table et({"RULE", "TYPE", "SEVERITY",
+                                    "WHEN"});
+                    for (const auto& e : events) {
+                        std::string sev = e.severity;
+                        if (use_color) {
+                            if (sev == "critical" || sev == "error")
+                                sev = cli::colorize(sev, cli::ansi::red,
+                                                     true);
+                            else if (sev == "warning")
+                                sev = cli::colorize(sev,
+                                    cli::ansi::yellow, true);
+                        }
+                        et.add_row({
+                            e.rule_name,
+                            e.event_type,
+                            sev,
+                            format_relative_ts(e.created_at)
+                        });
+                    }
+                    et.render(std::cout, use_color);
+                } else {
+                    std::cout << "\nRecent Events: (none)\n";
+                }
+            }
+            std::cout << "\n";
         }
         return 0;
     }
@@ -1696,6 +1936,147 @@ int run(int argc, char** argv) {
         return 0;
     }
 
+    // ── triggers list ────────────────────────────────────────────
+    if (triggers_list->parsed()) {
+        setup_logging(log_level, json_output, false);
+        bool use_color = !json_output && cli::supports_color();
+
+        auto cfg = load_config_or_die(config_path, {});
+        if (!cfg) return static_cast<int>(ExitCode::kConfigError);
+
+        auto registry = load_registry_from_yaml(
+            cfg, spdlog::default_logger());
+
+        const auto& triggers = registry->triggers();
+
+        // Open DB for last fire info.
+        auto db = try_open_db(cfg);
+        std::unique_ptr<persist::QueryReader> reader;
+        if (db) reader = std::make_unique<persist::QueryReader>(*db);
+
+        if (json_output) {
+            json arr = json::array();
+            for (const auto& t : triggers) {
+                auto nf = compute_next_fire(t);
+                auto lr = last_run_for_target(reader.get(), t.target_name);
+                arr.push_back({
+                    {"trigger_id", t.trigger_id},
+                    {"type", engine::trigger_spec_type_name(t.spec)},
+                    {"target_name", t.target_name},
+                    {"target_id", t.target_id},
+                    {"schedule", nf.schedule_expr},
+                    {"next_fire", nf.iso},
+                    {"enabled", t.enabled},
+                    {"max_instances", t.max_instances},
+                    {"last_run_status", lr.status}
+                });
+            }
+            std::cout << json(arr).dump(2) << "\n";
+        } else {
+            if (triggers.empty()) {
+                std::cout << "No triggers configured.\n";
+            } else {
+                cli::Table table({"TRIGGER", "TYPE", "TARGET",
+                                  "SCHEDULE", "NEXT FIRE", "LAST RUN"});
+                for (const auto& t : triggers) {
+                    auto nf = compute_next_fire(t);
+                    auto lr = last_run_for_target(reader.get(), t.target_name);
+                    std::string status_str = lr.status;
+                    if (use_color && lr.status != "--") {
+                        status_str = cli::colorize_status(lr.status, true);
+                    }
+                    table.add_row({
+                        cli::truncate(t.trigger_id, 16),
+                        engine::trigger_spec_type_name(t.spec),
+                        t.target_name,
+                        nf.schedule_expr,
+                        nf.relative,
+                        status_str
+                    });
+                }
+                table.render(std::cout, use_color);
+                std::cout << "\n" << triggers.size() << " trigger(s)\n";
+            }
+        }
+        return 0;
+    }
+
+    // ── triggers next ────────────────────────────────────────────
+    if (triggers_next->parsed()) {
+        setup_logging(log_level, json_output, false);
+        bool use_color = !json_output && cli::supports_color();
+
+        auto cfg = load_config_or_die(config_path, {});
+        if (!cfg) return static_cast<int>(ExitCode::kConfigError);
+
+        auto registry = load_registry_from_yaml(
+            cfg, spdlog::default_logger());
+
+        // Compute next fire for each trigger and sort by soonest.
+        struct UpcomingTrigger {
+            const engine::TimerEntry* entry;
+            NextFireInfo nf;
+            std::chrono::system_clock::time_point fire_tp;
+        };
+        std::vector<UpcomingTrigger> upcoming;
+        auto now = std::chrono::system_clock::now();
+
+        for (const auto& t : registry->triggers()) {
+            if (!t.enabled) continue;
+            auto nf = compute_next_fire(t);
+            if (nf.iso == "--") continue;
+            auto tp = parse_iso8601(nf.iso);
+            upcoming.push_back({&t, std::move(nf), tp});
+        }
+
+        std::sort(upcoming.begin(), upcoming.end(),
+            [](const auto& a, const auto& b) {
+                return a.fire_tp < b.fire_tp;
+            });
+
+        int limit = std::min(triggers_next_n,
+                             static_cast<int>(upcoming.size()));
+
+        if (json_output) {
+            json arr = json::array();
+            for (int i = 0; i < limit; ++i) {
+                const auto& u = upcoming[i];
+                arr.push_back({
+                    {"trigger_id", u.entry->trigger_id},
+                    {"type", engine::trigger_spec_type_name(u.entry->spec)},
+                    {"target_name", u.entry->target_name},
+                    {"schedule", u.nf.schedule_expr},
+                    {"next_fire", u.nf.iso},
+                    {"fires_in", u.nf.relative}
+                });
+            }
+            std::cout << json(arr).dump(2) << "\n";
+        } else {
+            if (upcoming.empty()) {
+                std::cout << "No upcoming triggers.\n";
+            } else {
+                cli::Table table({"#", "FIRES IN", "TARGET",
+                                  "TRIGGER", "SCHEDULE"});
+                for (int i = 0; i < limit; ++i) {
+                    const auto& u = upcoming[i];
+                    table.add_row({
+                        std::to_string(i + 1),
+                        u.nf.relative,
+                        u.entry->target_name,
+                        cli::truncate(u.entry->trigger_id, 16),
+                        u.nf.schedule_expr
+                    });
+                }
+                table.render(std::cout, use_color);
+                if (static_cast<int>(upcoming.size()) > limit) {
+                    std::cout << "\n  (" << (upcoming.size() - limit)
+                              << " more triggers not shown)\n";
+                }
+            }
+        }
+        return 0;
+    }
+
     // ── workflows list ───────────────────────────────────────────
     if (workflows_list->parsed()) {
         setup_logging(log_level, json_output, false);
@@ -1706,6 +2087,11 @@ int run(int argc, char** argv) {
         auto registry = load_registry_from_yaml(
             cfg, spdlog::default_logger());
 
+        // Open DB for run history (best-effort).
+        auto db = try_open_db(cfg);
+        std::unique_ptr<persist::QueryReader> reader;
+        if (db) reader = std::make_unique<persist::QueryReader>(*db);
+
         const auto& workflows = registry->workflows();
 
         if (json_output) {
@@ -1715,11 +2101,23 @@ int run(int argc, char** argv) {
                 for (const auto& j : wf->jobs) {
                     jobs_arr.push_back(j.job_name);
                 }
+                auto lr = last_run_for_target(
+                    reader.get(), wf->workflow_name);
+                auto trigs = triggers_for_target(
+                    *registry, wf->workflow_id, wf->workflow_name);
+                std::string next_fire = "--";
+                if (!trigs.empty()) {
+                    next_fire = compute_next_fire(*trigs[0]).iso;
+                }
                 arr.push_back({
                     {"id", wf->workflow_id},
                     {"name", wf->workflow_name},
                     {"job_count", static_cast<int>(wf->jobs.size())},
-                    {"jobs", jobs_arr}
+                    {"jobs", jobs_arr},
+                    {"last_run_status", lr.status},
+                    {"last_run_when", lr.when},
+                    {"next_fire", next_fire},
+                    {"trigger_count", static_cast<int>(trigs.size())}
                 });
             }
             std::cout << json(arr).dump(2) << "\n";
@@ -1728,23 +2126,35 @@ int run(int argc, char** argv) {
                 std::cout << "No workflows configured.\n";
             } else {
                 bool use_color = cli::supports_color();
-                cli::Table t({"WORKFLOW", "ID", "JOBS", "JOBS_LIST"});
+                cli::Table t({"WORKFLOW", "JOBS", "LAST RUN",
+                               "WHEN", "NEXT FIRE"});
                 for (const auto* wf : workflows) {
-                    std::string jobs;
-                    for (size_t i = 0; i < wf->jobs.size(); ++i) {
-                        if (i > 0) jobs += ", ";
-                        jobs += wf->jobs[i].job_name;
+                    auto lr = last_run_for_target(
+                        reader.get(), wf->workflow_name);
+                    auto trigs = triggers_for_target(
+                        *registry, wf->workflow_id, wf->workflow_name);
+                    std::string next_fire = "--";
+                    if (!trigs.empty()) {
+                        next_fire = compute_next_fire(*trigs[0]).relative;
+                    }
+                    std::string status_str = lr.status;
+                    if (use_color && lr.status != "--") {
+                        status_str = cli::status_icon(lr.status, true)
+                            + " " + cli::colorize_status(lr.status, true);
                     }
                     t.add_row({
                         use_color ? cli::colorize(wf->workflow_name,
                                                   cli::ansi::bold, true)
                                   : wf->workflow_name,
-                        cli::truncate(wf->workflow_id, 12),
                         std::to_string(wf->jobs.size()),
-                        jobs
+                        status_str,
+                        lr.when,
+                        next_fire
                     });
                 }
                 t.render(std::cout, use_color);
+                std::cout << "\n" << workflows.size()
+                          << " workflow(s)\n";
             }
         }
         return 0;
@@ -1784,6 +2194,19 @@ int run(int argc, char** argv) {
             return static_cast<int>(ExitCode::kNotFound);
         }
 
+        // Enrich with DB + trigger data.
+        auto db = try_open_db(cfg);
+        std::unique_ptr<persist::QueryReader> reader;
+        if (db) reader = std::make_unique<persist::QueryReader>(*db);
+
+        auto trigs = triggers_for_target(
+            *registry, found_wf->workflow_id, found_wf->workflow_name);
+        std::vector<persist::QueryReader::RunSummary> recent_runs;
+        if (reader) {
+            recent_runs = reader->query_recent_runs(
+                10, "", found_wf->workflow_name);
+        }
+
         if (json_output) {
             json jobs_arr = json::array();
             for (const auto& j : found_wf->jobs) {
@@ -1810,7 +2233,6 @@ int run(int argc, char** argv) {
                     {"steps", steps_arr}
                 });
             }
-            // DAG levels
             json dag_levels = json::array();
             for (int lvl = 0; lvl < found_wf->dag.level_count(); ++lvl) {
                 json level_arr = json::array();
@@ -1819,12 +2241,33 @@ int run(int argc, char** argv) {
                 }
                 dag_levels.push_back(level_arr);
             }
+            json trigs_arr = json::array();
+            for (const auto* t : trigs) {
+                auto nf = compute_next_fire(*t);
+                trigs_arr.push_back({
+                    {"trigger_id", t->trigger_id},
+                    {"type", engine::trigger_spec_type_name(t->spec)},
+                    {"schedule", nf.schedule_expr},
+                    {"next_fire", nf.iso}
+                });
+            }
+            json runs_arr = json::array();
+            for (const auto& r : recent_runs) {
+                runs_arr.push_back({
+                    {"run_id", r.run_id},
+                    {"status", r.status},
+                    {"started_at", r.start_ts},
+                    {"duration_ms", r.duration_ms}
+                });
+            }
             std::cout << json{
                 {"workflow_id", found_wf->workflow_id},
                 {"workflow_name", found_wf->workflow_name},
                 {"job_count", static_cast<int>(found_wf->jobs.size())},
                 {"dag_levels", dag_levels},
-                {"jobs", jobs_arr}
+                {"jobs", jobs_arr},
+                {"triggers", trigs_arr},
+                {"recent_runs", runs_arr}
             }.dump(2) << "\n";
         } else {
             // Human-friendly display.
@@ -1832,7 +2275,22 @@ int run(int argc, char** argv) {
             std::cout << "  ID:       " << found_wf->workflow_id << "\n";
             std::cout << "  Jobs:     " << found_wf->jobs.size() << "\n";
             std::cout << "  DAG:      " << found_wf->dag.level_count()
-                      << " level(s)\n\n";
+                      << " level(s)\n";
+
+            // Triggers section.
+            if (!trigs.empty()) {
+                std::cout << "\n  Triggers:\n";
+                for (const auto* t : trigs) {
+                    auto nf = compute_next_fire(*t);
+                    std::cout << "    " << engine::trigger_spec_type_name(
+                                     t->spec)
+                              << ": " << nf.schedule_expr
+                              << "  (next: " << nf.relative << ")\n";
+                }
+            } else {
+                std::cout << "  Triggers: (none — manual run only)\n";
+            }
+            std::cout << "\n";
 
             // DAG visualization
             std::cout << "  Execution Order (DAG):\n";
@@ -1843,7 +2301,6 @@ int run(int argc, char** argv) {
                 const auto& job_ids = found_wf->dag.jobs_at_level(lvl);
                 for (size_t i = 0; i < job_ids.size(); ++i) {
                     if (i > 0) std::cout << ", ";
-                    // Resolve job_id to name.
                     try {
                         const auto& dn = found_wf->dag.node(job_ids[i]);
                         std::cout << dn.job_name;
@@ -1888,6 +2345,31 @@ int run(int argc, char** argv) {
                 }
                 std::cout << "\n";
             }
+
+            // Recent runs section.
+            if (!recent_runs.empty()) {
+                std::cout << "  Recent Runs:\n\n";
+                cli::Table rt({"RUN ID", "STATUS", "WHEN",
+                                "DURATION"});
+                for (const auto& r : recent_runs) {
+                    std::string status_str = r.status;
+                    if (use_color) {
+                        status_str = cli::status_icon(r.status, true)
+                            + " " + cli::colorize_status(r.status, true);
+                    }
+                    rt.add_row({
+                        cli::truncate(r.run_id, 16),
+                        status_str,
+                        format_relative_ts(r.start_ts),
+                        cli::format_duration(r.duration_ms)
+                    });
+                }
+                std::cout << "  ";
+                rt.render(std::cout, use_color);
+            } else {
+                std::cout << "  Recent Runs: (no runs recorded)\n";
+            }
+            std::cout << "\n";
         }
         return 0;
     }
@@ -2375,22 +2857,30 @@ int run(int argc, char** argv) {
         auto registry = load_registry_from_yaml(
             cfg, spdlog::default_logger());
 
+        auto db = try_open_db(cfg);
+        std::unique_ptr<persist::QueryReader> reader;
+        if (db) reader = std::make_unique<persist::QueryReader>(*db);
+
         const auto& jobs = registry->standalone_jobs();
 
         if (json_output) {
             json arr = json::array();
             for (const auto* j : jobs) {
-                json steps_arr = json::array();
-                for (const auto& s : j->steps) {
-                    steps_arr.push_back(s.step_name);
-                }
+                auto lr = last_run_for_target(reader.get(), j->job_name);
+                auto trigs = triggers_for_target(
+                    *registry, j->job_id, j->job_name);
+                std::string next_fire = "--";
+                if (!trigs.empty())
+                    next_fire = compute_next_fire(*trigs[0]).iso;
                 arr.push_back({
                     {"id", j->job_id},
                     {"name", j->job_name},
                     {"step_count", static_cast<int>(j->steps.size())},
-                    {"steps", steps_arr},
                     {"condition", j->condition_expr.value_or("")},
-                    {"continue_on_error", j->continue_on_error}
+                    {"last_run_status", lr.status},
+                    {"last_run_when", lr.when},
+                    {"next_fire", next_fire},
+                    {"trigger_count", static_cast<int>(trigs.size())}
                 });
             }
             std::cout << json(arr).dump(2) << "\n";
@@ -2398,18 +2888,27 @@ int run(int argc, char** argv) {
             if (jobs.empty()) {
                 std::cout << "No standalone jobs configured.\n";
             } else {
-                cli::Table table({"JOB", "ID", "STEPS", "CONDITION"});
+                cli::Table table({"JOB", "STEPS", "LAST RUN",
+                                   "WHEN", "NEXT FIRE"});
                 for (const auto* j : jobs) {
-                    std::string steps_str;
-                    for (size_t i = 0; i < j->steps.size(); ++i) {
-                        if (i > 0) steps_str += ", ";
-                        steps_str += j->steps[i].step_name;
+                    auto lr = last_run_for_target(
+                        reader.get(), j->job_name);
+                    auto trigs = triggers_for_target(
+                        *registry, j->job_id, j->job_name);
+                    std::string next_fire = "--";
+                    if (!trigs.empty())
+                        next_fire = compute_next_fire(*trigs[0]).relative;
+                    std::string status_str = lr.status;
+                    if (use_color && lr.status != "--") {
+                        status_str = cli::status_icon(lr.status, true)
+                            + " " + cli::colorize_status(lr.status, true);
                     }
                     table.add_row({
                         j->job_name,
-                        cli::truncate(j->job_id, 12),
-                        steps_str,
-                        j->condition_expr.value_or("")
+                        std::to_string(j->steps.size()),
+                        status_str,
+                        lr.when,
+                        next_fire
                     });
                 }
                 table.render(std::cout, use_color);
@@ -2453,6 +2952,19 @@ int run(int argc, char** argv) {
             return static_cast<int>(ExitCode::kNotFound);
         }
 
+        // Enrich with DB + trigger data.
+        auto db = try_open_db(cfg);
+        std::unique_ptr<persist::QueryReader> reader;
+        if (db) reader = std::make_unique<persist::QueryReader>(*db);
+
+        auto trigs = triggers_for_target(
+            *registry, found_job->job_id, found_job->job_name);
+        std::vector<persist::QueryReader::RunSummary> recent_runs;
+        if (reader) {
+            recent_runs = reader->query_recent_runs(
+                10, "", found_job->job_name);
+        }
+
         if (json_output) {
             json steps_arr = json::array();
             for (const auto& s : found_job->steps) {
@@ -2469,12 +2981,33 @@ int run(int argc, char** argv) {
                     {"env", env}
                 });
             }
+            json trigs_arr = json::array();
+            for (const auto* t : trigs) {
+                auto nf = compute_next_fire(*t);
+                trigs_arr.push_back({
+                    {"trigger_id", t->trigger_id},
+                    {"type", engine::trigger_spec_type_name(t->spec)},
+                    {"schedule", nf.schedule_expr},
+                    {"next_fire", nf.iso}
+                });
+            }
+            json runs_arr = json::array();
+            for (const auto& r : recent_runs) {
+                runs_arr.push_back({
+                    {"run_id", r.run_id},
+                    {"status", r.status},
+                    {"started_at", r.start_ts},
+                    {"duration_ms", r.duration_ms}
+                });
+            }
             std::cout << json{
                 {"job_id", found_job->job_id},
                 {"job_name", found_job->job_name},
                 {"condition", found_job->condition_expr.value_or("")},
                 {"continue_on_error", found_job->continue_on_error},
-                {"steps", steps_arr}
+                {"steps", steps_arr},
+                {"triggers", trigs_arr},
+                {"recent_runs", runs_arr}
             }.dump(2) << "\n";
         } else {
             std::cout << "\n  Job: " << found_job->job_name << "\n";
@@ -2486,6 +3019,21 @@ int run(int argc, char** argv) {
             if (found_job->continue_on_error) {
                 std::cout << "  Continue on error: true\n";
             }
+
+            // Triggers section.
+            if (!trigs.empty()) {
+                std::cout << "\n  Triggers:\n";
+                for (const auto* t : trigs) {
+                    auto nf = compute_next_fire(*t);
+                    std::cout << "    " << engine::trigger_spec_type_name(
+                                     t->spec)
+                              << ": " << nf.schedule_expr
+                              << "  (next: " << nf.relative << ")\n";
+                }
+            } else {
+                std::cout << "  Triggers: (none — manual run only)\n";
+            }
+
             std::cout << "\n  Steps (" << found_job->steps.size() << "):\n";
             for (size_t si = 0; si < found_job->steps.size(); ++si) {
                 const auto& s = found_job->steps[si];
@@ -2504,6 +3052,30 @@ int run(int argc, char** argv) {
                     std::cout << "       env: " << s.env.size()
                               << " var(s)\n";
                 }
+            }
+
+            // Recent runs section.
+            if (!recent_runs.empty()) {
+                std::cout << "\n  Recent Runs:\n\n";
+                cli::Table rt({"RUN ID", "STATUS", "WHEN",
+                                "DURATION"});
+                for (const auto& r : recent_runs) {
+                    std::string status_str = r.status;
+                    if (use_color) {
+                        status_str = cli::status_icon(r.status, true)
+                            + " " + cli::colorize_status(r.status, true);
+                    }
+                    rt.add_row({
+                        cli::truncate(r.run_id, 16),
+                        status_str,
+                        format_relative_ts(r.start_ts),
+                        cli::format_duration(r.duration_ms)
+                    });
+                }
+                std::cout << "  ";
+                rt.render(std::cout, use_color);
+            } else {
+                std::cout << "\n  Recent Runs: (no runs recorded)\n";
             }
             std::cout << "\n";
         }
