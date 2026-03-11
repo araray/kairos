@@ -24,8 +24,38 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 # ── Options ────────────────────────────────────────────────────────────────
 include(cmake/KairosOptions.cmake)
 
+# ── Sanitizer support ─────────────────────────────────────────────────────
+# Apply -fsanitize= flags globally when KAIROS_SANITIZERS is set.
+# SQLite's bundled amalgamation triggers known false-positive UBSan
+# findings in its B-tree MemPage pointer casts — we suppress UBSan
+# for that specific translation unit after FetchContent populates it.
+if(KAIROS_SANITIZERS)
+    string(REPLACE "," ";" _san_list "${KAIROS_SANITIZERS}")
+    string(REPLACE ";" "," _san_flags "${_san_list}")
+    set(_san_compile "-fsanitize=${_san_flags} -fno-omit-frame-pointer")
+    set(_san_link    "-fsanitize=${_san_flags}")
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${_san_compile}")
+    set(CMAKE_C_FLAGS   "${CMAKE_C_FLAGS} ${_san_compile}")
+    set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} ${_san_link}")
+    set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} ${_san_link}")
+    message(STATUS "Sanitizers enabled: ${_san_flags}")
+endif()
+
 # ── Dependencies ───────────────────────────────────────────────────────────
 include(cmake/KairosDependencies.cmake)
+
+# ── SQLite UBSan suppression ──────────────────────────────────────────────
+# SQLite's amalgamation (compiled by SQLiteCpp) triggers known UBSan false
+# positives in btree.c MemPage pointer casts (line ~78114 in sqlite3.c).
+# Suppress undefined-behavior sanitizer for the amalgamation only.
+# The sqlite3 target is created by SQLiteCpp's CMakeLists.txt.
+if(KAIROS_SANITIZERS AND TARGET sqlite3)
+    string(FIND "${KAIROS_SANITIZERS}" "undefined" _has_ubsan)
+    if(NOT _has_ubsan EQUAL -1)
+        target_compile_options(sqlite3 PRIVATE -fno-sanitize=undefined)
+        message(STATUS "UBSan suppressed for sqlite3 amalgamation (known false positives)")
+    endif()
+endif()
 
 # ── Core library (always built) ────────────────────────────────────────────
 add_library(kairos_core STATIC

@@ -1,0 +1,16 @@
+# ╔════════════════════════════════════════════════════════════════════════════╗
+# ║  UBSan Suppression File                                                   ║
+# ║                                                                           ║
+# ║  Known false positives in third-party dependencies.                       ║
+# ║  Usage: UBSAN_OPTIONS=suppressions=/path/to/ubsan_suppressions.txt        ║
+# ║                                                                           ║
+# ║  See: https://clang.llvm.org/docs/UndefinedBehaviorSanitizer.html        ║
+# ╚════════════════════════════════════════════════════════════════════════════╝
+
+# SQLite amalgamation: B-tree MemPage pointer casts trigger
+# object-size / alignment false positives. These are architecturally
+# correct — SQLite pre-allocates page buffers and casts them to
+# MemPage*. The UBSan finding at sqlite3.c:~78114 is a known issue.
+# Ref: https://sqlite.org/forum/forumpost/a]
+alignment:sqlite3.c
+object-size:sqlite3.c

@@ -90,6 +90,10 @@ if(KAIROS_HTTP)
         GIT_TAG        v0.15.3
         GIT_SHALLOW    TRUE
     )
+    # Kairos uses HTTP (plain) only — TLS is handled by reverse proxy.
+    # Disabling OpenSSL prevents transitive curl linkage on some systems.
+    set(HTTPLIB_REQUIRE_OPENSSL OFF CACHE BOOL "" FORCE)
+    set(HTTPLIB_USE_OPENSSL_IF_AVAILABLE OFF CACHE BOOL "" FORCE)
 
     # inja — Jinja2-compatible template engine (header-only, MIT).
     # Depends on nlohmann/json (already present — FetchContent deduplicates).
@@ -154,14 +158,20 @@ if(KAIROS_OTEL)
         # OTel v1.14.2 unconditionally does find_package(Protobuf) at
         # top level. If it finds protobuf >= 3.22 on the system, it
         # demands abseil-cpp — even with WITH_OTLP=OFF. Block it.
+        # Also block CURL — the OTLP HTTP exporter needs it, but we
+        # disabled OTLP. Without this, OTel's cmake may find a system
+        # curl and link it transitively (e.g. linuxbrew's libcurl.so.4
+        # which lacks version symbols → runtime warning).
         set(CMAKE_DISABLE_FIND_PACKAGE_Protobuf TRUE)
         set(CMAKE_DISABLE_FIND_PACKAGE_protobuf TRUE)
+        set(CMAKE_DISABLE_FIND_PACKAGE_CURL TRUE)
 
         FetchContent_MakeAvailable(opentelemetry-cpp)
 
-        # Restore protobuf discoverability for the rest of the project.
+        # Restore package discoverability for the rest of the project.
         unset(CMAKE_DISABLE_FIND_PACKAGE_Protobuf)
         unset(CMAKE_DISABLE_FIND_PACKAGE_protobuf)
+        unset(CMAKE_DISABLE_FIND_PACKAGE_CURL)
         set(KAIROS_OTEL_OTLP OFF CACHE BOOL "OTLP HTTP exporter not available" FORCE)
     endif()
 endif()

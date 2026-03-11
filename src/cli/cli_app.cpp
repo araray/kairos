@@ -1252,6 +1252,8 @@ int run(int argc, char** argv) {
                 {"data_dir", cfg->data_dir.string()},
                 {"db_size_bytes", db_size},
                 {"workflows", static_cast<int>(registry->workflow_count())},
+                {"standalone_jobs", static_cast<int>(registry->standalone_job_count())},
+                {"triggers", static_cast<int>(registry->trigger_count())},
                 {"watch_groups", static_cast<int>(registry->watch_group_count())},
                 {"total_runs", stats.total_runs},
                 {"runs_today", stats.runs_today},
@@ -1309,6 +1311,10 @@ int run(int argc, char** argv) {
                 "  Workflows:    {}    Watch Groups: {}\n",
                 registry->workflow_count(),
                 registry->watch_group_count());
+            std::cout << fmt::format(
+                "  Jobs:         {}    Triggers:     {}\n",
+                registry->standalone_job_count(),
+                registry->trigger_count());
             std::cout << fmt::format(
                 "  DB Size:      {}    Total Runs:   {}\n",
                 format_bytes(db_size), stats.total_runs);

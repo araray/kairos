@@ -1,73 +1,125 @@
 {
-    "version": 6,
-    "cmakeMinimumRequired": { "major": 3, "minor": 22, "patch": 0 },
+  "version": 6,
+  "cmakeMinimumRequired": { "major": 3, "minor": 22, "patch": 0 },
 
-    "configurePresets": [
-        {
-            "name": "base",
-            "hidden": true,
-            "binaryDir": "${sourceDir}/build/${presetName}",
-            "cacheVariables": {
-                "CMAKE_EXPORT_COMPILE_COMMANDS": "ON",
-                "KAIROS_BUILD_TESTS": "ON"
-            }
-        },
-        {
-            "name": "debug-gcc",
-            "displayName": "Debug (GCC)",
-            "inherits": "base",
-            "cacheVariables": {
-                "CMAKE_BUILD_TYPE": "Debug",
-                "CMAKE_CXX_COMPILER": "g++"
-            }
-        },
-        {
-            "name": "release-gcc",
-            "displayName": "Release (GCC)",
-            "inherits": "base",
-            "cacheVariables": {
-                "CMAKE_BUILD_TYPE": "Release",
-                "CMAKE_CXX_COMPILER": "g++"
-            }
-        },
-        {
-            "name": "debug-clang",
-            "displayName": "Debug (Clang)",
-            "inherits": "base",
-            "cacheVariables": {
-                "CMAKE_BUILD_TYPE": "Debug",
-                "CMAKE_CXX_COMPILER": "clang++"
-            }
-        },
-        {
-            "name": "release-clang",
-            "displayName": "Release (Clang)",
-            "inherits": "base",
-            "cacheVariables": {
-                "CMAKE_BUILD_TYPE": "Release",
-                "CMAKE_CXX_COMPILER": "clang++"
-            }
-        }
-    ],
+  "configurePresets": [
+    {
+      "name": "base",
+      "hidden": true,
+      "binaryDir": "${sourceDir}/build/${presetName}",
+      "cacheVariables": {
+        "CMAKE_EXPORT_COMPILE_COMMANDS": "ON",
+        "KAIROS_BUILD_TESTS": "ON"
+      }
+    },
+    {
+      "name": "debug-gcc",
+      "displayName": "Debug (GCC)",
+      "inherits": "base",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "CMAKE_CXX_COMPILER": "g++"
+      }
+    },
+    {
+      "name": "release-gcc",
+      "displayName": "Release (GCC)",
+      "inherits": "base",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "CMAKE_CXX_COMPILER": "g++"
+      }
+    },
+    {
+      "name": "debug-clang",
+      "displayName": "Debug (Clang)",
+      "inherits": "base",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "CMAKE_CXX_COMPILER": "clang++"
+      }
+    },
+    {
+      "name": "release-clang",
+      "displayName": "Release (Clang)",
+      "inherits": "base",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "CMAKE_CXX_COMPILER": "clang++"
+      }
+    },
+    {
+      "name": "release-san",
+      "displayName": "Release + Sanitizers (GCC)",
+      "description": "Release build with ASan+UBSan. SQLite amalgamation UBSan is auto-suppressed.",
+      "inherits": "base",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "RelWithDebInfo",
+        "CMAKE_CXX_COMPILER": "g++",
+        "KAIROS_SANITIZERS": "address,undefined"
+      }
+    },
+    {
+      "name": "debug-san",
+      "displayName": "Debug + Sanitizers (GCC)",
+      "description": "Debug build with ASan+UBSan.",
+      "inherits": "base",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "CMAKE_CXX_COMPILER": "g++",
+        "KAIROS_SANITIZERS": "address,undefined"
+      }
+    },
+    {
+      "name": "tsan-gcc",
+      "displayName": "ThreadSanitizer (GCC)",
+      "description": "Debug build with TSan. Cannot combine with ASan.",
+      "inherits": "base",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "CMAKE_CXX_COMPILER": "g++",
+        "KAIROS_SANITIZERS": "thread"
+      }
+    }
+  ],
 
-    "buildPresets": [
-        {
-            "name": "debug-gcc",
-            "configurePreset": "debug-gcc",
-            "configuration": "Debug"
-        },
-        {
-            "name": "release-gcc",
-            "configurePreset": "release-gcc",
-            "configuration": "Release"
-        }
-    ],
+  "buildPresets": [
+    {
+      "name": "debug-gcc",
+      "configurePreset": "debug-gcc",
+      "configuration": "Debug"
+    },
+    {
+      "name": "release-gcc",
+      "configurePreset": "release-gcc",
+      "configuration": "Release"
+    },
+    {
+      "name": "release-san",
+      "configurePreset": "release-san",
+      "configuration": "RelWithDebInfo"
+    },
+    {
+      "name": "debug-san",
+      "configurePreset": "debug-san",
+      "configuration": "Debug"
+    }
+  ],
 
-    "testPresets": [
-        {
-            "name": "default",
-            "configurePreset": "debug-gcc",
-            "output": { "outputOnFailure": true }
-        }
-    ]
+  "testPresets": [
+    {
+      "name": "default",
+      "configurePreset": "debug-gcc",
+      "output": { "outputOnFailure": true }
+    },
+    {
+      "name": "sanitizer",
+      "configurePreset": "debug-san",
+      "output": { "outputOnFailure": true },
+      "environment": {
+        "ASAN_OPTIONS": "detect_leaks=1:halt_on_error=1",
+        "UBSAN_OPTIONS": "print_stacktrace=1:halt_on_error=1"
+      }
+    }
+  ]
 }

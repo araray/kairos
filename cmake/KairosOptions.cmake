@@ -11,6 +11,11 @@ option(KAIROS_ANSIBLE     "Build with Ansible runner support"  OFF)
 option(KAIROS_TUI         "Build TUI dashboard (FTXUI)"        OFF)
 option(KAIROS_BUILD_TESTS "Build test suite"                   ON)
 
+# Sanitizer support.
+# Values: "" (none), "address", "undefined", "address,undefined", "thread"
+set(KAIROS_SANITIZERS "" CACHE STRING
+    "Comma-separated sanitizers to enable (address, undefined, thread)")
+
 # Dependency management strategy.
 option(KAIROS_USE_SYSTEM_DEPS
     "Prefer system-installed libraries over FetchContent"       OFF)
