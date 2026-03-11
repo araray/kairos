@@ -672,6 +672,17 @@ if(KAIROS_DOCKER)
 endif()
 gtest_discover_tests(test_docker_runner)
 
+# ── Ansible runner tests ───────────────────────────────────────────────
+
+add_executable(test_ansible_runner
+    unit/exec/ansible_runner_test.cpp
+)
+target_link_libraries(test_ansible_runner PRIVATE kairos_test_helpers)
+if(KAIROS_ANSIBLE)
+    target_compile_definitions(test_ansible_runner PRIVATE KAIROS_ANSIBLE_ENABLED)
+endif()
+gtest_discover_tests(test_ansible_runner)
+
 # ── E2E daemon lifecycle tests (§30.6 Tier 4) ─────────────────────────
 
 add_executable(test_e2e_daemon_lifecycle
@@ -693,5 +704,17 @@ target_link_libraries(test_migration PRIVATE kairos_test_helpers)
 gtest_discover_tests(test_migration
     PROPERTIES
         LABELS "migration"
+        TIMEOUT 60
+)
+
+# ── TUI dashboard tests (§23, §5.12) ─────────────────────────────────────
+
+add_executable(test_tui
+    unit/tui/tui_test.cpp
+)
+target_link_libraries(test_tui PRIVATE kairos_test_helpers)
+gtest_discover_tests(test_tui
+    PROPERTIES
+        LABELS "tui"
         TIMEOUT 60
 )

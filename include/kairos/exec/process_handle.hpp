@@ -98,6 +98,42 @@ struct ProcessSpec {
 
     /// Remove the container after execution completes (even on failure).
     bool docker_remove = true;
+
+    // ── Ansible runner fields (§15.4) ──────────────────────────────
+
+    /// Path to the Ansible playbook file (.yml/.yaml).
+    /// Required when runner_type == "ansible".
+    std::string ansible_playbook;
+
+    /// Inventory file path or host pattern (e.g., "localhost,").
+    /// If empty, defaults to "localhost," with --connection local.
+    std::string ansible_inventory;
+
+    /// Extra variables as a JSON string.
+    /// Passed to ansible-playbook via --extra-vars.
+    std::string ansible_extra_vars;
+
+    /// Vault decryption password. Injected via ANSIBLE_VAULT_PASSWORD
+    /// environment variable (never on the command line).
+    std::string ansible_vault_password;
+
+    /// Limit execution to specific hosts (--limit).
+    std::string ansible_limit;
+
+    /// Run only tasks tagged with these tags (--tags).
+    std::string ansible_tags;
+
+    /// Skip tasks tagged with these tags (--skip-tags).
+    std::string ansible_skip_tags;
+
+    /// Run in check mode (--check). No changes are made.
+    bool ansible_check = false;
+
+    /// Show diffs for template/file changes (--diff).
+    bool ansible_diff = false;
+
+    /// Verbosity level (0–4). 0 = normal, 1 = -v, 2 = -vv, etc.
+    int ansible_verbosity = 0;
 };
 
 // ── Process result ───────────────────────────────────────────────────────

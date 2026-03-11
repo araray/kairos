@@ -64,6 +64,7 @@ add_library(kairos_core STATIC
     src/mcp/transport.cpp
     src/mcp/handler.cpp
     src/migration/migration_tool.cpp
+    src/tui/tui_helpers.cpp
 )
 
 # ── Native watch backends (platform-specific) ─────────────────────────────
@@ -194,6 +195,14 @@ else()
     target_sources(kairos_core PRIVATE src/exec/docker_process_handle_stub.cpp)
 endif()
 
+# ── Optional: Ansible runner support (KAIROS_ANSIBLE=ON) ────────────────
+if(KAIROS_ANSIBLE)
+    target_sources(kairos_core PRIVATE src/exec/ansible_process_handle.cpp)
+    target_compile_definitions(kairos_core PUBLIC KAIROS_ANSIBLE_ENABLED)
+else()
+    target_sources(kairos_core PRIVATE src/exec/ansible_process_handle_stub.cpp)
+endif()
+
 # ── Optional: systemd integration (Linux only) ───────────────────────────
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     find_package(PkgConfig QUIET)
@@ -214,6 +223,28 @@ endif()
 if(WIN32)
     target_sources(kairos PRIVATE src/daemon/win32_service.cpp)
     target_link_libraries(kairos PRIVATE advapi32)
+endif()
+
+# ── Optional: TUI dashboard (KAIROS_TUI=ON) ─────────────────────────────
+if(KAIROS_TUI)
+    FetchContent_Declare(ftxui
+        GIT_REPOSITORY https://github.com/ArthurSonzogni/FTXUI.git
+        GIT_TAG        v5.0.0
+        GIT_SHALLOW    TRUE
+    )
+    set(FTXUI_BUILD_DOCS OFF CACHE BOOL "" FORCE)
+    set(FTXUI_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+    set(FTXUI_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+    FetchContent_MakeAvailable(ftxui)
+
+    target_sources(kairos PRIVATE src/tui/tui_dashboard.cpp)
+    target_compile_definitions(kairos PRIVATE KAIROS_TUI_ENABLED)
+    target_link_libraries(kairos PRIVATE
+        ftxui::screen ftxui::dom ftxui::component)
+    message(STATUS "TUI: FTXUI dashboard enabled")
+else()
+    target_sources(kairos PRIVATE src/tui/tui_dashboard_stub.cpp)
+    message(STATUS "TUI: dashboard disabled (stub)")
 endif()
 
 # ── Tests ──────────────────────────────────────────────────────────────────

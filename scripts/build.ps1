@@ -30,6 +30,7 @@ param(
     [switch]$Http,
     [switch]$Otel,
     [switch]$Vault,
+    [switch]$Docker,
     [switch]$Tui,
 
     # Sanitizers (MSVC supports ASan)
@@ -124,6 +125,7 @@ if ($ShowHelp)
     Write-Host "    -Http                  Build HTTP server + Web UI"
     Write-Host "    -Otel                  Build with OpenTelemetry tracing"
     Write-Host "    -Vault                 Build with Ansible Vault support (OpenSSL)"
+    Write-Host "    -Docker                Build with Docker runner support"
     Write-Host "    -Tui                   Build TUI dashboard (FTXUI)"
     Write-Host ""
     Write-Host "  SANITIZERS"
@@ -134,8 +136,8 @@ if ($ShowHelp)
     Write-Host "    -Profile san           Debug + ASan + tests"
     Write-Host "    -Profile release       Release, no tests"
     Write-Host "    -Profile ci            Debug + ASan + tests"
-    Write-Host "    -Profile full          Release + HTTP + OTel + Vault + tests"
-    Write-Host "    -Profile full-debug    Debug + HTTP + OTel + Vault + tests"
+    Write-Host "    -Profile full           Release + HTTP + OTel + Vault + Docker + TUI + tests"
+    Write-Host "    -Profile full-debug    Debug + HTTP + OTel + Vault + Docker + TUI + tests"
     Write-Host "    -Profile full-san-debug  Debug + all features + ASan"
     Write-Host ""
     Write-Host "  TOOLCHAIN"
@@ -185,6 +187,7 @@ $EnableTests = "ON"
 $EnableHttp = "OFF"
 $EnableOtel = "OFF"
 $EnableVault = "OFF"
+$EnableDocker = "OFF"
 $EnableTui = "OFF"
 $EnableAsan = "OFF"
 
@@ -203,16 +206,16 @@ switch ($Profile)
     { $BuildType = "Debug"; $EnableAsan = "ON"; $EnableTests = "ON"
     }
     "full"
-    { $BuildType = "Release"; $EnableHttp = "ON"; $EnableOtel = "ON"; $EnableVault = "ON"; $EnableTests = "ON"
+    { $BuildType = "Release"; $EnableHttp = "ON"; $EnableOtel = "ON"; $EnableVault = "ON"; $EnableDocker = "ON"; $EnableTui = "ON"; $EnableTests = "ON"
     }
     "full-debug"
-    { $BuildType = "Debug"; $EnableHttp = "ON"; $EnableOtel = "ON"; $EnableVault = "ON"; $EnableTests = "ON"
+    { $BuildType = "Debug"; $EnableHttp = "ON"; $EnableOtel = "ON"; $EnableVault = "ON"; $EnableDocker = "ON"; $EnableTui = "ON"; $EnableTests = "ON"
     }
     "full-san-debug"
-    { $BuildType = "Debug"; $EnableHttp = "ON"; $EnableOtel = "ON"; $EnableVault = "ON"; $EnableTests = "ON"; $EnableAsan = "ON"
+    { $BuildType = "Debug"; $EnableHttp = "ON"; $EnableOtel = "ON"; $EnableVault = "ON"; $EnableDocker = "ON"; $EnableTui = "ON"; $EnableTests = "ON"; $EnableAsan = "ON"
     }
     "package"
-    { $BuildType = "Release"; $EnableHttp = "ON"; $EnableVault = "ON"; $EnableTests = "OFF"; $Package = [switch]::Present
+    { $BuildType = "Release"; $EnableHttp = "ON"; $EnableVault = "ON"; $EnableDocker = "ON"; $EnableTui = "ON"; $EnableTests = "OFF"; $Package = [switch]::Present
     }
 }
 
@@ -242,6 +245,9 @@ if ($Otel)
 }
 if ($Vault)
 { $EnableVault = "ON"
+}
+if ($Docker)
+{ $EnableDocker = "ON"
 }
 if ($Tui)
 { $EnableTui = "ON"
@@ -298,6 +304,9 @@ if ($EnableOtel -eq "ON")
 if ($EnableVault -eq "ON")
 { $features += "vault"
 }
+if ($EnableDocker -eq "ON")
+{ $features += "docker"
+}
 if ($EnableTui -eq "ON")
 { $features += "tui"
 }
@@ -349,6 +358,7 @@ $CmakeArgs = @(
     "-DKAIROS_HTTP=$EnableHttp",
     "-DKAIROS_OTEL=$EnableOtel",
     "-DKAIROS_VAULT=$EnableVault",
+    "-DKAIROS_DOCKER=$EnableDocker",
     "-DKAIROS_TUI=$EnableTui"
 )
 

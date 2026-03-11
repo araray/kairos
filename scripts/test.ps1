@@ -19,6 +19,15 @@ param(
     [string]$Filter = "",
     [string]$Exclude = "",
 
+    # Suite shortcuts (convenience)
+    [switch]$Tui,
+    [switch]$Kel,
+    [switch]$Watch,
+    [switch]$Mcp,
+    [switch]$Engine,
+    [switch]$Migration,
+    [switch]$E2E,
+
     # Build selection
     [string]$BuildDir = "",
     [switch]$San,
@@ -78,6 +87,15 @@ if ($ShowHelp) {
     Write-Host "    -Filter <regex>        Only tests whose name matches regex"
     Write-Host "    -Exclude <regex>       Exclude tests whose name matches regex"
     Write-Host ""
+    Write-Host "  SUITE SHORTCUTS (convenience filters)"
+    Write-Host "    -Tui                   Run TUI dashboard tests only"
+    Write-Host "    -Kel                   Run KEL (expression language) tests only"
+    Write-Host "    -Watch                 Run watch engine tests only"
+    Write-Host "    -Mcp                   Run MCP server tests only"
+    Write-Host "    -Engine                Run engine (pipeline/DAG/scheduler) tests only"
+    Write-Host "    -Migration             Run migration tool tests only"
+    Write-Host "    -E2E                   Run end-to-end tests only"
+    Write-Host ""
     Write-Host "  BUILD SELECTION"
     Write-Host "    -BuildDir <path>       Explicit build directory"
     Write-Host "    -San                   Use sanitizer build (build\debug-asan)"
@@ -104,6 +122,7 @@ if ($ShowHelp) {
     Write-Host "    .\scripts\test.ps1 -San -StopOnFail             # Sanitizer, stop early"
     Write-Host "    .\scripts\test.ps1 -Config Release              # Release build tests"
     Write-Host "    .\scripts\test.ps1 -Repeat 5                    # Stress test"
+    Write-Host "    .\scripts\test.ps1 -Tui                          # TUI tests only"
     Write-Host ""
     exit 0
 }
@@ -233,6 +252,17 @@ if (-not (Test-Path (Join-Path $BuildDir "CTestTestfile.cmake"))) {
 $DetectedConfig = Detect-BuildConfig $BuildDir
 
 # =============================================================================
+# Apply suite shortcuts (override -Filter if a shortcut was used)
+# =============================================================================
+if ($Tui)       { $Filter = "Tui" }
+if ($Kel)       { $Filter = "Kel|Lexer|Parser|Evaluator" }
+if ($Watch)     { $Filter = "Watch|Scan|Inotify|Debounce|Hash" }
+if ($Mcp)       { $Filter = "Mcp" }
+if ($Engine)    { $Filter = "Pipeline|Dag|Scheduler|Trigger|Execution" }
+if ($Migration) { $Filter = "Migration" }
+if ($E2E)       { $Filter = "E2E|DaemonLifecycle" }
+
+# =============================================================================
 # CTest arguments
 # =============================================================================
 $ctestArgs = [System.Collections.Generic.List[string]]::new()
@@ -285,6 +315,12 @@ if ($List) {
             elseif ($name -match "Schema|Migration|Database")             { $color = "$esc[33m"; $badge = "db  " }
             elseif ($name -match "Json|Log")                              { $color = "$esc[36m"; $badge = "log " }
             elseif ($name -match "Exit")                                  { $color = "$esc[31m"; $badge = "exit" }
+            elseif ($name -match "Tui|Dashboard")                         { $color = "$esc[35m"; $badge = "tui " }
+            elseif ($name -match "Mcp")                                   { $color = "$esc[36m"; $badge = "mcp " }
+            elseif ($name -match "Watch|Scan|Inotify|Debounce")           { $color = "$esc[32m"; $badge = "wtch" }
+            elseif ($name -match "Kel|Lexer|Parser|Evaluator")            { $color = "$esc[34m"; $badge = "kel " }
+            elseif ($name -match "Pipeline|Dag|Scheduler|Trigger")        { $color = "$esc[33m"; $badge = "eng " }
+            elseif ($name -match "Runner|Process|Docker")                 { $color = "$esc[31m"; $badge = "exec" }
             else                                                          { $color = "$esc[37m"; $badge = "    " }
             Write-Host ("  $esc[2m{0,3}$esc[0m  ${color}{1,-4}$esc[0m  {2}" -f $num, $badge, $name)
         }

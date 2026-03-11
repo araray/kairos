@@ -80,6 +80,15 @@ HEADER
     echo "    -R, --filter <regex>   Only tests whose name matches regex"
     echo "    -E, --exclude <regex>  Exclude tests whose name matches regex"
     echo ""
+    echo -e "  ${C_BOLD}SUITE SHORTCUTS${C_RESET}  ${C_DIM}(convenience filters)${C_RESET}"
+    echo "    --tui                  Run TUI dashboard tests only"
+    echo "    --kel                  Run KEL (expression language) tests only"
+    echo "    --watch                Run watch engine tests only"
+    echo "    --mcp                  Run MCP server tests only"
+    echo "    --engine               Run engine (pipeline/DAG/scheduler) tests only"
+    echo "    --migration            Run migration tool tests only"
+    echo "    --e2e                  Run end-to-end tests only"
+    echo ""
     echo -e "  ${C_BOLD}BUILD SELECTION${C_RESET}"
     echo "    --build-dir <path>     Explicit build directory"
     echo "    --san                  Use sanitizer build (build/debug-san)"
@@ -117,6 +126,9 @@ HEADER
     echo "    ${C_DIM}# Run a single test by name${C_RESET}"
     echo "    ./scripts/test.sh --filter 'SchemaTest.AllTablesExist'"
     echo ""
+    echo "    ${C_DIM}# Run TUI dashboard tests${C_RESET}"
+    echo "    ./scripts/test.sh --tui"
+    echo ""
 }
 
 # ── Parse arguments ───────────────────────────────────────────────────────────
@@ -131,6 +143,15 @@ while [[ $# -gt 0 ]]; do
         -E|--exclude)
             [[ $# -ge 2 ]] || _die "--exclude requires a regex"
             EXCLUDE="$2"; shift 2 ;;
+
+        # Suite shortcuts (convenience)
+        --tui)              FILTER="Tui"; shift ;;
+        --kel)              FILTER="Kel|Lexer|Parser|Evaluator"; shift ;;
+        --watch)            FILTER="Watch|Scan|Inotify|Debounce|Hash"; shift ;;
+        --mcp)              FILTER="Mcp"; shift ;;
+        --engine)           FILTER="Pipeline|Dag|Scheduler|Trigger|Execution"; shift ;;
+        --migration)        FILTER="Migration"; shift ;;
+        --e2e)              FILTER="E2E|DaemonLifecycle"; shift ;;
 
         # Build selection
         --build-dir)
@@ -404,6 +425,18 @@ if [[ "$LIST_ONLY" == true ]]; then
                 color="$C_CYAN"; badge="log "
             elif [[ "$name" == *Exit* ]]; then
                 color="$C_RED"; badge="exit"
+            elif [[ "$name" == *Tui* || "$name" == *Dashboard* ]]; then
+                color="$C_MAGENTA"; badge="tui "
+            elif [[ "$name" == *Mcp* ]]; then
+                color="$C_CYAN"; badge="mcp "
+            elif [[ "$name" == *Watch* || "$name" == *Scan* || "$name" == *Inotify* ]]; then
+                color="$C_GREEN"; badge="wtch"
+            elif [[ "$name" == *Kel* || "$name" == *Lexer* || "$name" == *Parser* || "$name" == *Evaluator* ]]; then
+                color="$C_BLUE"; badge="kel "
+            elif [[ "$name" == *Pipeline* || "$name" == *Dag* || "$name" == *Scheduler* || "$name" == *Trigger* ]]; then
+                color="$C_YELLOW"; badge="eng "
+            elif [[ "$name" == *Runner* || "$name" == *Process* || "$name" == *Docker* ]]; then
+                color="$C_RED"; badge="exec"
             else
                 color="$C_WHITE"; badge="    "
             fi

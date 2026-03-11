@@ -99,7 +99,7 @@ HEADER
     echo "    --otel                 Build with OpenTelemetry tracing"
     echo "    --vault                Build with Ansible Vault support (OpenSSL)"
     echo "    --docker               Build with Docker runner support"
-    echo "    --tui                  Build TUI dashboard (FTXUI)"
+    echo "    --tui / --no-tui       Build TUI dashboard (FTXUI)"
     echo ""
     echo -e "  ${C_BOLD}SANITIZERS${C_RESET}"
     echo "    --asan                 Enable AddressSanitizer"
@@ -112,10 +112,10 @@ HEADER
     echo "    --profile san          Debug + ASan + UBSan + tests"
     echo "    --profile release      Release + no tests"
     echo "    --profile ci           Debug + tests + ASan + UBSan"
-    echo "    --profile full         Release + HTTP + OTel + Vault + Docker + tests"
-    echo "    --profile full-debug   Debug + HTTP + OTel + Vault + Docker + tests"
+    echo "    --profile full         Release + HTTP + OTel + Vault + Docker + TUI + tests"
+    echo "    --profile full-debug   Debug + HTTP + OTel + Vault + Docker + TUI + tests"
     echo "    --profile full-san-debug  Debug + all features + ASan + UBSan"
-    echo "    --profile package      Release + HTTP + Vault + Docker + DEB/RPM/ZIP"
+    echo "    --profile package      Release + HTTP + Vault + Docker + TUI + DEB/RPM/ZIP"
     echo ""
     echo -e "  ${C_BOLD}TOOLCHAIN${C_RESET}"
     echo "    --compiler gcc         Use GCC (sets CC/CXX)"
@@ -190,6 +190,7 @@ while [[ $# -gt 0 ]]; do
         --docker)           ENABLE_DOCKER="ON"; shift ;;
         --no-docker)        ENABLE_DOCKER="OFF"; shift ;;
         --tui)              ENABLE_TUI="ON"; shift ;;
+        --no-tui)           ENABLE_TUI="OFF"; shift ;;
 
         # Sanitizers
         --asan)             ENABLE_ASAN="ON"; shift ;;
@@ -269,6 +270,7 @@ if [[ -n "$PROFILE" ]]; then
             ENABLE_OTEL="ON"
             ENABLE_VAULT="ON"
             ENABLE_DOCKER="ON"
+            ENABLE_TUI="ON"
             ENABLE_TESTS="ON"
             ;;
         full-san)
@@ -277,6 +279,7 @@ if [[ -n "$PROFILE" ]]; then
             ENABLE_OTEL="ON"
             ENABLE_VAULT="ON"
             ENABLE_DOCKER="ON"
+            ENABLE_TUI="ON"
             ENABLE_TESTS="ON"
             ENABLE_ASAN="ON"
             ENABLE_UBSAN="ON"
@@ -287,6 +290,7 @@ if [[ -n "$PROFILE" ]]; then
             ENABLE_OTEL="ON"
             ENABLE_VAULT="ON"
             ENABLE_DOCKER="ON"
+            ENABLE_TUI="ON"
             ENABLE_TESTS="ON"
             ;;
         full-san-debug)
@@ -295,6 +299,7 @@ if [[ -n "$PROFILE" ]]; then
             ENABLE_OTEL="ON"
             ENABLE_VAULT="ON"
             ENABLE_DOCKER="ON"
+            ENABLE_TUI="ON"
             ENABLE_TESTS="ON"
             ENABLE_ASAN="ON"
             ENABLE_UBSAN="ON"
@@ -304,6 +309,7 @@ if [[ -n "$PROFILE" ]]; then
             ENABLE_HTTP="ON"
             ENABLE_VAULT="ON"
             ENABLE_DOCKER="ON"
+            ENABLE_TUI="ON"
             ENABLE_TESTS="OFF"
             PACKAGE_ALL=true
             ;;
