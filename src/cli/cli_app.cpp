@@ -30,6 +30,7 @@
 #include "kairos/testing/fake_clock.hpp"
 #include "kairos/watch/real_scanner.hpp"
 #include "kairos/watch/watch_engine.hpp"
+#include "kairos/tui/tui_dashboard.hpp"
 
 #include <CLI/CLI.hpp>
 #include <nlohmann/json.hpp>
@@ -441,6 +442,16 @@ int run(int argc, char** argv) {
 
     auto* svc_uninstall = cmd_service->add_subcommand("uninstall",
         "Uninstall the Kairos Windows Service");
+
+    // ── dashboard (TUI) ──────────────────────────────────────────────
+    auto* cmd_dashboard = app.add_subcommand("dashboard",
+        "Launch real-time TUI dashboard (requires KAIROS_TUI=ON)");
+    std::string dashboard_db;
+    int dashboard_refresh = 1000;
+    cmd_dashboard->add_option("--db", dashboard_db,
+        "Path to Kairos SQLite database");
+    cmd_dashboard->add_option("--refresh", dashboard_refresh,
+        "Refresh interval in milliseconds (default: 1000)");
 
     // ── Parse ─────────────────────────────────────────────────────────
     try {
@@ -2844,14 +2855,14 @@ int run(int argc, char** argv) {
 
                     // Run steps.
                     SQLite::Statement del_steps(*db,
-                        "DELETE FROM run_steps WHERE run_id IN "
+                        "DELETE FROM step_runs WHERE run_id IN "
                         "(SELECT run_id FROM runs WHERE start_ts < " +
                         cutoff + ")");
                     total_deleted += del_steps.exec();
 
                     // Run jobs.
                     SQLite::Statement del_jobs(*db,
-                        "DELETE FROM run_jobs WHERE run_id IN "
+                        "DELETE FROM job_runs WHERE run_id IN "
                         "(SELECT run_id FROM runs WHERE start_ts < " +
                         cutoff + ")");
                     total_deleted += del_jobs.exec();
@@ -2953,13 +2964,13 @@ int run(int argc, char** argv) {
                 total_deleted += del_chunks.exec();
 
                 SQLite::Statement del_steps(*db,
-                    "DELETE FROM run_steps WHERE run_id IN "
+                    "DELETE FROM step_runs WHERE run_id IN "
                     "(SELECT run_id FROM runs WHERE start_ts < " +
                     cutoff + ")");
                 total_deleted += del_steps.exec();
 
                 SQLite::Statement del_jobs(*db,
-                    "DELETE FROM run_jobs WHERE run_id IN "
+                    "DELETE FROM job_runs WHERE run_id IN "
                     "(SELECT run_id FROM runs WHERE start_ts < " +
                     cutoff + ")");
                 total_deleted += del_jobs.exec();
@@ -3276,6 +3287,23 @@ complete -c kairos -n "__fish_seen_subcommand_from logs" -l step -d "Filter by s
     if (cmd_migrate_db->parsed()) {
         return handle_migrate_db(md_source, md_source_db, md_target_db,
             md_dry_run, json_output);
+    }
+
+    // ── dashboard (TUI) ──────────────────────────────────────────────
+    if (cmd_dashboard->parsed()) {
+        kairos::tui::DashboardConfig dc;
+        if (!dashboard_db.empty()) {
+            dc.db_path = dashboard_db;
+        } else {
+            // Resolve from config.
+            auto store = kairos::config::ConfigStore::load(
+                config_path, {}, {});
+            dc.db_path = store.get<std::string>(
+                "kairos.db_path",
+                "~/.local/share/kairos/kairos.db");
+        }
+        dc.refresh_ms = dashboard_refresh;
+        return kairos::tui::run_dashboard(dc);
     }
 
     // ── service install/uninstall (Windows only) ─────────────────────

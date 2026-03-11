@@ -229,6 +229,37 @@ void QueryReader::register_kel_bindings(
         return kairos::kel::KelValue(success_rate(extract_job_name(obj)));
     };
 
+    // last_run_at → duration (time elapsed since last run)
+    ctx.members["string.last_run_at"] =
+        [this, extract_job_name, reference_time](
+            const kairos::kel::KelValue& obj) -> kairos::kel::KelValue {
+        auto job_name = extract_job_name(obj);
+        // Query the start_ts of the most recent run for this job.
+        SQLite::Statement stmt(db_,
+            "SELECT jr.start_ts FROM job_runs jr "
+            "WHERE jr.job_name = ? "
+            "ORDER BY jr.start_ts DESC LIMIT 1");
+        stmt.bind(1, job_name);
+        if (stmt.executeStep()) {
+            auto ts_str = stmt.getColumn(0).getString();
+            // Parse ISO 8601 timestamp to time_point.
+            std::tm tm{};
+            std::istringstream ss(ts_str);
+            ss >> std::get_time(&tm, "%Y-%m-%dT%H:%M:%S");
+            if (!ss.fail()) {
+                auto tp = std::chrono::system_clock::from_time_t(
+                    std::mktime(&tm));
+                auto elapsed = std::chrono::duration_cast<
+                    std::chrono::milliseconds>(reference_time - tp);
+                return kairos::kel::KelValue(elapsed);
+            }
+        }
+        // Never run — return a very large duration.
+        return kairos::kel::KelValue(
+            std::chrono::milliseconds(
+                std::chrono::hours(24 * 365 * 100)));
+    };
+
     // ── Methods: job("id").finished_within(24h) ──────────────────
 
     ctx.methods["string.finished_within"] =
@@ -809,7 +840,7 @@ QueryReader::PrunePreview QueryReader::query_prune_preview(
     // Run jobs associated with old runs.
     try {
         SQLite::Statement q(db_,
-            "SELECT COUNT(*) FROM run_jobs WHERE run_id IN "
+            "SELECT COUNT(*) FROM job_runs WHERE run_id IN "
             "(SELECT run_id FROM runs WHERE start_ts < " + cutoff_expr + ")");
         if (q.executeStep()) {
             preview.run_jobs_to_delete = q.getColumn(0).getInt64();
@@ -819,7 +850,7 @@ QueryReader::PrunePreview QueryReader::query_prune_preview(
     // Run steps associated with old runs.
     try {
         SQLite::Statement q(db_,
-            "SELECT COUNT(*) FROM run_steps WHERE run_id IN "
+            "SELECT COUNT(*) FROM step_runs WHERE run_id IN "
             "(SELECT run_id FROM runs WHERE start_ts < " + cutoff_expr + ")");
         if (q.executeStep()) {
             preview.run_steps_to_delete = q.getColumn(0).getInt64();

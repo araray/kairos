@@ -705,7 +705,7 @@ int run_daemon(std::shared_ptr<const kairos::config::ConfigState> config) {
             auto prune_elapsed = std::chrono::duration<double>(
                 now - last_retention_prune).count();
             if (prune_elapsed >= prune_interval_s && retention_days > 0) {
-                // 1. Prune old runs (CASCADE deletes run_jobs, run_steps,
+                // 1. Prune old runs (CASCADE deletes job_runs, step_runs,
                 //    log_chunks via ON DELETE CASCADE).
                 // Compute actual ISO 8601 cutoff timestamp — SQLite
                 // parameters are literal values, not evaluated SQL.
