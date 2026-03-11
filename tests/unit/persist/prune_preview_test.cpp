@@ -83,7 +83,7 @@ protected:
         )");
 
         db_->exec(R"(
-            CREATE TABLE IF NOT EXISTS run_jobs (
+            CREATE TABLE IF NOT EXISTS job_runs (
                 run_id TEXT NOT NULL,
                 job_id TEXT NOT NULL,
                 job_name TEXT NOT NULL DEFAULT '',
@@ -101,7 +101,7 @@ protected:
         )");
 
         db_->exec(R"(
-            CREATE TABLE IF NOT EXISTS run_steps (
+            CREATE TABLE IF NOT EXISTS step_runs (
                 run_id TEXT NOT NULL,
                 job_id TEXT NOT NULL,
                 step_id TEXT NOT NULL,
@@ -189,7 +189,7 @@ protected:
     void insert_run_job(const std::string& run_id,
                         const std::string& job_id) {
         SQLite::Statement s(*db_,
-            "INSERT INTO run_jobs (run_id, job_id, status) "
+            "INSERT INTO job_runs (run_id, job_id, status) "
             "VALUES (?, ?, 'SUCCESS')");
         s.bind(1, run_id);
         s.bind(2, job_id);
@@ -201,7 +201,7 @@ protected:
                          const std::string& job_id,
                          const std::string& step_id) {
         SQLite::Statement s(*db_,
-            "INSERT INTO run_steps (run_id, job_id, step_id, status) "
+            "INSERT INTO step_runs (run_id, job_id, step_id, status) "
             "VALUES (?, ?, ?, 'SUCCESS')");
         s.bind(1, run_id);
         s.bind(2, job_id);
