@@ -154,6 +154,47 @@ static std::shared_ptr<engine::WorkflowRegistry> load_registry_from_yaml(
 
 // ── Config reload helper ────────────────────────────────────────────────
 
+// ── Auto-reload: YAML directory fingerprinting ──────────────────────────
+//
+// Computes a lightweight fingerprint of all *.yaml/*.yml files in one or
+// more directories.  The fingerprint changes when files are added, removed,
+// renamed, or modified (via mtime/size change).  This avoids native filesystem
+// watchers — the daemon already loops every 5s, so polling is adequate.
+//
+// The fingerprint is a simple hash of concatenated (path, mtime, size) tuples.
+
+static std::size_t compute_yaml_fingerprint(
+    const std::vector<std::filesystem::path>& dirs)
+{
+    std::size_t h = 0;
+    for (const auto& dir : dirs) {
+        std::error_code ec;
+        if (!std::filesystem::exists(dir, ec) || ec) continue;
+        for (const auto& entry :
+             std::filesystem::recursive_directory_iterator(
+                 dir, std::filesystem::directory_options::skip_permission_denied,
+                 ec)) {
+            if (ec) break;
+            if (!entry.is_regular_file(ec) || ec) continue;
+            auto ext = entry.path().extension().string();
+            if (ext != ".yaml" && ext != ".yml" && ext != ".toml") continue;
+
+            // Combine path + mtime + size into hash.
+            auto mtime = entry.last_write_time(ec);
+            auto size  = entry.file_size(ec);
+            auto path_str = entry.path().string();
+
+            // FNV-1a style combine.
+            h ^= std::hash<std::string>{}(path_str) + 0x9e3779b9 + (h << 6) + (h >> 2);
+            h ^= std::hash<std::size_t>{}(static_cast<std::size_t>(
+                mtime.time_since_epoch().count())) + 0x9e3779b9 + (h << 6) + (h >> 2);
+            h ^= std::hash<std::size_t>{}(static_cast<std::size_t>(size))
+                 + 0x9e3779b9 + (h << 6) + (h >> 2);
+        }
+    }
+    return h;
+}
+
 /// Perform a full config reload: re-parse TOML, re-load YAML, rebuild
 /// registry, and propagate to all engines.
 ///
@@ -646,6 +687,42 @@ int run_daemon(std::shared_ptr<const kairos::config::ConfigState> config) {
               "{}  samples/group",
               prune_interval_hours, retention_days, max_samples_per_group);
 
+    // ── Auto-reload setup (§6.7, option B) ───────────────────────
+    //
+    // When kairos.auto_reload is true, the daemon polls the YAML
+    // directories for file changes every main-loop cycle (~5s).
+    // A lightweight fingerprint (hash of file paths + mtimes + sizes)
+    // detects additions, removals, and modifications.  A debounce
+    // timer prevents reload storms during multi-file saves.
+    bool auto_reload_enabled = config->global.get<bool>(
+        "kairos.auto_reload", false);
+    int auto_reload_debounce_s = config->global.get<int>(
+        "kairos.auto_reload_debounce_s", 2);
+
+    // Resolve the YAML directories for fingerprinting.
+    std::vector<fs::path> auto_reload_dirs;
+    if (auto_reload_enabled) {
+        auto wf_dir_str = config->global.get<std::string>(
+            "kairos.workflows_dir", "workflows");
+        auto wg_dir_str = config->global.get<std::string>(
+            "kairos.watch_groups_dir", "watch_groups");
+        auto wf_dir = resolve_yaml_dir(config->config_file_path, wf_dir_str);
+        auto wg_dir = resolve_yaml_dir(config->config_file_path, wg_dir_str);
+        // Also watch the config file's own directory (for kairos.toml changes).
+        auto config_dir = config->config_file_path.parent_path();
+        if (!config_dir.empty()) {
+            auto_reload_dirs.push_back(config_dir);
+        }
+        if (fs::exists(wf_dir)) auto_reload_dirs.push_back(wf_dir);
+        if (fs::exists(wg_dir)) auto_reload_dirs.push_back(wg_dir);
+        log->info("Auto-reload enabled: watching {} directories "
+                  "(debounce {}s)",
+                  auto_reload_dirs.size(), auto_reload_debounce_s);
+    }
+    std::size_t last_yaml_fingerprint =
+        auto_reload_enabled ? compute_yaml_fingerprint(auto_reload_dirs) : 0;
+    auto last_fingerprint_change = std::chrono::steady_clock::time_point::min();
+
     // ── Step 18: Main loop ─────────────────────────────────────────
     while (!stop_token.stop_requested()) {
         auto now = std::chrono::steady_clock::now();
@@ -749,6 +826,38 @@ int run_daemon(std::shared_ptr<const kairos::config::ConfigState> config) {
                           retention_days,
                           watch_groups.size(),
                           max_samples_per_group);
+            }
+        }
+
+        // ── Auto-reload: check YAML fingerprint ─────────────────
+        if (auto_reload_enabled) {
+            auto fp = compute_yaml_fingerprint(auto_reload_dirs);
+            if (fp != last_yaml_fingerprint) {
+                if (last_fingerprint_change ==
+                    std::chrono::steady_clock::time_point::min()) {
+                    // First change detected — start debounce timer.
+                    last_fingerprint_change = now;
+                    last_yaml_fingerprint = fp;
+                    log->info("Auto-reload: YAML change detected, "
+                              "debouncing {}s...", auto_reload_debounce_s);
+                } else {
+                    // Fingerprint still changing — update and reset timer.
+                    last_yaml_fingerprint = fp;
+                    last_fingerprint_change = now;
+                }
+            }
+            // Check if debounce period has elapsed.
+            if (last_fingerprint_change !=
+                std::chrono::steady_clock::time_point::min()) {
+                double elapsed = std::chrono::duration<double>(
+                    now - last_fingerprint_change).count();
+                if (elapsed >= static_cast<double>(auto_reload_debounce_s)) {
+                    log->info("Auto-reload: debounce complete, "
+                              "triggering config reload");
+                    platform::g_reload_requested.store(true);
+                    last_fingerprint_change =
+                        std::chrono::steady_clock::time_point::min();
+                }
             }
         }
 

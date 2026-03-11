@@ -20,6 +20,8 @@ confy::Value build_kairos_defaults() {
             {"db_path",     ""},          // Set by resolve_config_path
             {"workflows_dir", "workflows"},
             {"watch_groups_dir", "watch_groups"},
+            {"auto_reload", false},
+            {"auto_reload_debounce_s", 2},
 
             // ─── Logging ──────────────────────────────────────────────
             {"logging", {

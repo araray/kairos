@@ -45,6 +45,13 @@ data_dir = "~/.local/share/kairos"
 #   Validation: parent directory must exist and be writable
 db_path  = "~/.local/share/kairos/kairos.db"
 
+# ── Auto-reload ────────────────────────────────────────────────
+# Automatically reload when workflow/watch-group YAML files or
+# kairos.toml change on disk.  Uses polling (not native watchers)
+# with a debounce to avoid reload storms during multi-file saves.
+auto_reload = true
+auto_reload_debounce_s = 2
+
 # Directory containing workflow YAML definitions (*.yaml, *.yml).
 # Relative paths are resolved relative to the config file location.
 #   Env: KAIROS_WORKFLOWS__DIR
