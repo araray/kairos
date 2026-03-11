@@ -177,9 +177,12 @@ TEST(LabelsTest, MultipleLabels) {
 }
 
 TEST(LabelsTest, EscapedQuotes) {
-    Labels labels = {{"path", R"(say "hi")"}};
-    EXPECT_EQ(format_labels(labels),
-              R"PROM({path="say \"hi\""})PROM");
+    // Value contains literal double quotes: say "hi"
+    Labels labels = {{"path", "say \"hi\""}};
+    // Expected Prometheus output: {path="say \"hi\""}
+    // (format_labels escapes inner quotes with backslash)
+    std::string expected = R"PROM({path="say \"hi\""})PROM";
+    EXPECT_EQ(format_labels(labels), expected);
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
