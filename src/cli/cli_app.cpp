@@ -3295,12 +3295,11 @@ complete -c kairos -n "__fish_seen_subcommand_from logs" -l step -d "Filter by s
         if (!dashboard_db.empty()) {
             dc.db_path = dashboard_db;
         } else {
-            // Resolve from config.
-            auto store = kairos::config::ConfigStore::load(
-                config_path, {}, {});
-            dc.db_path = store.get<std::string>(
-                "kairos.db_path",
-                "~/.local/share/kairos/kairos.db");
+            // Resolve db_path from config file.
+            setup_logging(log_level, json_output, false);
+            auto cfg = load_config_or_die(config_path, {});
+            if (!cfg) return static_cast<int>(ExitCode::kConfigError);
+            dc.db_path = cfg->db_path;
         }
         dc.refresh_ms = dashboard_refresh;
         return kairos::tui::run_dashboard(dc);
