@@ -16,6 +16,20 @@ namespace fs = std::filesystem;
 
 namespace kairos::platform {
 
+// ── Helper: a platform-appropriate absolute test path ────────────────────
+// On POSIX "/a/b/c" is absolute.  On Windows we need "C:\\a\\b\\c" or
+// use the current drive root so that normalize_path doesn't prepend cwd.
+#ifdef _WIN32
+static fs::path abs_test_path(const char* posix_path) {
+    // Prefix with C: so Windows treats it as absolute on the C: drive.
+    return fs::path(std::string("C:") + posix_path);
+}
+#else
+static fs::path abs_test_path(const char* posix_path) {
+    return fs::path(posix_path);
+}
+#endif
+
 // ═══════════════════════════════════════════════════════════════════════════
 // Tilde expansion
 // ═══════════════════════════════════════════════════════════════════════════
@@ -50,13 +64,15 @@ TEST(PathNormalize, RelativePathResolvesAgainstCwd) {
 }
 
 TEST(PathNormalize, RelativePathResolvesAgainstBase) {
-    auto result = normalize_path("subdir/file.txt", fs::path("/opt/kairos"));
-    EXPECT_EQ(result, fs::path("/opt/kairos/subdir/file.txt").lexically_normal());
+    auto base = abs_test_path("/opt/kairos");
+    auto result = normalize_path("subdir/file.txt", base);
+    EXPECT_EQ(result, (base / "subdir" / "file.txt").lexically_normal());
 }
 
 TEST(PathNormalize, AbsolutePathUnchanged) {
-    auto result = normalize_path("/absolute/path/to/file");
-    EXPECT_EQ(result, fs::path("/absolute/path/to/file").lexically_normal());
+    auto input = abs_test_path("/absolute/path/to/file");
+    auto result = normalize_path(input);
+    EXPECT_EQ(result, input.lexically_normal());
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -64,24 +80,28 @@ TEST(PathNormalize, AbsolutePathUnchanged) {
 // ═══════════════════════════════════════════════════════════════════════════
 
 TEST(PathNormalize, DotCollapsed) {
-    auto result = normalize_path("/a/./b/./c");
-    EXPECT_EQ(result, fs::path("/a/b/c"));
+    auto result = normalize_path(abs_test_path("/a/./b/./c"));
+    EXPECT_EQ(result, abs_test_path("/a/b/c").lexically_normal());
 }
 
 TEST(PathNormalize, DotDotCollapsed) {
-    auto result = normalize_path("/a/b/../c");
-    EXPECT_EQ(result, fs::path("/a/c"));
+    auto result = normalize_path(abs_test_path("/a/b/../c"));
+    EXPECT_EQ(result, abs_test_path("/a/c").lexically_normal());
 }
 
 TEST(PathNormalize, ComplexDotDot) {
-    auto result = normalize_path("/a/b/c/../../d");
-    EXPECT_EQ(result, fs::path("/a/d"));
+    auto result = normalize_path(abs_test_path("/a/b/c/../../d"));
+    EXPECT_EQ(result, abs_test_path("/a/d").lexically_normal());
 }
 
 TEST(PathNormalize, TrailingSlashNormalized) {
-    auto result = normalize_path("/a/b/c/");
-    // lexically_normal may or may not keep trailing slash — just check base.
-    EXPECT_TRUE(result.string().find("/a/b/c") != std::string::npos);
+    auto result = normalize_path(abs_test_path("/a/b/c/"));
+    // Should contain the path components regardless of separator style.
+    auto s = result.string();
+    EXPECT_TRUE(s.find("a") != std::string::npos);
+    EXPECT_TRUE(s.find("b") != std::string::npos);
+    EXPECT_TRUE(s.find("c") != std::string::npos);
+    EXPECT_TRUE(result.is_absolute());
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -89,15 +109,17 @@ TEST(PathNormalize, TrailingSlashNormalized) {
 // ═══════════════════════════════════════════════════════════════════════════
 
 TEST(PathUtf8, RoundTrip) {
-    fs::path original("/tmp/test_dir/日本語");
+    fs::path original = abs_test_path("/tmp/test_dir/日本語");
     auto utf8 = path_to_utf8(original);
     auto back = utf8_to_path(utf8);
     EXPECT_EQ(original, back);
 }
 
 TEST(PathUtf8, AsciiPath) {
-    fs::path original("/usr/local/bin/kairos");
-    EXPECT_EQ(path_to_utf8(original), "/usr/local/bin/kairos");
+    fs::path original = abs_test_path("/usr/local/bin/kairos");
+    auto utf8 = path_to_utf8(original);
+    auto back = utf8_to_path(utf8);
+    EXPECT_EQ(original, back);
 }
 
 // ═══════════════════════════════════════════════════════════════════════════

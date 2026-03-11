@@ -277,10 +277,17 @@ TEST_F(ScannerTestFixture, PathNormalization) {
     create_file("a.txt");
 
     auto norm = RealFilesystemScanner::normalize_path(root_ / "a.txt");
-    // Should use forward slashes.
+    // Should use forward slashes (generic_string).
     EXPECT_EQ(norm.find('\\'), std::string::npos);
     // Should be an absolute path.
+#ifdef _WIN32
+    // On Windows, generic_string gives "C:/Users/..." — check for drive letter + colon.
+    EXPECT_GE(norm.size(), 3u);
+    EXPECT_EQ(norm[1], ':');
+    EXPECT_EQ(norm[2], '/');
+#else
     EXPECT_TRUE(norm[0] == '/');
+#endif
     // Should contain the filename.
     EXPECT_NE(norm.find("a.txt"), std::string::npos);
 }
