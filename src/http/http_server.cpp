@@ -165,6 +165,25 @@ struct HttpServer::Impl {
                 }
                 data["recent_runs"] = std::move(runs_arr);
 
+                // Load recent events for the dashboard.
+                json events_arr = json::array();
+                if (deps.reader) {
+                    auto events = deps.reader->query_watch_events(10);
+                    for (const auto& e : events) {
+                        json j;
+                        j["event_uid"] = e.event_uid;
+                        j["event_uid_short"] = templates::truncate(
+                            e.event_uid);
+                        j["watch_group"] = e.watch_group;
+                        j["rule_name"] = e.rule_name;
+                        j["event_type"] = e.event_type;
+                        j["affected_files"] = e.affected_files_json;
+                        j["created_at"] = e.created_at;
+                        events_arr.push_back(std::move(j));
+                    }
+                }
+                data["recent_events"] = std::move(events_arr);
+
                 auto html = render_template(
                     templates::kDashboardTemplate, data);
                 res.set_content(html, "text/html");

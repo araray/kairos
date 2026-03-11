@@ -30,6 +30,10 @@ struct DashboardConfig {
     /// Path to the kairos.toml config file (for display).
     std::filesystem::path config_path;
 
+    /// Path to the Kairos data directory (contains kairos.lock).
+    /// If empty, derived from db_path.parent_path().
+    std::filesystem::path data_dir;
+
     /// Refresh interval in milliseconds.
     int refresh_ms = 1000;
 
@@ -41,6 +45,9 @@ struct DashboardConfig {
 
     /// Maximum number of watch groups to display.
     int max_watch_groups = 20;
+
+    /// Maximum number of recent watch events to display.
+    int max_events = 20;
 
     /// Maximum number of scheduler timers to display.
     int max_timers = 20;

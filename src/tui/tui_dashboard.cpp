@@ -48,10 +48,19 @@
 #include <chrono>
 #include <ctime>
 #include <filesystem>
+#include <fstream>
 #include <mutex>
 #include <string>
 #include <thread>
 #include <vector>
+
+#ifndef _WIN32
+#include <csignal>   // kill(pid, 0) for process liveness check
+#else
+#define WIN32_LEAN_AND_MEAN
+#define NOMINMAX
+#include <Windows.h>  // OpenProcess for process liveness check
+#endif
 
 namespace kairos::tui {
 
@@ -94,6 +103,15 @@ struct LogEntry {
     std::string message;
 };
 
+struct EventInfo {
+    std::string event_uid;
+    std::string watch_group;
+    std::string rule_name;
+    std::string event_type;
+    std::string affected_files;
+    std::string created_at;
+};
+
 struct DashboardState {
     // Daemon status.
     bool daemon_running = false;
@@ -112,6 +130,9 @@ struct DashboardState {
     // Watch groups.
     std::vector<WatchGroupInfo> watch_groups;
 
+    // Recent watch events.
+    std::vector<EventInfo> events;
+
     // Recent trigger fires.
     std::vector<TriggerFireInfo> trigger_fires;
 
@@ -124,6 +145,56 @@ struct DashboardState {
     // Last refresh time.
     std::string last_refresh;
 };
+
+// ── Daemon detection via PID file ────────────────────────────────────────
+//
+// Check if the daemon is running by reading the PID file (kairos.lock)
+// and verifying the process is alive.  This matches the logic used by
+// `kairos status` (cli_app.cpp §23.4).
+
+namespace {
+
+/// Check if a process with the given PID is alive.
+bool is_process_alive(int pid) {
+    if (pid <= 0) return false;
+#ifndef _WIN32
+    return (::kill(static_cast<pid_t>(pid), 0) == 0);
+#else
+    HANDLE h = ::OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION,
+                             FALSE, static_cast<DWORD>(pid));
+    if (h == nullptr) return false;
+    ::CloseHandle(h);
+    return true;
+#endif
+}
+
+/// Check the PID lock file and verify daemon liveness.
+/// @param data_dir  The Kairos data directory (contains kairos.lock).
+/// @return pair<running, pid_string>
+std::pair<bool, std::string> check_daemon_pid(
+    const std::filesystem::path& data_dir)
+{
+    auto lock_path = data_dir / "kairos.lock";
+    std::string pid_str;
+    try {
+        std::ifstream pf(lock_path);
+        if (!pf.is_open()) return {false, ""};
+        std::getline(pf, pid_str);
+    } catch (...) {
+        return {false, ""};
+    }
+
+    if (pid_str.empty()) return {false, ""};
+
+    try {
+        int pid = std::stoi(pid_str);
+        return {is_process_alive(pid), pid_str};
+    } catch (...) {
+        return {false, pid_str};
+    }
+}
+
+}  // anonymous namespace
 
 // ── Helper functions ─────────────────────────────────────────────────────
 //
@@ -268,18 +339,14 @@ void refresh_state(DashboardState& state, const DashboardConfig& config) {
             }
         } catch (const std::exception&) {}
 
-        // Infer daemon_running from recent activity.
-        state.daemon_running = !state.active_runs.empty();
-        if (!state.daemon_running) {
-            try {
-                SQLite::Statement q(db,
-                    "SELECT COUNT(*) FROM runs "
-                    "WHERE start_ts > datetime('now', '-5 minutes')");
-                if (q.executeStep()) {
-                    state.daemon_running = q.getColumn(0).getInt() > 0;
-                }
-            } catch (const std::exception&) {}
-        }
+        // ── Daemon liveness via PID file ─────────────────────────
+        // Use the same approach as `kairos status`: read kairos.lock
+        // and verify the process is alive.
+        auto data_dir = config.data_dir.empty()
+            ? config.db_path.parent_path()
+            : config.data_dir;
+        auto [running, pid_str] = check_daemon_pid(data_dir);
+        state.daemon_running = running;
 
         // ── Recent completed runs ────────────────────────────────
         state.recent_runs.clear();
@@ -333,6 +400,33 @@ void refresh_state(DashboardState& state, const DashboardConfig& config) {
                 wg.last_scan   = helpers::format_relative(
                     q.getColumn(2).getString());
                 state.watch_groups.push_back(std::move(wg));
+            }
+        } catch (const std::exception&) {}
+
+        // ── Recent watch events ──────────────────────────────────
+        state.events.clear();
+        try {
+            SQLite::Statement q(db,
+                "SELECT id, watch_group, rule_name, event_type, "
+                "       file_path, created_at "
+                "FROM watch_events "
+                "ORDER BY created_at DESC LIMIT ?");
+            q.bind(1, config.max_events);
+            while (q.executeStep()) {
+                EventInfo ev;
+                ev.event_uid      = std::to_string(
+                    q.getColumn(0).getInt64());
+                ev.watch_group    = q.getColumn(1).getString();
+                ev.rule_name      = q.getColumn(2).getString();
+                ev.event_type     = q.getColumn(3).getString();
+                ev.affected_files = q.getColumn(4).getString();
+                ev.created_at     = helpers::format_relative(
+                    q.getColumn(5).getString());
+                // Truncate long file paths for display.
+                if (ev.affected_files.size() > 60) {
+                    ev.affected_files = ev.affected_files.substr(0, 57) + "...";
+                }
+                state.events.push_back(std::move(ev));
             }
         } catch (const std::exception&) {}
 
@@ -550,6 +644,37 @@ int run_dashboard(const DashboardConfig& config) {
             vbox(std::move(wg_items)) | borderLight,
         });
 
+        // ── Recent events panel ──────────────────────────────────
+        Elements event_items;
+        if (state.events.empty()) {
+            event_items.push_back(text("  No events") | dim);
+        } else {
+            for (const auto& ev : state.events) {
+                auto short_uid = ev.event_uid.size() > 8
+                    ? ev.event_uid.substr(0, 8) : ev.event_uid;
+                auto short_group = ev.watch_group.size() > 14
+                    ? ev.watch_group.substr(0, 14) : ev.watch_group;
+                event_items.push_back(hbox({
+                    text("  " + short_uid) | dim
+                        | size(WIDTH, EQUAL, 11),
+                    text(short_group)
+                        | size(WIDTH, EQUAL, 16),
+                    text(ev.event_type)
+                        | color(Color::Yellow)
+                        | size(WIDTH, EQUAL, 10),
+                    text(ev.affected_files) | dim | flex,
+                    text("  " + ev.created_at) | dim,
+                }));
+            }
+        }
+        auto events_panel = vbox({
+            text(" Events (" +
+                 std::to_string(state.events.size()) + ")")
+                | bold | color(Color::Yellow),
+            vbox(std::move(event_items))
+                | borderLight | size(HEIGHT, LESS_THAN, 10),
+        });
+
         // ── Log tail panel ───────────────────────────────────────
         Element log_panel = text("");
         if (show_logs) {
@@ -585,6 +710,7 @@ int run_dashboard(const DashboardConfig& config) {
                 trigger_panel | flex,
             }),
             runs_panel | flex,
+            events_panel,
             hbox({
                 watch_panel | flex,
                 log_panel   | flex,

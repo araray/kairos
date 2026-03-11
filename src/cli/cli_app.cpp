@@ -3882,6 +3882,8 @@ complete -c kairos -n "__fish_seen_subcommand_from logs" -l step -d "Filter by s
             auto cfg = load_config_or_die(config_path, {});
             if (!cfg) return static_cast<int>(ExitCode::kConfigError);
             dc.db_path = cfg->db_path;
+            dc.config_path = cfg->config_file_path;
+            dc.data_dir = cfg->data_dir;
         }
         dc.refresh_ms = dashboard_refresh;
         return kairos::tui::run_dashboard(dc);

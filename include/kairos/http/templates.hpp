@@ -175,6 +175,39 @@ inline constexpr std::string_view kDashboardTemplate = R"html(<!DOCTYPE html>
         </tbody>
       </table>
     </div>
+
+    <!-- Recent events table -->
+    <div class="card p-3 mt-4">
+      <div class="d-flex justify-content-between align-items-center mb-3">
+        <h5 class="mb-0">Recent Events</h5>
+        <a href="/events" class="btn btn-outline-info btn-sm">View All</a>
+      </div>
+      <table class="table table-sm table-hover mb-0">
+        <thead>
+          <tr>
+            <th>Event ID</th><th>Watch Group</th><th>Rule</th>
+            <th>Type</th><th>Affected Files</th><th>Time</th>
+          </tr>
+        </thead>
+        <tbody>
+{% for event in recent_events %}
+          <tr>
+            <td><code>{{ event.event_uid_short }}</code></td>
+            <td>{{ event.watch_group }}</td>
+            <td>{{ event.rule_name }}</td>
+            <td>{{ event.event_type }}</td>
+            <td class="text-muted" style="max-width: 200px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">{{ event.affected_files }}</td>
+            <td>{{ event.created_at }}</td>
+          </tr>
+{% endfor %}
+{% if length(recent_events) == 0 %}
+          <tr>
+            <td colspan="6" class="text-center text-muted">No events recorded yet</td>
+          </tr>
+{% endif %}
+        </tbody>
+      </table>
+    </div>
   </div>
 </body>
 </html>)html";
