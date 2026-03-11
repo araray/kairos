@@ -43,6 +43,7 @@
 #include <fstream>
 #include <iomanip>
 #include <iostream>
+#include <map>
 #include <sstream>
 #include <string>
 #include <thread>
@@ -394,8 +395,11 @@ int run(int argc, char** argv) {
     auto* watches_scan = cmd_watches->add_subcommand("scan-once",
         "Run a single scan cycle");
     std::string watch_scan_group;
+    bool watch_list_files = false;
     watches_scan->add_option("group", watch_scan_group,
         "Watch group to scan (all if omitted)");
+    watches_scan->add_flag("--list-files,-l", watch_list_files,
+        "List all monitored files");
 
     // ── events ───────────────────────────────────────────────────
     auto* cmd_events = app.add_subcommand("events",
@@ -993,119 +997,125 @@ int run(int argc, char** argv) {
             return true;
         };
 
-        if (watch_scan_group.empty()) {
-            // Scan all groups.
-            auto results = engine.scan_once(null_sink);
+        // Two-pass scan:
+        //   Pass 1 → baseline (populates last_sample in the engine)
+        //   Pass 2 → diff against baseline
+        // Without two passes, last_sample is empty and diff is always
+        // skipped (EventWatcher parity: first scan = baseline only).
 
+        // Helper lambda for printing one group result.
+        auto print_group_result = [&](
+            const std::string& gname,
+            const watch::ScanResult& baseline,
+            const watch::ScanResult& result)
+        {
             if (json_output) {
-                json arr = json::array();
-                for (size_t i = 0; i < results.size(); ++i) {
-                    const auto& r = results[i];
-                    json triggered = json::array();
-                    for (const auto& t : r.triggered) {
-                        triggered.push_back({
-                            {"rule_name", t.rule_name},
-                            {"event_type", t.event_type},
-                            {"affected_count",
-                             static_cast<int>(t.affected_paths.size())}
-                        });
-                    }
-                    arr.push_back({
-                        {"files_scanned",
-                         static_cast<int>(r.sample.entries.size())},
-                        {"changes", {
-                            {"created",
-                             static_cast<int>(r.diff.created.size())},
-                            {"modified",
-                             static_cast<int>(r.diff.modified.size())},
-                            {"deleted",
-                             static_cast<int>(r.diff.deleted.size())},
-                        }},
-                        {"triggered", triggered},
-                        {"scan_duration_ms", r.scan_duration.count()},
-                        {"incomplete", r.incomplete}
+                json triggered = json::array();
+                for (const auto& t : result.triggered) {
+                    json paths = json::array();
+                    for (const auto& p : t.affected_paths) paths.push_back(p);
+                    triggered.push_back({
+                        {"rule_name", t.rule_name},
+                        {"event_type", t.event_type},
+                        {"affected_paths", paths}
                     });
                 }
-                std::cout << json{
-                    {"scanned_groups", static_cast<int>(results.size())},
-                    {"results", arr}
-                }.dump(2) << "\n";
-            } else {
-                for (size_t i = 0; i < results.size(); ++i) {
-                    const auto& r = results[i];
-                    auto groups = registry->watch_groups();
-                    std::string gname = i < groups.size()
-                        ? groups[i].group_name : "(unknown)";
-                    std::cout << fmt::format(
-                        "Group: {} — {} files scanned "
-                        "(+{} -{} ~{}) in {}ms",
-                        gname,
-                        r.sample.entries.size(),
-                        r.diff.created.size(),
-                        r.diff.deleted.size(),
-                        r.diff.modified.size(),
-                        r.scan_duration.count()) << "\n";
-                    for (const auto& t : r.triggered) {
-                        std::cout << "  Triggered: " << t.rule_name
-                                  << " (" << t.event_type << ", "
-                                  << t.affected_paths.size()
-                                  << " files)\n";
-                    }
-                }
-                if (results.empty()) {
-                    std::cout << "No watch groups configured.\n";
-                }
-            }
-        } else {
-            // Scan a specific group.
-            try {
-                auto result = engine.scan_group(watch_scan_group, null_sink);
-                if (json_output) {
-                    json triggered = json::array();
-                    for (const auto& t : result.triggered) {
-                        json paths = json::array();
-                        for (const auto& p : t.affected_paths) {
-                            paths.push_back(p);
-                        }
-                        triggered.push_back({
-                            {"rule_name", t.rule_name},
-                            {"event_type", t.event_type},
-                            {"affected_paths", paths}
+                json j = {
+                    {"watch_group", gname},
+                    {"files_monitored",
+                     static_cast<int>(baseline.sample.entries.size())},
+                    {"changes", {
+                        {"created",
+                         static_cast<int>(result.diff.created.size())},
+                        {"modified",
+                         static_cast<int>(result.diff.modified.size())},
+                        {"deleted",
+                         static_cast<int>(result.diff.deleted.size())},
+                    }},
+                    {"triggered", triggered},
+                    {"scan_duration_ms", result.scan_duration.count()},
+                };
+                if (watch_list_files) {
+                    json files = json::array();
+                    for (const auto& [path, entry] : baseline.sample.entries) {
+                        files.push_back({
+                            {"path", path},
+                            {"size", entry.size},
+                            {"type", entry.entry_type},
                         });
                     }
-                    std::cout << json{
-                        {"watch_group", watch_scan_group},
-                        {"files_scanned",
-                         static_cast<int>(result.sample.entries.size())},
-                        {"changes", {
-                            {"created",
-                             static_cast<int>(result.diff.created.size())},
-                            {"modified",
-                             static_cast<int>(result.diff.modified.size())},
-                            {"deleted",
-                             static_cast<int>(result.diff.deleted.size())},
-                        }},
-                        {"triggered", triggered},
-                        {"scan_duration_ms", result.scan_duration.count()},
-                        {"incomplete", result.incomplete}
-                    }.dump(2) << "\n";
-                } else {
-                    std::cout << fmt::format(
-                        "Group: {} — {} files scanned "
-                        "(+{} -{} ~{}) in {}ms\n",
-                        watch_scan_group,
-                        result.sample.entries.size(),
-                        result.diff.created.size(),
-                        result.diff.deleted.size(),
-                        result.diff.modified.size(),
-                        result.scan_duration.count());
-                    for (const auto& t : result.triggered) {
-                        std::cout << "  Triggered: " << t.rule_name
-                                  << " (" << t.event_type << ", "
-                                  << t.affected_paths.size()
-                                  << " files)\n";
+                    j["files"] = std::move(files);
+                }
+                std::cout << j.dump(2) << "\n";
+            } else {
+                auto file_count = baseline.sample.entries.size();
+                std::cout << fmt::format(
+                    "Group: {} — {} files monitored "
+                    "(+{} -{} ~{}) in {}ms\n",
+                    gname,
+                    file_count,
+                    result.diff.created.size(),
+                    result.diff.deleted.size(),
+                    result.diff.modified.size(),
+                    result.scan_duration.count());
+
+                for (const auto& t : result.triggered) {
+                    std::cout << "  Triggered: " << t.rule_name
+                              << " (" << t.event_type << ", "
+                              << t.affected_paths.size()
+                              << " files)\n";
+                }
+
+                if (watch_list_files) {
+                    // Show file inventory grouped by extension.
+                    std::map<std::string, int> ext_counts;
+                    for (const auto& [path, entry] : baseline.sample.entries) {
+                        auto dot = path.rfind('.');
+                        std::string ext = (dot != std::string::npos)
+                            ? path.substr(dot) : "(no ext)";
+                        ext_counts[ext]++;
+                    }
+                    std::cout << "  Files by type:\n";
+                    for (const auto& [ext, count] : ext_counts) {
+                        std::cout << "    " << ext << ": " << count << "\n";
+                    }
+                    std::cout << "  File list:\n";
+                    for (const auto& [path, entry] : baseline.sample.entries) {
+                        std::cout << "    " << path;
+                        if (entry.entry_type == "directory") {
+                            std::cout << "  (dir)";
+                        } else {
+                            std::cout << "  (" << entry.size << " bytes)";
+                        }
+                        std::cout << "\n";
                     }
                 }
+            }
+        };
+
+        if (watch_scan_group.empty()) {
+            // Scan all groups (two-pass).
+            auto baseline_results = engine.scan_once(null_sink);
+            auto diff_results = engine.scan_once(null_sink);
+
+            auto groups = registry->watch_groups();
+            for (size_t i = 0; i < diff_results.size(); ++i) {
+                std::string gname = i < groups.size()
+                    ? groups[i].group_name : "(unknown)";
+                print_group_result(gname,
+                    i < baseline_results.size()
+                        ? baseline_results[i] : diff_results[i],
+                    diff_results[i]);
+            }
+            if (diff_results.empty()) {
+                std::cout << "No watch groups configured.\n";
+            }
+        } else {
+            // Scan a specific group (two-pass).
+            try {
+                auto baseline = engine.scan_group(watch_scan_group, null_sink);
+                auto result = engine.scan_group(watch_scan_group, null_sink);
+                print_group_result(watch_scan_group, baseline, result);
             } catch (const std::exception& e) {
                 std::cerr << "Error scanning group '"
                           << watch_scan_group << "': "
