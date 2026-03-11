@@ -7,6 +7,27 @@
 
 #include <gtest/gtest.h>
 
+#include <cstdlib>
+
+// ── Cross-platform setenv/unsetenv ───────────────────────────────────────
+// MSVC doesn't provide POSIX setenv/unsetenv.  Use _putenv_s instead.
+namespace {
+void test_setenv(const char* name, const char* value) {
+#ifdef _WIN32
+    _putenv_s(name, value);
+#else
+    ::setenv(name, value, 1);
+#endif
+}
+void test_unsetenv(const char* name) {
+#ifdef _WIN32
+    _putenv_s(name, "");
+#else
+    ::unsetenv(name);
+#endif
+}
+}  // anonymous namespace
+
 using namespace kairos::exec;
 
 TEST(EnvBuilderTest, EmptyBuild) {
@@ -18,7 +39,7 @@ TEST(EnvBuilderTest, EmptyBuild) {
 
 TEST(EnvBuilderTest, InheritParent) {
     // Set a test variable in the current process.
-    ::setenv("KAIROS_TEST_INHERIT", "hello", 1);
+    test_setenv("KAIROS_TEST_INHERIT", "hello");
 
     EnvBuilder builder;
     builder.inherit_parent();
@@ -27,7 +48,7 @@ TEST(EnvBuilderTest, InheritParent) {
     EXPECT_EQ(env["KAIROS_TEST_INHERIT"], "hello");
     EXPECT_TRUE(env.contains("PATH"));
 
-    ::unsetenv("KAIROS_TEST_INHERIT");
+    test_unsetenv("KAIROS_TEST_INHERIT");
 }
 
 TEST(EnvBuilderTest, LayerPrecedence) {
@@ -167,12 +188,12 @@ TEST(EnvBuilderTest, NullSecretResolver) {
 }
 
 TEST(EnvBuilderTest, CaptureCurrentEnv) {
-    ::setenv("KAIROS_CAPTURE_TEST", "captured", 1);
+    test_setenv("KAIROS_CAPTURE_TEST", "captured");
 
     auto env = capture_current_env();
     EXPECT_EQ(env["KAIROS_CAPTURE_TEST"], "captured");
 
-    ::unsetenv("KAIROS_CAPTURE_TEST");
+    test_unsetenv("KAIROS_CAPTURE_TEST");
 }
 
 TEST(EnvBuilderTest, FullPipeline) {

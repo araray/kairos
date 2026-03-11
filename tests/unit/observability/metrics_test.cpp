@@ -179,7 +179,7 @@ TEST(LabelsTest, MultipleLabels) {
 TEST(LabelsTest, EscapedQuotes) {
     Labels labels = {{"path", R"(say "hi")"}};
     EXPECT_EQ(format_labels(labels),
-              R"({path="say \"hi\""})");
+              R"PROM({path="say \"hi\""})PROM");
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
