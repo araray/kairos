@@ -64,6 +64,17 @@ workflows_dir = "workflows"
 #   Default: "watch_groups"
 watch_groups_dir = "watch_groups"
 
+# ── Timezone ───────────────────────────────────────────────────
+# How timestamps are displayed in CLI, TUI, and web dashboard.
+# Storage is always UTC (ISO 8601 with Z suffix); this setting
+# only affects presentation.
+#
+# Values:
+#   "UTC"       — display as stored (2026-03-11T14:30:00Z)
+#   "local"     — convert to system local time
+#   "+HH:MM"    — fixed offset (e.g., "+05:30", "-08:00")
+#   "-HH:MM"
+timezone = "local"
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # § LOGGING — structured log output

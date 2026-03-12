@@ -22,6 +22,7 @@ confy::Value build_kairos_defaults() {
             {"watch_groups_dir", "watch_groups"},
             {"auto_reload", false},
             {"auto_reload_debounce_s", 2},
+            {"timezone", "local"},
 
             // ─── Logging ──────────────────────────────────────────────
             {"logging", {

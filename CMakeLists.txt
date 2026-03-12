@@ -97,6 +97,7 @@ add_library(kairos_core STATIC
     src/mcp/handler.cpp
     src/migration/migration_tool.cpp
     src/tui/tui_helpers.cpp
+    src/platform/timezone.cpp
 )
 
 # ── Native watch backends (platform-specific) ─────────────────────────────

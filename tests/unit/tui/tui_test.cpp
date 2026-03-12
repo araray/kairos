@@ -311,21 +311,22 @@ TEST_F(TuiDbQueryTest, RecentRunsQuery_ExcludesRunning) {
 // ── Runs today / failures today ─────────────────────────────────────────
 
 TEST_F(TuiDbQueryTest, RunsTodayQuery_CountsCorrectly) {
-    // Insert a success run "today".
+    // Both inserts use datetime('now') — guaranteed to be "today" in
+    // UTC, which is what date('now') compares against. No midnight
+    // boundary crossing possible.
     db_->exec(
         "INSERT INTO runs (run_id, target_type, target_id, target_name, "
         "  trigger_type, trigger_id, correlation_id, status, start_ts) "
         "VALUES ('r-t1', 'job', 'j-1', 'A', "
         "  'schedule', 't-1', 'c-1', 'SUCCESS', "
-        "  datetime('now', '-1 hour'))");
+        "  datetime('now'))");
 
-    // Insert a failed run "today".
     db_->exec(
         "INSERT INTO runs (run_id, target_type, target_id, target_name, "
         "  trigger_type, trigger_id, correlation_id, status, start_ts) "
         "VALUES ('r-t2', 'job', 'j-2', 'B', "
         "  'schedule', 't-2', 'c-2', 'FAILED', "
-        "  datetime('now', '-30 minutes'))");
+        "  datetime('now'))");
 
     SQLite::Statement q(*db_,
         "SELECT COUNT(*), "

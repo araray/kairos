@@ -46,6 +46,13 @@ add_executable(test_platform
 target_link_libraries(test_platform PRIVATE kairos_test_helpers)
 kairos_discover_tests(test_platform)
 
+# Timezone utility tests
+add_executable(test_timezone
+    unit/platform/timezone_test.cpp
+)
+target_link_libraries(test_timezone PRIVATE kairos_test_helpers)
+kairos_discover_tests(test_timezone)
+
 # SQLite persistence tests
 add_executable(test_persist
     unit/persist/schema_migration_test.cpp
