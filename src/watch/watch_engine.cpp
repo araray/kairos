@@ -17,6 +17,8 @@
 #include "kairos/kel/errors.hpp"
 #include "kairos/watch/hash_util.hpp"
 
+#include <spdlog/spdlog.h>
+
 #include <algorithm>
 #include <chrono>
 #include <cstring>
