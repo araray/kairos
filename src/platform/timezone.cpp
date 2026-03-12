@@ -202,14 +202,16 @@ std::string format_display_time(
     const TimezoneConfig& tz)
 {
     if (tz.mode == TimezoneMode::UTC) {
-        // Fast path: UTC display returns the stored string as-is
-        // (it's already in UTC). Just ensure Z suffix.
-        if (!utc_ts.empty() && utc_ts.back() != 'Z') {
-            // Truncate fractional seconds if present.
-            auto dot = utc_ts.find('.', 17);
-            if (dot != std::string::npos) {
-                return utc_ts.substr(0, dot) + "Z";
-            }
+        // Fast path: UTC display normalizes to "YYYY-MM-DDTHH:MM:SSZ".
+        // Strip fractional seconds (.fffZ → Z) and ensure Z suffix.
+        if (utc_ts.empty()) return utc_ts;
+        // Find fractional seconds (dot after position 17 = seconds start).
+        auto dot = utc_ts.find('.', 17);
+        if (dot != std::string::npos) {
+            return utc_ts.substr(0, dot) + "Z";
+        }
+        // No fractional — ensure Z suffix.
+        if (utc_ts.back() != 'Z') {
             return utc_ts + "Z";
         }
         return utc_ts;

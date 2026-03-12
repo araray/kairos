@@ -82,6 +82,11 @@ static fs::path resolve_yaml_dir(
     return config_dir / p;
 }
 
+/// Global timezone config for display — set once per command from the
+/// loaded ConfigState. Defaults to "local" if no config is loaded.
+static platform::TimezoneConfig g_tz_config =
+    platform::TimezoneConfig::parse("local");
+
 /// Load workflow/watch-group definitions from YAML directories.
 /// Shared by CLI commands that need standalone access to definitions.
 static std::shared_ptr<engine::WorkflowRegistry> load_registry_from_yaml(
@@ -159,11 +164,6 @@ void setup_logging(const std::string& log_level, bool json_output, bool is_daemo
 }
 
 // ── Helpers for enriched CLI output ─────────────────────────────────────
-
-/// Global timezone config for display — set once per command from the
-/// loaded ConfigState. Defaults to "local" if no config is loaded.
-static platform::TimezoneConfig g_tz_config =
-    platform::TimezoneConfig::parse("local");
 
 /// Initialize the display timezone from a loaded config.
 static void init_timezone(
