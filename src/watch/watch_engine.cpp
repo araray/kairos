@@ -894,9 +894,11 @@ std::vector<WatchTriggerResult> WatchEngine::evaluate_rules(
             auto result = kel::eval_expression(
                 rule.condition, ctx, limits);
             return result.is_truthy();
-        } catch (const std::exception&) {
+        } catch (const std::exception& e) {
             // KEL evaluation error → rule does not fire.
-            // In production, this would be logged. For now, silently skip.
+            // Log the error so users can diagnose broken conditions.
+            spdlog::warn("Watch rule '{}' KEL error in condition '{}': {}",
+                         rule.rule_name, rule.condition, e.what());
             return false;
         }
     };

@@ -171,6 +171,9 @@ std::shared_ptr<const config::ConfigState> load_config_or_die(
 
 /// Parse an ISO-8601 timestamp to system_clock time_point.
 /// Returns epoch if parsing fails.
+/// NOTE: DB timestamps are UTC (strftime with 'Z'). We must use
+/// timegm/_mkgmtime, NOT mktime (which assumes local time and
+/// would add the timezone offset, making past events look future).
 static std::chrono::system_clock::time_point
 parse_iso8601(const std::string& ts)
 {
@@ -178,8 +181,19 @@ parse_iso8601(const std::string& ts)
     std::tm tm{};
     std::istringstream ss(ts);
     ss >> std::get_time(&tm, "%Y-%m-%dT%H:%M:%S");
-    if (ss.fail()) return {};
-    return std::chrono::system_clock::from_time_t(std::mktime(&tm));
+    if (ss.fail()) {
+        // Try space-separated format (YYYY-MM-DD HH:MM:SS).
+        ss.clear();
+        ss.str(ts);
+        ss >> std::get_time(&tm, "%Y-%m-%d %H:%M:%S");
+        if (ss.fail()) return {};
+    }
+    // Interpret as UTC, not local time.
+#ifdef _WIN32
+    return std::chrono::system_clock::from_time_t(_mkgmtime(&tm));
+#else
+    return std::chrono::system_clock::from_time_t(timegm(&tm));
+#endif
 }
 
 /// Format a time_point as relative string ("2h ago", "just now", etc.)
@@ -753,69 +767,109 @@ int run(int argc, char** argv) {
         auto cfg = load_config_or_die(config_path, {});
         if (!cfg) return static_cast<int>(ExitCode::kConfigError);
 
-        // Load YAML watch-group definitions to populate the engine
-        // with actual group metadata (standalone mode per §23.10).
         auto registry = load_registry_from_yaml(cfg, spdlog::default_logger());
+        const auto& groups = registry->watch_groups();
 
-        // Create a standalone WatchEngine with the loaded groups.
-        watch::WatchEngineConfig watch_cfg;
-        watch::RealFilesystemScanner scanner;
-        SystemClockSource clock;
-        watch::WatchEngine engine(
-            watch_cfg,
-            watch::WatchEngine::Dependencies{
-                .clock = &clock,
-                .scanner = &scanner,
-            },
-            registry->watch_groups());
+        // Query the database for actual scan state (file counts, last scan).
+        // The CLI doesn't connect to the running daemon — it reads from
+        // the shared SQLite database (read-only).
+        auto db = try_open_db(cfg);
 
-        auto statuses = engine.get_status();
+        struct GroupDisplayInfo {
+            std::string name;
+            std::string mode;
+            int watched_paths = 0;
+            int files_in_last_sample = 0;
+            std::string last_scan_time;
+            int event_count = 0;
+        };
+
+        std::vector<GroupDisplayInfo> display_groups;
+        for (const auto& g : groups) {
+            GroupDisplayInfo info;
+            info.name = g.group_name;
+            switch (g.mode) {
+                case watch::WatchMode::Native: info.mode = "native"; break;
+                case watch::WatchMode::Sample: info.mode = "sample"; break;
+                case watch::WatchMode::Hybrid: info.mode = "hybrid"; break;
+            }
+            info.watched_paths = static_cast<int>(g.watch_items.size());
+
+            // Query actual file count and last scan from DB.
+            if (db) {
+                try {
+                    // Get file count from the latest sample epoch.
+                    persist::QueryReader reader(*db);
+                    auto epoch = reader.last_sample_epoch(g.group_name);
+                    if (epoch > 0) {
+                        auto sample = reader.query_sample(g.group_name, epoch);
+                        info.files_in_last_sample = static_cast<int>(sample.size());
+                    }
+                } catch (...) {}
+
+                try {
+                    // Get last scan time from most recent watch event
+                    // or watch sample timestamp.
+                    SQLite::Statement q(*db,
+                        "SELECT MAX(created_at) FROM watch_samples "
+                        "WHERE watch_group = ?");
+                    q.bind(1, g.group_name);
+                    if (q.executeStep() && !q.isColumnNull(0)) {
+                        info.last_scan_time = q.getColumn(0).getString();
+                    }
+                } catch (...) {}
+
+                try {
+                    // Event count.
+                    SQLite::Statement q(*db,
+                        "SELECT COUNT(*) FROM watch_events "
+                        "WHERE watch_group = ?");
+                    q.bind(1, g.group_name);
+                    if (q.executeStep()) {
+                        info.event_count = q.getColumn(0).getInt();
+                    }
+                } catch (...) {}
+            }
+
+            display_groups.push_back(std::move(info));
+        }
 
         if (json_output) {
             json arr = json::array();
-            for (const auto& s : statuses) {
+            for (const auto& s : display_groups) {
                 arr.push_back({
-                    {"name", s.group_name},
+                    {"name", s.name},
                     {"mode", s.mode},
                     {"watched_paths", s.watched_paths},
                     {"files_in_last_sample", s.files_in_last_sample},
                     {"last_scan_time", s.last_scan_time},
-                    {"status", s.status}
+                    {"event_count", s.event_count}
                 });
             }
             std::cout << json{{"watch_groups", arr}}.dump(2) << "\n";
         } else {
-            if (statuses.empty()) {
+            if (display_groups.empty()) {
                 std::cout << "No watch groups configured.\n";
             } else {
                 bool use_color = cli::supports_color();
                 cli::Table table({"GROUP", "MODE", "PATHS", "FILES",
-                                  "LAST SCAN", "STATUS"});
-                for (const auto& s : statuses) {
+                                  "EVENTS", "LAST SCAN"});
+                for (const auto& s : display_groups) {
                     std::string last_scan = s.last_scan_time.empty()
-                        ? "(none)" : s.last_scan_time;
+                        ? "(no scans yet)" : s.last_scan_time;
                     if (last_scan.size() > 19) {
                         last_scan = last_scan.substr(0, 19);
                     }
-                    std::string status_display = s.status;
-                    if (use_color) {
-                        if (s.status == "idle" || s.status == "ok") {
-                            status_display = cli::colorize(
-                                s.status, cli::ansi::green, true);
-                        } else if (s.status == "error") {
-                            status_display = cli::colorize(
-                                s.status, cli::ansi::red, true);
-                        }
-                    }
                     table.add_row({
-                        s.group_name, s.mode,
+                        s.name, s.mode,
                         std::to_string(s.watched_paths),
                         std::to_string(s.files_in_last_sample),
-                        last_scan, status_display
+                        std::to_string(s.event_count),
+                        last_scan
                     });
                 }
                 table.render(std::cout, use_color);
-                std::cout << "\n" << statuses.size()
+                std::cout << "\n" << display_groups.size()
                           << " watch group(s)\n";
             }
         }

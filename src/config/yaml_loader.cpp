@@ -763,6 +763,12 @@ WatchGroupDef parse_watch_group_node(
     } else if (node["sample_interval"] && node["sample_interval"].IsScalar()) {
         auto si_str = node["sample_interval"].as<std::string>();
         group.sample_rate = parse_duration_seconds(si_str);
+    } else if (node["sample_interval_s"] && node["sample_interval_s"].IsScalar()) {
+        int s = node["sample_interval_s"].as<int>();
+        group.sample_rate = std::chrono::seconds{s > 0 ? s : 300};
+    } else if (node["sample_rate_s"] && node["sample_rate_s"].IsScalar()) {
+        int s = node["sample_rate_s"].as<int>();
+        group.sample_rate = std::chrono::seconds{s > 0 ? s : 300};
     }
 
     // Max files.
@@ -785,9 +791,12 @@ WatchGroupDef parse_watch_group_node(
 
     // Exclude globs.
     group.exclude_globs = read_string_vec(node["exclude_globs"]);
-    // Also accept "excludes".
+    // Also accept "excludes" and "exclude_patterns" as aliases.
     if (group.exclude_globs.empty()) {
         group.exclude_globs = read_string_vec(node["excludes"]);
+    }
+    if (group.exclude_globs.empty()) {
+        group.exclude_globs = read_string_vec(node["exclude_patterns"]);
     }
 
     // Symlink policy.
@@ -821,6 +830,10 @@ WatchGroupDef parse_watch_group_node(
 
             // Event types filter.
             rule.event_types = read_string_vec(rule_node["event_types"]);
+            // Also accept "events" as alias.
+            if (rule.event_types.empty()) {
+                rule.event_types = read_string_vec(rule_node["events"]);
+            }
 
             // Trigger target.
             if (rule_node["trigger"] && rule_node["trigger"].IsMap()) {
