@@ -83,7 +83,7 @@ std::string TimezoneConfig::suffix() const {
             return "";  // System-dependent, no fixed suffix.
         case TimezoneMode::Offset: {
             if (offset_minutes == 0) return "Z";
-            char buf[8];
+            char buf[16];
             int abs_min = std::abs(offset_minutes);
             std::snprintf(buf, sizeof(buf), "%c%02d:%02d",
                           offset_minutes >= 0 ? '+' : '-',
@@ -162,7 +162,7 @@ std::tm to_local_tm(std::time_t t) {
 
 /// Format a std::tm to "YYYY-MM-DDTHH:MM:SS".
 std::string format_tm(const std::tm& tm) {
-    char buf[32];
+    char buf[64];
     std::snprintf(buf, sizeof(buf), "%04d-%02d-%02dT%02d:%02d:%02d",
                   tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday,
                   tm.tm_hour, tm.tm_min, tm.tm_sec);

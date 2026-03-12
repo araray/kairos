@@ -148,6 +148,24 @@ void setup_logging(const std::string& log_level, bool json_output, bool is_daemo
     observability::initialize_logging(log_cfg);
 }
 
+// ── Helpers for enriched CLI output ─────────────────────────────────────
+
+/// Global timezone config for display — set once per command from the
+/// loaded ConfigState. Defaults to "local" if no config is loaded.
+static platform::TimezoneConfig g_tz_config =
+    platform::TimezoneConfig::parse("local");
+
+/// Initialize the display timezone from a loaded config.
+static void init_timezone(
+    const std::shared_ptr<const config::ConfigState>& cfg)
+{
+    if (cfg) {
+        auto tz_str = cfg->global.get<std::string>(
+            "kairos.timezone", "local");
+        g_tz_config = platform::TimezoneConfig::parse(tz_str);
+    }
+}
+
 /// Load config with error reporting.  Returns nullptr on failure.
 std::shared_ptr<const config::ConfigState> load_config_or_die(
     const std::string& config_path_str,
@@ -168,24 +186,6 @@ std::shared_ptr<const config::ConfigState> load_config_or_die(
     // Set display timezone for all CLI output.
     init_timezone(result.state);
     return result.state;
-}
-
-// ── Helpers for enriched CLI output ─────────────────────────────────────
-
-/// Global timezone config for display — set once per command from the
-/// loaded ConfigState. Defaults to "local" if no config is loaded.
-static platform::TimezoneConfig g_tz_config =
-    platform::TimezoneConfig::parse("local");
-
-/// Initialize the display timezone from a loaded config.
-static void init_timezone(
-    const std::shared_ptr<const config::ConfigState>& cfg)
-{
-    if (cfg) {
-        auto tz_str = cfg->global.get<std::string>(
-            "kairos.timezone", "local");
-        g_tz_config = platform::TimezoneConfig::parse(tz_str);
-    }
 }
 
 /// Parse a UTC ISO-8601 timestamp string.
