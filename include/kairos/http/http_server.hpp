@@ -58,6 +58,10 @@ struct HttpConfig {
 
     /// CORS allowed origins (if enable_cors is true).
     std::string cors_origins = "*";
+
+    /// Timezone for display in HTML pages (e.g., "UTC", "local", "+05:30").
+    /// JSON API always returns UTC.
+    std::string timezone = "local";
 };
 
 // ── Shared dependencies ───────────────────────────────────────────────────

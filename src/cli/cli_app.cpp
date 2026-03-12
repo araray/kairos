@@ -28,6 +28,7 @@
 #include "kairos/persist/query_reader.hpp"
 #include "kairos/platform/platform.hpp"
 #include "kairos/platform/time_compat.hpp"
+#include "kairos/platform/timezone.hpp"
 #include "kairos/testing/fake_clock.hpp"
 #include "kairos/watch/real_scanner.hpp"
 #include "kairos/watch/watch_engine.hpp"
@@ -164,66 +165,55 @@ std::shared_ptr<const config::ConfigState> load_config_or_die(
         }
         return nullptr;
     }
+    // Set display timezone for all CLI output.
+    init_timezone(result.state);
     return result.state;
 }
 
 // ── Helpers for enriched CLI output ─────────────────────────────────────
 
-/// Parse an ISO-8601 timestamp to system_clock time_point.
-/// Returns epoch if parsing fails.
-/// NOTE: DB timestamps are UTC (strftime with 'Z'). We must use
-/// timegm/_mkgmtime, NOT mktime (which assumes local time and
-/// would add the timezone offset, making past events look future).
+/// Global timezone config for display — set once per command from the
+/// loaded ConfigState. Defaults to "local" if no config is loaded.
+static platform::TimezoneConfig g_tz_config =
+    platform::TimezoneConfig::parse("local");
+
+/// Initialize the display timezone from a loaded config.
+static void init_timezone(
+    const std::shared_ptr<const config::ConfigState>& cfg)
+{
+    if (cfg) {
+        auto tz_str = cfg->global.get<std::string>(
+            "kairos.timezone", "local");
+        g_tz_config = platform::TimezoneConfig::parse(tz_str);
+    }
+}
+
+/// Parse a UTC ISO-8601 timestamp string.
+/// Delegates to platform::parse_utc_timestamp.
 static std::chrono::system_clock::time_point
 parse_iso8601(const std::string& ts)
 {
-    if (ts.empty()) return {};
-    std::tm tm{};
-    std::istringstream ss(ts);
-    ss >> std::get_time(&tm, "%Y-%m-%dT%H:%M:%S");
-    if (ss.fail()) {
-        // Try space-separated format (YYYY-MM-DD HH:MM:SS).
-        ss.clear();
-        ss.str(ts);
-        ss >> std::get_time(&tm, "%Y-%m-%d %H:%M:%S");
-        if (ss.fail()) return {};
-    }
-    // Interpret as UTC, not local time.
-#ifdef _WIN32
-    return std::chrono::system_clock::from_time_t(_mkgmtime(&tm));
-#else
-    return std::chrono::system_clock::from_time_t(timegm(&tm));
-#endif
+    return platform::parse_utc_timestamp(ts);
 }
 
 /// Format a time_point as relative string ("2h ago", "just now", etc.)
+/// Delegates to platform::format_relative.
 static std::string format_relative(
     std::chrono::system_clock::time_point tp)
 {
-    if (tp.time_since_epoch().count() == 0) return "--";
-    auto now = std::chrono::system_clock::now();
-    auto diff = std::chrono::duration_cast<std::chrono::seconds>(
-        now - tp).count();
-    if (diff < 0) {
-        // Future time.
-        diff = -diff;
-        if (diff < 60)   return fmt::format("in {}s", diff);
-        if (diff < 3600)  return fmt::format("in {}m", diff / 60);
-        if (diff < 86400) return fmt::format("in {}h {}m", diff / 3600,
-                                              (diff % 3600) / 60);
-        return fmt::format("in {}d", diff / 86400);
-    }
-    if (diff < 5)     return "just now";
-    if (diff < 60)    return fmt::format("{}s ago", diff);
-    if (diff < 3600)  return fmt::format("{}m ago", diff / 60);
-    if (diff < 86400) return fmt::format("{}h ago", diff / 3600);
-    return fmt::format("{}d ago", diff / 86400);
+    return platform::format_relative(tp);
 }
 
-/// Format a time_point as relative string from ISO-8601 string.
+/// Format a UTC timestamp string as relative.
 static std::string format_relative_ts(const std::string& ts)
 {
-    return format_relative(parse_iso8601(ts));
+    return platform::format_relative(ts);
+}
+
+/// Format a UTC timestamp for display in the configured timezone.
+static std::string format_display_ts(const std::string& ts)
+{
+    return platform::format_display_time(ts, g_tz_config);
 }
 
 /// Compute next fire time for a trigger and return as ISO-8601 + relative.
@@ -943,7 +933,7 @@ int run(int argc, char** argv) {
                         {"rule_name", e.rule_name},
                         {"event_type", e.event_type},
                         {"severity", e.severity},
-                        {"created_at", e.created_at},
+                        {"created_at", format_display_ts(e.created_at)},
                         {"affected_files", e.affected_files_json}
                     });
                 }
@@ -1207,7 +1197,7 @@ int run(int argc, char** argv) {
                         {"severity", e.severity},
                         {"affected_files", e.affected_files_json},
                         {"sample_epoch", e.sample_epoch},
-                        {"created_at", e.created_at}
+                        {"created_at", format_display_ts(e.created_at)}
                     });
                 }
                 std::cout << json{
@@ -1627,8 +1617,8 @@ int run(int argc, char** argv) {
                         {"trigger_type", r.trigger_type},
                         {"status", r.status},
                         {"exit_code", r.exit_code},
-                        {"started_at", r.start_ts},
-                        {"finished_at", r.end_ts},
+                        {"started_at", format_display_ts(r.start_ts)},
+                        {"finished_at", format_display_ts(r.end_ts)},
                         {"duration_ms", r.duration_ms}
                     });
                 }
@@ -1653,8 +1643,7 @@ int run(int argc, char** argv) {
                             cli::truncate(r.target_name, 20),
                             status_str,
                             r.trigger_type,
-                            r.start_ts.size() > 19
-                                ? r.start_ts.substr(0, 19) : r.start_ts,
+                            format_display_ts(r.start_ts),
                             cli::format_duration(r.duration_ms)
                         });
                     }
@@ -1706,8 +1695,8 @@ int run(int argc, char** argv) {
                             {"step_name", s.step_name},
                             {"status", s.status},
                             {"exit_code", s.exit_code},
-                            {"started_at", s.start_ts},
-                            {"finished_at", s.end_ts},
+                            {"started_at", format_display_ts(s.start_ts)},
+                            {"finished_at", format_display_ts(s.end_ts)},
                             {"duration_ms", s.duration_ms},
                             {"command", s.command}
                         });
@@ -1717,8 +1706,8 @@ int run(int argc, char** argv) {
                         {"job_name", j.job_name},
                         {"status", j.status},
                         {"exit_code", j.exit_code},
-                        {"started_at", j.start_ts},
-                        {"finished_at", j.end_ts},
+                        {"started_at", format_display_ts(j.start_ts)},
+                        {"finished_at", format_display_ts(j.end_ts)},
                         {"duration_ms", j.duration_ms},
                         {"condition_result", j.condition_result},
                         {"steps", steps_arr}
@@ -1731,8 +1720,8 @@ int run(int argc, char** argv) {
                     {"trigger_type", detail->run.trigger_type},
                     {"status", detail->run.status},
                     {"exit_code", detail->run.exit_code},
-                    {"started_at", detail->run.start_ts},
-                    {"finished_at", detail->run.end_ts},
+                    {"started_at", format_display_ts(detail->run.start_ts)},
+                    {"finished_at", format_display_ts(detail->run.end_ts)},
                     {"duration_ms", detail->run.duration_ms},
                     {"jobs", jobs_arr}
                 }.dump(2) << "\n";
@@ -1748,9 +1737,9 @@ int run(int argc, char** argv) {
                           << cli::colorize_status(r.status, use_color)
                           << "  Exit: " << r.exit_code << "\n";
                 std::cout << "  Trigger: " << r.trigger_type << "\n";
-                std::cout << "  Started: " << r.start_ts << "\n";
+                std::cout << "  Started: " << format_display_ts(r.start_ts) << "\n";
                 if (!r.end_ts.empty()) {
-                    std::cout << "  Finished: " << r.end_ts
+                    std::cout << "  Finished: " << format_display_ts(r.end_ts)
                               << "  Duration: "
                               << cli::format_duration(r.duration_ms) << "\n";
                 }
@@ -2039,7 +2028,7 @@ int run(int argc, char** argv) {
                     {"target_name", t.target_name},
                     {"target_id", t.target_id},
                     {"schedule", nf.schedule_expr},
-                    {"next_fire", nf.iso},
+                    {"next_fire", format_display_ts(nf.iso)},
                     {"enabled", t.enabled},
                     {"max_instances", t.max_instances},
                     {"last_run_status", lr.status}
@@ -2120,7 +2109,7 @@ int run(int argc, char** argv) {
                     {"type", engine::trigger_spec_type_name(u.entry->spec)},
                     {"target_name", u.entry->target_name},
                     {"schedule", u.nf.schedule_expr},
-                    {"next_fire", u.nf.iso},
+                    {"next_fire", format_display_ts(u.nf.iso)},
                     {"fires_in", u.nf.relative}
                 });
             }
@@ -2181,7 +2170,7 @@ int run(int argc, char** argv) {
                     *registry, wf->workflow_id, wf->workflow_name);
                 std::string next_fire = "--";
                 if (!trigs.empty()) {
-                    next_fire = compute_next_fire(*trigs[0]).iso;
+                    next_fire = format_display_ts(compute_next_fire(*trigs[0]).iso);
                 }
                 arr.push_back({
                     {"id", wf->workflow_id},
@@ -2322,7 +2311,7 @@ int run(int argc, char** argv) {
                     {"trigger_id", t->trigger_id},
                     {"type", engine::trigger_spec_type_name(t->spec)},
                     {"schedule", nf.schedule_expr},
-                    {"next_fire", nf.iso}
+                    {"next_fire", format_display_ts(nf.iso)}
                 });
             }
             json runs_arr = json::array();
@@ -2330,7 +2319,7 @@ int run(int argc, char** argv) {
                 runs_arr.push_back({
                     {"run_id", r.run_id},
                     {"status", r.status},
-                    {"started_at", r.start_ts},
+                    {"started_at", format_display_ts(r.start_ts)},
                     {"duration_ms", r.duration_ms}
                 });
             }
@@ -2945,7 +2934,7 @@ int run(int argc, char** argv) {
                     *registry, j->job_id, j->job_name);
                 std::string next_fire = "--";
                 if (!trigs.empty())
-                    next_fire = compute_next_fire(*trigs[0]).iso;
+                    next_fire = format_display_ts(compute_next_fire(*trigs[0]).iso);
                 arr.push_back({
                     {"id", j->job_id},
                     {"name", j->job_name},
@@ -3062,7 +3051,7 @@ int run(int argc, char** argv) {
                     {"trigger_id", t->trigger_id},
                     {"type", engine::trigger_spec_type_name(t->spec)},
                     {"schedule", nf.schedule_expr},
-                    {"next_fire", nf.iso}
+                    {"next_fire", format_display_ts(nf.iso)}
                 });
             }
             json runs_arr = json::array();
@@ -3070,7 +3059,7 @@ int run(int argc, char** argv) {
                 runs_arr.push_back({
                     {"run_id", r.run_id},
                     {"status", r.status},
-                    {"started_at", r.start_ts},
+                    {"started_at", format_display_ts(r.start_ts)},
                     {"duration_ms", r.duration_ms}
                 });
             }
@@ -3702,7 +3691,7 @@ int run(int argc, char** argv) {
                         {"rule_name", e.rule_name},
                         {"event_type", e.event_type},
                         {"severity", e.severity},
-                        {"created_at", e.created_at}
+                        {"created_at", format_display_ts(e.created_at)}
                     }.dump() << "\n";
                     std::cout.flush();
                 } else {
@@ -3948,6 +3937,8 @@ complete -c kairos -n "__fish_seen_subcommand_from logs" -l step -d "Filter by s
             dc.db_path = cfg->db_path;
             dc.config_path = cfg->config_file_path;
             dc.data_dir = cfg->data_dir;
+            dc.timezone = cfg->global.get<std::string>(
+                "kairos.timezone", "local");
         }
         dc.refresh_ms = dashboard_refresh;
         return kairos::tui::run_dashboard(dc);

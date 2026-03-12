@@ -51,6 +51,9 @@ struct DashboardConfig {
 
     /// Maximum number of scheduler timers to display.
     int max_timers = 20;
+
+    /// Timezone for display: "UTC", "local", "+HH:MM", "-HH:MM".
+    std::string timezone = "local";
 };
 
 /// Launch the TUI dashboard.

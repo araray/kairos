@@ -603,6 +603,8 @@ int run_daemon(std::shared_ptr<const kairos::config::ConfigState> config) {
             "kairos.http.auth_token", "");
         http_cfg.enable_cors = config->global.get<bool>(
             "kairos.http.cors_enabled", false);
+        http_cfg.timezone = config->global.get<std::string>(
+            "kairos.timezone", "local");
 
         auto uptime_start_http = std::chrono::steady_clock::now();
 

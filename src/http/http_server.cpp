@@ -22,6 +22,7 @@
 
 #include "kairos/http/http_server.hpp"
 #include "kairos/http/templates.hpp"
+#include "kairos/platform/timezone.hpp"
 
 // cpp-httplib — header-only HTTP server.
 // Must define implementation once.
@@ -65,7 +66,8 @@ static std::string render_template(
 
 /// Build template data for a RunSummary, enriching with badge class
 /// and truncated ID for display.
-static json run_to_json(const persist::QueryReader::RunSummary& r) {
+static json run_to_json(const persist::QueryReader::RunSummary& r,
+                        const platform::TimezoneConfig& tz) {
     json j;
     j["run_id"] = r.run_id;
     j["run_id_short"] = templates::truncate(r.run_id);
@@ -75,8 +77,8 @@ static json run_to_json(const persist::QueryReader::RunSummary& r) {
     j["status"] = r.status;
     j["badge"] = templates::status_to_badge(r.status);
     j["exit_code"] = r.exit_code;
-    j["start_ts"] = r.start_ts;
-    j["end_ts"] = r.end_ts;
+    j["start_ts"] = platform::format_display_time(r.start_ts, tz);
+    j["end_ts"] = platform::format_display_time(r.end_ts, tz);
     j["duration_ms"] = r.duration_ms;
     return j;
 }
@@ -88,6 +90,7 @@ struct HttpServer::Impl {
     HttpDependencies deps;
     httplib::Server svr;
     std::jthread server_thread;
+    platform::TimezoneConfig tz;  // Parsed from config.timezone.
 
     /// Check Bearer token auth for API endpoints.
     bool check_auth(const httplib::Request& req,
@@ -161,7 +164,7 @@ struct HttpServer::Impl {
 
                 json runs_arr = json::array();
                 for (const auto& r : runs) {
-                    runs_arr.push_back(run_to_json(r));
+                    runs_arr.push_back(run_to_json(r, tz));
                 }
                 data["recent_runs"] = std::move(runs_arr);
 
@@ -178,7 +181,7 @@ struct HttpServer::Impl {
                         j["rule_name"] = e.rule_name;
                         j["event_type"] = e.event_type;
                         j["affected_files"] = e.affected_files_json;
-                        j["created_at"] = e.created_at;
+                        j["created_at"] = platform::format_display_time(e.created_at, tz);
                         events_arr.push_back(std::move(j));
                     }
                 }
@@ -245,7 +248,7 @@ struct HttpServer::Impl {
                     auto runs = deps.reader->query_recent_runs(
                         limit, status_filter, wf_filter, since);
                     for (const auto& r : runs) {
-                        arr.push_back(run_to_json(r));
+                        arr.push_back(run_to_json(r, tz));
                     }
                 }
                 data["runs"] = std::move(arr);
@@ -298,8 +301,8 @@ struct HttpServer::Impl {
                     data["badge"] = templates::status_to_badge(
                         detail->run.status);
                     data["trigger_type"] = detail->run.trigger_type;
-                    data["start_ts"] = detail->run.start_ts;
-                    data["end_ts"] = detail->run.end_ts;
+                    data["start_ts"] = platform::format_display_time(detail->run.start_ts, tz);
+                    data["end_ts"] = platform::format_display_time(detail->run.end_ts, tz);
                     data["duration_ms"] = detail->run.duration_ms;
 
                     json jobs_arr = json::array();
@@ -363,7 +366,7 @@ struct HttpServer::Impl {
                         j["rule_name"] = e.rule_name;
                         j["event_type"] = e.event_type;
                         j["severity"] = e.severity;
-                        j["created_at"] = e.created_at;
+                        j["created_at"] = platform::format_display_time(e.created_at, tz);
                         arr.push_back(std::move(j));
                     }
                 }
@@ -454,8 +457,8 @@ struct HttpServer::Impl {
                         j["trigger_type"] = r.trigger_type;
                         j["status"] = r.status;
                         j["exit_code"] = r.exit_code;
-                        j["start_ts"] = r.start_ts;
-                        j["end_ts"] = r.end_ts;
+                        j["start_ts"] = platform::format_display_time(r.start_ts, tz);
+                        j["end_ts"] = platform::format_display_time(r.end_ts, tz);
                         j["duration_ms"] = r.duration_ms;
                         arr.push_back(std::move(j));
                     }
@@ -489,8 +492,8 @@ struct HttpServer::Impl {
                 j["run_id"] = detail->run.run_id;
                 j["target_name"] = detail->run.target_name;
                 j["status"] = detail->run.status;
-                j["start_ts"] = detail->run.start_ts;
-                j["end_ts"] = detail->run.end_ts;
+                j["start_ts"] = platform::format_display_time(detail->run.start_ts, tz);
+                j["end_ts"] = platform::format_display_time(detail->run.end_ts, tz);
                 j["duration_ms"] = detail->run.duration_ms;
 
                 json jobs_arr = json::array();
@@ -545,7 +548,7 @@ struct HttpServer::Impl {
                         j["step_id"] = c.step_id;
                         j["stream"] = c.stream;
                         j["content"] = c.content;
-                        j["created_at"] = c.created_at;
+                        j["created_at"] = platform::format_display_time(c.created_at, tz);
                         arr.push_back(std::move(j));
                     }
                 }
@@ -576,7 +579,7 @@ struct HttpServer::Impl {
                         j["rule_name"] = e.rule_name;
                         j["event_type"] = e.event_type;
                         j["severity"] = e.severity;
-                        j["created_at"] = e.created_at;
+                        j["created_at"] = platform::format_display_time(e.created_at, tz);
                         arr.push_back(std::move(j));
                     }
                 }
@@ -813,6 +816,7 @@ HttpServer::HttpServer(HttpConfig config, HttpDependencies deps)
 {
     impl_->config = std::move(config);
     impl_->deps = std::move(deps);
+    impl_->tz = platform::TimezoneConfig::parse(impl_->config.timezone);
     impl_->register_routes();
 }
 

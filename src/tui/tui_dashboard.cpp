@@ -40,6 +40,8 @@
 #include <ftxui/dom/table.hpp>
 #include <ftxui/screen/color.hpp>
 
+#include "kairos/platform/timezone.hpp"
+
 #include <SQLiteCpp/SQLiteCpp.h>
 #include <spdlog/spdlog.h>
 
@@ -362,7 +364,7 @@ void refresh_state(DashboardState& state, const DashboardConfig& config) {
                 ri.run_id    = q.getColumn(0).getString();
                 ri.workflow  = q.getColumn(1).getString();
                 ri.status    = q.getColumn(2).getString();
-                ri.started   = helpers::format_relative(
+                ri.started   = platform::format_relative(
                     q.getColumn(3).getString());
                 double ms    = q.getColumn(4).getDouble();
                 ri.duration  = helpers::format_duration(ms / 1000.0);
@@ -397,7 +399,7 @@ void refresh_state(DashboardState& state, const DashboardConfig& config) {
                 WatchGroupInfo wg;
                 wg.name        = q.getColumn(0).getString();
                 wg.event_count = q.getColumn(1).getInt();
-                wg.last_scan   = helpers::format_relative(
+                wg.last_scan   = platform::format_relative(
                     q.getColumn(2).getString());
                 state.watch_groups.push_back(std::move(wg));
             }
@@ -420,7 +422,7 @@ void refresh_state(DashboardState& state, const DashboardConfig& config) {
                 ev.rule_name      = q.getColumn(2).getString();
                 ev.event_type     = q.getColumn(3).getString();
                 ev.affected_files = q.getColumn(4).getString();
-                ev.created_at     = helpers::format_relative(
+                ev.created_at     = platform::format_relative(
                     q.getColumn(5).getString());
                 // Truncate long file paths for display.
                 if (ev.affected_files.size() > 60) {
@@ -446,7 +448,7 @@ void refresh_state(DashboardState& state, const DashboardConfig& config) {
                 ti.trigger_id   = q.getColumn(0).getString();
                 ti.trigger_type = q.getColumn(1).getString();
                 ti.target_id    = q.getColumn(2).getString();
-                ti.fired_at     = helpers::format_relative(
+                ti.fired_at     = platform::format_relative(
                     q.getColumn(3).getString());
                 ti.status       = q.getColumn(4).getString();
                 state.trigger_fires.push_back(std::move(ti));
@@ -478,7 +480,9 @@ void refresh_state(DashboardState& state, const DashboardConfig& config) {
         } catch (const std::exception&) {}
 
         // Update refresh timestamp (cross-platform).
-        state.last_refresh = helpers::format_local_time_now();
+        // Update refresh timestamp using configured timezone.
+        auto tz = platform::TimezoneConfig::parse(config.timezone);
+        state.last_refresh = platform::format_now(tz);
 
     } catch (const std::exception& e) {
         state.error = std::string("Database error: ") + e.what();
