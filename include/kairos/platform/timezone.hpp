@@ -69,4 +69,20 @@ parse_utc_timestamp(const std::string& utc_ts);
 /// Get the current time formatted in the configured timezone.
 [[nodiscard]] std::string format_now(const TimezoneConfig& tz);
 
+/// Get the system's current UTC offset in seconds (east of UTC).
+/// E.g., EST = -18000, IST = +19800.
+/// This queries the C runtime (localtime vs gmtime).
+[[nodiscard]] int system_utc_offset_seconds();
+
+/// Compute the offset (in seconds, east of UTC) for a TimezoneConfig.
+/// For "local" mode, returns system_utc_offset_seconds().
+/// For "UTC" mode, returns 0.
+/// For fixed offset mode, returns offset_minutes * 60.
+[[nodiscard]] int config_utc_offset_seconds(const TimezoneConfig& tz);
+
+/// Compute the delta to apply to time_t before croncpp evaluation.
+/// delta = config_offset - system_offset.
+/// When delta is 0, no adjustment needed (e.g., "local" mode).
+[[nodiscard]] int cron_tz_delta_seconds(const TimezoneConfig& tz);
+
 }  // namespace kairos::platform

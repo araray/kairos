@@ -125,6 +125,16 @@ static std::shared_ptr<engine::WorkflowRegistry> load_registry_from_yaml(
         }
     }
 
+    // Patch CronTriggers with configured timezone delta so that
+    // next_fire_after (used by `kairos jobs list` etc.) computes
+    // correct fire times in the user's timezone.
+    int cron_delta = platform::cron_tz_delta_seconds(g_tz_config);
+    for (auto& entry : yaml_result.triggers) {
+        if (auto* cron = std::get_if<engine::CronTrigger>(&entry.spec)) {
+            cron->cron_tz_delta_s = cron_delta;
+        }
+    }
+
     return std::make_shared<engine::WorkflowRegistry>(
         std::move(yaml_result.workflows),
         std::move(yaml_result.triggers),

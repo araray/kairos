@@ -22,13 +22,14 @@ SystemTimePoint CronTrigger::next_fire_after(
     // Convert system_clock time_point to std::time_t for croncpp.
     auto tt = std::chrono::system_clock::to_time_t(after);
 
-    // croncpp expects local time via std::tm.
-    std::tm local_tm{};
-#ifdef _WIN32
-    localtime_s(&local_tm, &tt);
-#else
-    localtime_r(&tt, &local_tm);
-#endif
+    // Apply timezone delta: shift time_t so that when croncpp calls
+    // localtime_r internally, the resulting civil-time fields correspond
+    // to the configured timezone (kairos.timezone), not the system timezone.
+    //
+    // For "local" mode, cron_tz_delta_s == 0 → no change (croncpp uses
+    // system local time, which is what the user expects).
+    // For "+05:30" on a UTC system, delta == +19800 → croncpp sees IST fields.
+    tt += cron_tz_delta_s;
 
     try {
         // croncpp requires 6-field cron (with seconds). Standard cron
@@ -52,6 +53,10 @@ SystemTimePoint CronTrigger::next_fire_after(
 
         auto parsed = cron::make_cron(expr_6field);
         auto next_tt = cron::cron_next(parsed, tt);
+
+        // Reverse the delta to get back to true UTC.
+        next_tt -= cron_tz_delta_s;
+
         return std::chrono::system_clock::from_time_t(next_tt);
     } catch (const cron::bad_cronexpr& e) {
         throw std::runtime_error(

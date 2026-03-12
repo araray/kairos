@@ -36,6 +36,7 @@
 #include "kairos/persist/migration.hpp"
 #include "kairos/persist/query_reader.hpp"
 #include "kairos/platform/platform.hpp"
+#include "kairos/platform/timezone.hpp"
 #include "kairos/security/secret_store.hpp"
 #include "kairos/testing/fake_clock.hpp"
 #include "kairos/watch/real_scanner.hpp"
@@ -135,6 +136,23 @@ static std::shared_ptr<engine::WorkflowRegistry> load_registry_from_yaml(
     // Log any YAML errors (non-fatal).
     for (const auto& err : yaml_result.errors) {
         log->warn("YAML error in {}: {} — {}", err.file, err.path, err.message);
+    }
+
+    // Patch CronTriggers with the configured timezone delta so cron
+    // expressions are evaluated in the user's timezone, not the system
+    // timezone (which may differ on cloud VMs, Docker, WSL, etc.).
+    auto tz_str = cfg->global.get<std::string>("kairos.timezone", "local");
+    auto tz = platform::TimezoneConfig::parse(tz_str);
+    int cron_delta = platform::cron_tz_delta_seconds(tz);
+    if (cron_delta != 0) {
+        log->info("Cron timezone delta: {}s (config={}, system offset={}s)",
+                  cron_delta, tz_str,
+                  platform::system_utc_offset_seconds());
+    }
+    for (auto& entry : yaml_result.triggers) {
+        if (auto* cron = std::get_if<engine::CronTrigger>(&entry.spec)) {
+            cron->cron_tz_delta_s = cron_delta;
+        }
     }
 
     auto registry = std::make_shared<engine::WorkflowRegistry>(

@@ -218,3 +218,53 @@ TEST(FormatNow, OffsetEndsWithOffset) {
     EXPECT_FALSE(result.empty());
     EXPECT_NE(result.find("+05:30"), std::string::npos);
 }
+
+// ═══════════════════════════════════════════════════════════════════════════
+// system_utc_offset_seconds / config_utc_offset_seconds / cron_tz_delta
+// ═══════════════════════════════════════════════════════════════════════════
+
+TEST(SystemOffset, ReturnsReasonableValue) {
+    // System offset should be between -12h and +14h.
+    auto offset = system_utc_offset_seconds();
+    EXPECT_GE(offset, -12 * 3600);
+    EXPECT_LE(offset, 14 * 3600);
+}
+
+TEST(ConfigOffset, UTCReturnsZero) {
+    auto tz = TimezoneConfig::parse("UTC");
+    EXPECT_EQ(config_utc_offset_seconds(tz), 0);
+}
+
+TEST(ConfigOffset, FixedOffsetReturnsCorrect) {
+    auto tz = TimezoneConfig::parse("+05:30");
+    EXPECT_EQ(config_utc_offset_seconds(tz), 19800);
+}
+
+TEST(ConfigOffset, NegativeOffsetReturnsCorrect) {
+    auto tz = TimezoneConfig::parse("-08:00");
+    EXPECT_EQ(config_utc_offset_seconds(tz), -28800);
+}
+
+TEST(ConfigOffset, LocalReturnsSystemOffset) {
+    auto tz = TimezoneConfig::parse("local");
+    EXPECT_EQ(config_utc_offset_seconds(tz), system_utc_offset_seconds());
+}
+
+TEST(CronDelta, LocalModeIsZero) {
+    // "local" mode: croncpp already uses system local time → delta = 0.
+    auto tz = TimezoneConfig::parse("local");
+    EXPECT_EQ(cron_tz_delta_seconds(tz), 0);
+}
+
+TEST(CronDelta, UTCMode) {
+    // "UTC" mode: delta = 0 - system_offset = -system_offset.
+    auto tz = TimezoneConfig::parse("UTC");
+    auto expected = 0 - system_utc_offset_seconds();
+    EXPECT_EQ(cron_tz_delta_seconds(tz), expected);
+}
+
+TEST(CronDelta, FixedOffset) {
+    auto tz = TimezoneConfig::parse("+05:30");
+    auto expected = 19800 - system_utc_offset_seconds();
+    EXPECT_EQ(cron_tz_delta_seconds(tz), expected);
+}

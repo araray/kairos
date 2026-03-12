@@ -256,4 +256,43 @@ std::string format_now(const TimezoneConfig& tz) {
     return format_display_time(std::chrono::system_clock::now(), tz);
 }
 
+// ── System UTC offset ────────────────────────────────────────────────────
+
+int system_utc_offset_seconds() {
+    std::time_t now = std::time(nullptr);
+    std::tm local_tm{}, utc_tm{};
+#ifdef _WIN32
+    localtime_s(&local_tm, &now);
+    gmtime_s(&utc_tm, &now);
+#else
+    localtime_r(&now, &local_tm);
+    gmtime_r(&now, &utc_tm);
+#endif
+    // mktime interprets tm as local time; we use it on both to get
+    // the difference. The UTC tm fed to mktime will be "wrong" by
+    // the local offset, which is exactly what we want to measure.
+    std::time_t local_tt = std::mktime(&local_tm);
+    std::time_t utc_tt   = std::mktime(&utc_tm);
+    return static_cast<int>(std::difftime(local_tt, utc_tt));
+}
+
+int config_utc_offset_seconds(const TimezoneConfig& tz) {
+    switch (tz.mode) {
+        case TimezoneMode::UTC:
+            return 0;
+        case TimezoneMode::Local:
+            return system_utc_offset_seconds();
+        case TimezoneMode::Offset:
+            return tz.offset_minutes * 60;
+    }
+    return 0;
+}
+
+int cron_tz_delta_seconds(const TimezoneConfig& tz) {
+    // croncpp uses localtime_r internally, which applies the system
+    // timezone.  To make it evaluate cron expressions in the configured
+    // timezone instead, we shift the time_t by the difference.
+    return config_utc_offset_seconds(tz) - system_utc_offset_seconds();
+}
+
 }  // namespace kairos::platform

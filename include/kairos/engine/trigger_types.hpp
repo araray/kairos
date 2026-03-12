@@ -53,6 +53,14 @@ enum class MisfirePolicy {
 struct CronTrigger {
     std::string expression;   ///< Original string, e.g., "0 2 * * *"
 
+    /// Timezone delta for cron evaluation (seconds).
+    /// delta = config_tz_offset - system_tz_offset.
+    /// When 0 (default, "local" mode), croncpp evaluates in system local time.
+    /// When non-zero, time_t is shifted before croncpp so cron fields are
+    /// matched against the configured timezone instead.
+    /// Set during config load from kairos.timezone.
+    int cron_tz_delta_s = 0;
+
     /// Compute next fire time after `after`.
     /// Uses croncpp internally. Returns system_clock::time_point.
     ///
