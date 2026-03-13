@@ -92,8 +92,12 @@ if(KAIROS_HTTP)
     )
     # Kairos uses HTTP (plain) only — TLS is handled by reverse proxy.
     # Disabling OpenSSL prevents transitive curl linkage on some systems.
+    # §14.1: Audited — httplib does NOT link curl directly, but OpenSSL
+    # discovery can indirectly pull in curl on linuxbrew/conda systems.
     set(HTTPLIB_REQUIRE_OPENSSL OFF CACHE BOOL "" FORCE)
     set(HTTPLIB_USE_OPENSSL_IF_AVAILABLE OFF CACHE BOOL "" FORCE)
+    set(HTTPLIB_REQUIRE_BROTLI OFF CACHE BOOL "" FORCE)
+    set(HTTPLIB_REQUIRE_ZLIB OFF CACHE BOOL "" FORCE)
 
     # inja — Jinja2-compatible template engine (header-only, MIT).
     # Depends on nlohmann/json (already present — FetchContent deduplicates).

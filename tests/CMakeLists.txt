@@ -732,3 +732,17 @@ kairos_discover_tests(test_tui
         LABELS "tui"
         TIMEOUT 60
 )
+
+# ── Phase 6: Critical Fixes & Quick Wins ──────────────────────────────
+
+# Run ID prefix matching, Table --no-header, platform::get_env,
+# cron preview, affected files summary
+add_executable(test_phase6
+    unit/phase6_test.cpp
+)
+target_link_libraries(test_phase6 PRIVATE kairos_test_helpers)
+kairos_discover_tests(test_phase6
+    PROPERTIES
+        LABELS "phase6"
+        TIMEOUT 30
+)

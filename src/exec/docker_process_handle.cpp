@@ -9,6 +9,7 @@
 // ╚════════════════════════════════════════════════════════════════════════════╝
 
 #include "kairos/exec/docker_process_handle.hpp"
+#include "kairos/platform/environment.hpp"
 
 #include <spdlog/spdlog.h>
 
@@ -829,10 +830,10 @@ std::string default_docker_socket_path() {
     return "//./pipe/docker_engine";
 #elif defined(__APPLE__)
     // macOS: try Docker Desktop default first, then standard path.
-    const char* home = std::getenv("HOME");
+    auto home = platform::get_env("HOME");
     if (home) {
         std::string desktop_path =
-            std::string(home) + "/.docker/run/docker.sock";
+            *home + "/.docker/run/docker.sock";
         if (std::filesystem::exists(desktop_path)) {
             return desktop_path;
         }

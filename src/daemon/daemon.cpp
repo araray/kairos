@@ -36,6 +36,7 @@
 #include "kairos/persist/migration.hpp"
 #include "kairos/persist/query_reader.hpp"
 #include "kairos/platform/platform.hpp"
+#include "kairos/platform/environment.hpp"
 #include "kairos/platform/timezone.hpp"
 #include "kairos/security/secret_store.hpp"
 #include "kairos/testing/fake_clock.hpp"
@@ -347,13 +348,13 @@ int run_daemon(std::shared_ptr<const kairos::config::ConfigState> config) {
                 vault_password.pop_back();
             }
         } else {
-            const char* pw = std::getenv(password_env.c_str());
-            if (!pw || pw[0] == '\0') {
+            auto pw = platform::get_env(password_env.c_str());
+            if (!pw || pw->empty()) {
                 log->error("Vault enabled but {} env var is empty/unset",
                            password_env);
                 return 1;
             }
-            vault_password = pw;
+            vault_password = *pw;
         }
 
         try {

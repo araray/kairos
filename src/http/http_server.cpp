@@ -367,6 +367,39 @@ struct HttpServer::Impl {
                         j["event_type"] = e.event_type;
                         j["severity"] = e.severity;
                         j["created_at"] = platform::format_display_time(e.created_at, tz);
+
+                        // Parse affected_files_json for template display (§1.2).
+                        std::string files_summary;
+                        json files_list = json::array();
+                        if (!e.affected_files_json.empty() &&
+                            e.affected_files_json != "[]") {
+                            try {
+                                auto parsed = json::parse(e.affected_files_json);
+                                if (parsed.is_array()) {
+                                    for (const auto& f : parsed) {
+                                        files_list.push_back(f);
+                                    }
+                                    // Summary: comma-separated filenames
+                                    std::string summary;
+                                    for (size_t fi = 0; fi < parsed.size() && fi < 5; ++fi) {
+                                        if (fi > 0) summary += ", ";
+                                        std::string path = parsed[fi].get<std::string>();
+                                        auto pos = path.find_last_of("/\\");
+                                        summary += (pos != std::string::npos)
+                                            ? path.substr(pos + 1) : path;
+                                    }
+                                    if (parsed.size() > 5) {
+                                        summary += " (+" + std::to_string(parsed.size() - 5) + " more)";
+                                    }
+                                    files_summary = summary;
+                                }
+                            } catch (...) {
+                                files_summary = e.affected_files_json;
+                            }
+                        }
+                        j["affected_files"] = files_summary;
+                        j["affected_files_list"] = files_list;
+
                         arr.push_back(std::move(j));
                     }
                 }

@@ -349,6 +349,108 @@ static std::vector<const engine::TimerEntry*> triggers_for_target(
     return result;
 }
 
+/// Resolve a (possibly truncated) run ID prefix to a full run_id.
+/// On success, returns the full ID. On failure, prints an appropriate
+/// error message and returns an empty string.
+/// Roadmap §1.1 — Run ID prefix matching.
+static std::string resolve_prefix_or_error(
+    const persist::QueryReader& reader,
+    const std::string& input,
+    bool json_mode)
+{
+    auto pr = reader.resolve_run_id_prefix(input);
+    switch (pr.status) {
+        case persist::QueryReader::PrefixResult::kExact:
+        case persist::QueryReader::PrefixResult::kUnique:
+            return pr.resolved_id;
+
+        case persist::QueryReader::PrefixResult::kAmbiguous:
+            if (json_mode) {
+                nlohmann::json j;
+                j["error"] = "Ambiguous run ID prefix";
+                j["prefix"] = input;
+                j["candidates"] = pr.candidates;
+                std::cout << j.dump(2) << "\n";
+            } else {
+                std::cerr << "Ambiguous run ID prefix '" << input
+                          << "' — matches " << pr.candidates.size()
+                          << " runs:\n";
+                for (const auto& c : pr.candidates) {
+                    std::cerr << "  " << c << "\n";
+                }
+                std::cerr << "Provide a longer prefix to disambiguate.\n";
+            }
+            return {};
+
+        case persist::QueryReader::PrefixResult::kNotFound:
+            if (json_mode) {
+                std::cout << nlohmann::json{
+                    {"error", "Run not found"},
+                    {"run_id", input}
+                }.dump(2) << "\n";
+            } else {
+                std::cerr << "Run '" << input << "' not found.\n";
+            }
+            return {};
+
+        case persist::QueryReader::PrefixResult::kEmpty:
+            if (json_mode) {
+                std::cout << nlohmann::json{
+                    {"error", "Empty run ID"}
+                }.dump(2) << "\n";
+            } else {
+                std::cerr << "Error: run ID cannot be empty.\n";
+            }
+            return {};
+    }
+    return {};  // unreachable
+}
+
+/// Summarize affected files JSON for CLI display.
+/// Parses the JSON array and returns a comma-separated summary,
+/// truncated to max_len unless verbose is true.
+static std::string summarize_affected_files(
+    const std::string& affected_files_json,
+    bool verbose, size_t max_len = 40)
+{
+    if (affected_files_json.empty() ||
+        affected_files_json == "[]" ||
+        affected_files_json == "null") {
+        return "--";
+    }
+
+    try {
+        auto arr = nlohmann::json::parse(affected_files_json);
+        if (!arr.is_array() || arr.empty()) return "--";
+
+        std::string result;
+        for (size_t i = 0; i < arr.size(); ++i) {
+            if (i > 0) result += ", ";
+            std::string path = arr[i].get<std::string>();
+            // Show just the filename in non-verbose mode.
+            if (!verbose) {
+                auto pos = path.find_last_of("/\\");
+                if (pos != std::string::npos) {
+                    path = path.substr(pos + 1);
+                }
+            }
+            result += path;
+        }
+
+        if (!verbose && result.size() > max_len) {
+            result = result.substr(0, max_len - 3) + "...";
+        }
+        return result;
+    } catch (...) {
+        // If JSON parsing fails, return the raw string truncated.
+        if (verbose) return affected_files_json;
+        if (affected_files_json.size() > max_len) {
+            return affected_files_json.substr(0, max_len - 3) + "...";
+        }
+        return affected_files_json;
+    }
+}
+
 }  // anonymous namespace
 
 int run(int argc, char** argv) {
@@ -424,10 +526,16 @@ int run(int argc, char** argv) {
         "List recent events");
     std::string events_group;
     int events_limit = 50;
+    bool events_verbose = false;
+    bool events_no_header = false;
     events_list->add_option("--watch-group", events_group,
         "Filter by watch group");
     events_list->add_option("-n,--limit", events_limit,
         "Max events to show (default 50)");
+    events_list->add_flag("-v,--verbose", events_verbose,
+        "Show full affected file paths");
+    events_list->add_flag("--no-header", events_no_header,
+        "Suppress table header");
 
     // ── mcp ──────────────────────────────────────────────────────
     auto* cmd_mcp = app.add_subcommand("mcp",
@@ -465,6 +573,8 @@ int run(int argc, char** argv) {
     std::string runs_status;
     std::string runs_workflow;
     std::string runs_since;
+    bool runs_full_id = false;
+    bool runs_no_header = false;
     runs_list->add_option("-n,--limit", runs_limit,
         "Max runs to show (default 20)");
     runs_list->add_option("--status", runs_status,
@@ -473,6 +583,10 @@ int run(int argc, char** argv) {
         "Filter by workflow name (substring match)");
     runs_list->add_option("--since", runs_since,
         "Only runs after this ISO-8601 timestamp");
+    runs_list->add_flag("--full-id", runs_full_id,
+        "Show full run IDs (no truncation)");
+    runs_list->add_flag("--no-header", runs_no_header,
+        "Suppress table header (for scripting pipelines)");
 
     auto* runs_show = cmd_runs->add_subcommand("show",
         "Show run detail with jobs and steps");
@@ -512,6 +626,15 @@ int run(int argc, char** argv) {
     int triggers_next_n = 10;
     triggers_next->add_option("-n,--limit", triggers_next_n,
         "Number of upcoming triggers (default: 10)");
+
+    auto* triggers_preview = cmd_triggers->add_subcommand("preview",
+        "Preview fire times for a cron expression");
+    std::string cron_expr;
+    int cron_count = 10;
+    triggers_preview->add_option("expression", cron_expr,
+        "Cron expression (5 or 6 field)")->required();
+    triggers_preview->add_option("-n,--count", cron_count,
+        "Number of fire times to show (default: 10)");
 
     // ── workflows ────────────────────────────────────────────────
     auto* cmd_workflows = app.add_subcommand("workflows",
@@ -1224,7 +1347,8 @@ int run(int argc, char** argv) {
                 } else {
                     bool use_color = cli::supports_color();
                     cli::Table table({"GROUP", "RULE", "TYPE",
-                                      "SEVERITY", "CREATED"});
+                                      "SEVERITY", "FILES", "CREATED"});
+                    if (events_no_header) table.set_show_header(false);
                     for (const auto& e : events) {
                         std::string sev = e.severity;
                         if (use_color) {
@@ -1241,9 +1365,11 @@ int run(int argc, char** argv) {
                         }
                         std::string ts = e.created_at.size() > 19
                             ? e.created_at.substr(0, 19) : e.created_at;
+                        std::string files = summarize_affected_files(
+                            e.affected_files_json, events_verbose);
                         table.add_row({
                             e.watch_group, e.rule_name,
-                            e.event_type, sev, ts
+                            e.event_type, sev, files, ts
                         });
                     }
                     table.render(std::cout, use_color);
@@ -1643,13 +1769,17 @@ int run(int argc, char** argv) {
                     cli::Table table({
                         "RUN ID", "TARGET", "STATUS",
                         "TRIGGER", "STARTED", "DURATION"});
+                    if (runs_no_header) table.set_show_header(false);
 
                     for (const auto& r : runs) {
                         std::string status_str =
                             cli::status_icon(r.status, use_color) + " " +
                             cli::colorize_status(r.status, use_color);
+                        std::string display_id = runs_full_id
+                            ? r.run_id
+                            : cli::truncate(r.run_id, 12);
                         table.add_row({
-                            cli::truncate(r.run_id, 12),
+                            display_id,
                             cli::truncate(r.target_name, 20),
                             status_str,
                             r.trigger_type,
@@ -1681,15 +1811,21 @@ int run(int argc, char** argv) {
             auto db = persist::open_database(cfg->db_path);
             persist::QueryReader reader(*db);
 
-            auto detail = reader.get_run_detail(runs_show_id);
+            // Resolve prefix (§1.1).
+            auto resolved = resolve_prefix_or_error(
+                reader, runs_show_id, json_output);
+            if (resolved.empty())
+                return static_cast<int>(ExitCode::kNotFound);
+
+            auto detail = reader.get_run_detail(resolved);
             if (!detail) {
                 if (json_output) {
                     std::cout << json{
                         {"error", "Run not found"},
-                        {"run_id", runs_show_id}
+                        {"run_id", resolved}
                     }.dump(2) << "\n";
                 } else {
-                    std::cerr << "Run '" << runs_show_id
+                    std::cerr << "Run '" << resolved
                               << "' not found.\n";
                 }
                 return static_cast<int>(ExitCode::kNotFound);
@@ -1798,6 +1934,13 @@ int run(int argc, char** argv) {
         try {
             auto db = persist::open_database(cfg->db_path);
             persist::QueryReader reader(*db);
+
+            // Resolve prefix (§1.1).
+            auto resolved = resolve_prefix_or_error(
+                reader, run_cancel_id, json_output);
+            if (resolved.empty())
+                return static_cast<int>(ExitCode::kNotFound);
+            run_cancel_id = resolved;
 
             // Verify the run exists and is actually running.
             auto run_opt = reader.get_run_summary(run_cancel_id);
@@ -1913,6 +2056,13 @@ int run(int argc, char** argv) {
         try {
             auto db = persist::open_database(cfg->db_path);
             persist::QueryReader reader(*db);
+
+            // Resolve prefix (§1.1).
+            auto resolved = resolve_prefix_or_error(
+                reader, logs_run_id, json_output);
+            if (resolved.empty())
+                return static_cast<int>(ExitCode::kNotFound);
+            logs_run_id = resolved;
 
             // Verify run exists.
             auto run_opt = reader.get_run_summary(logs_run_id);
@@ -2146,6 +2296,112 @@ int run(int argc, char** argv) {
                               << " more triggers not shown)\n";
                 }
             }
+        }
+        return 0;
+    }
+
+    // ── triggers preview (§15.8) ─────────────────────────────────
+    if (triggers_preview->parsed()) {
+        setup_logging(log_level, json_output, false);
+
+        try {
+            // Build a CronTrigger from the user-provided expression.
+            engine::CronTrigger cron;
+            cron.expression = cron_expr;
+
+            // Try to load timezone delta from config (best-effort).
+            auto cfg = load_config_or_die(config_path, {});
+            if (cfg) {
+                cron.cron_tz_delta_s = platform::cron_tz_delta_seconds(
+                    g_tz_config);
+            }
+
+            auto now = std::chrono::system_clock::now();
+            auto cursor = now;
+
+            int count = std::clamp(cron_count, 1, 100);
+
+            if (json_output) {
+                json arr = json::array();
+                for (int i = 0; i < count; ++i) {
+                    auto next = cron.next_fire_after(cursor);
+                    // Safety: if next_fire_after returns the same or
+                    // earlier time, we're stuck. Break to avoid infinite loop.
+                    if (next <= cursor) break;
+
+                    auto tt = std::chrono::system_clock::to_time_t(next);
+                    char buf[64];
+                    struct tm tm_buf{};
+#ifdef _WIN32
+                    localtime_s(&tm_buf, &tt);
+#else
+                    localtime_r(&tt, &tm_buf);
+#endif
+                    std::strftime(buf, sizeof(buf),
+                                  "%Y-%m-%dT%H:%M:%S", &tm_buf);
+
+                    auto delta = std::chrono::duration_cast<
+                        std::chrono::seconds>(next - now);
+
+                    arr.push_back({
+                        {"index", i + 1},
+                        {"fire_at", std::string(buf)},
+                        {"seconds_from_now", delta.count()}
+                    });
+                    cursor = next;
+                }
+                std::cout << json{
+                    {"expression", cron_expr},
+                    {"count", static_cast<int>(arr.size())},
+                    {"fire_times", arr}
+                }.dump(2) << "\n";
+            } else {
+                std::cout << "Cron expression: " << cron_expr
+                          << "\nNext " << count << " fire times:\n\n";
+
+                cli::Table table({"#", "FIRE AT", "FROM NOW"});
+
+                for (int i = 0; i < count; ++i) {
+                    auto next = cron.next_fire_after(cursor);
+                    if (next <= cursor) {
+                        std::cerr << "  (no more fire times)\n";
+                        break;
+                    }
+
+                    auto tt = std::chrono::system_clock::to_time_t(next);
+                    char buf[64];
+                    struct tm tm_buf{};
+#ifdef _WIN32
+                    localtime_s(&tm_buf, &tt);
+#else
+                    localtime_r(&tt, &tm_buf);
+#endif
+                    std::strftime(buf, sizeof(buf),
+                                  "%Y-%m-%d %H:%M:%S", &tm_buf);
+
+                    std::string relative = format_relative(next);
+
+                    table.add_row({
+                        std::to_string(i + 1),
+                        std::string(buf),
+                        relative
+                    });
+                    cursor = next;
+                }
+                table.render(std::cout, cli::supports_color());
+            }
+        } catch (const std::exception& e) {
+            if (json_output) {
+                std::cout << json{
+                    {"error", "Invalid cron expression"},
+                    {"expression", cron_expr},
+                    {"detail", e.what()}
+                }.dump(2) << "\n";
+            } else {
+                std::cerr << "Error: invalid cron expression '"
+                          << cron_expr << "'\n  " << e.what() << "\n";
+            }
+            return 1;
         }
         return 0;
     }

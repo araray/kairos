@@ -664,6 +664,60 @@ std::vector<QueryReader::RunSummary> QueryReader::query_recent_runs(
     return results;
 }
 
+// ── Run ID prefix resolution (§1.1) ──────────────────────────────────────
+
+QueryReader::PrefixResult QueryReader::resolve_run_id_prefix(
+    const std::string& prefix) const
+{
+    PrefixResult result;
+
+    if (prefix.empty()) {
+        result.status = PrefixResult::kEmpty;
+        return result;
+    }
+
+    // Full UUID length (run-XXXXXXXX-XXXX-XXXX-XXXX-XXXXXXXXXXXX = 40 chars,
+    // or just the UUID part = 36). If the input is already >= 36 chars,
+    // treat as exact match to avoid LIKE overhead.
+    if (prefix.size() >= 36) {
+        SQLite::Statement query(db_,
+            "SELECT run_id FROM runs WHERE run_id = ?");
+        query.bind(1, prefix);
+        if (query.executeStep()) {
+            result.status = PrefixResult::kExact;
+            result.resolved_id = query.getColumn(0).getString();
+        } else {
+            result.status = PrefixResult::kNotFound;
+        }
+        return result;
+    }
+
+    // Prefix search: LIKE prefix% (limited to 10 candidates for
+    // ambiguity reporting).
+    std::string like_pattern = prefix + "%";
+    SQLite::Statement query(db_,
+        "SELECT run_id FROM runs WHERE run_id LIKE ? "
+        "ORDER BY start_ts DESC LIMIT 10");
+    query.bind(1, like_pattern);
+
+    std::vector<std::string> matches;
+    while (query.executeStep()) {
+        matches.push_back(query.getColumn(0).getString());
+    }
+
+    if (matches.empty()) {
+        result.status = PrefixResult::kNotFound;
+    } else if (matches.size() == 1) {
+        result.status = PrefixResult::kUnique;
+        result.resolved_id = matches[0];
+    } else {
+        result.status = PrefixResult::kAmbiguous;
+        result.candidates = std::move(matches);
+    }
+
+    return result;
+}
+
 std::optional<QueryReader::RunSummary> QueryReader::get_run_summary(
     const std::string& run_id) const
 {

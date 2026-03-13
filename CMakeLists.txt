@@ -144,6 +144,7 @@ if(WIN32)
         src/platform/signals_win32.cpp
         src/platform/threading_win32.cpp
         src/platform/instance_lock_win32.cpp
+        src/platform/environment_win32.cpp
         src/exec/process_handle_win32.cpp
     )
     target_link_libraries(kairos_platform PRIVATE Shell32 Ole32)
@@ -154,6 +155,7 @@ else()
         src/platform/signals_posix.cpp
         src/platform/threading_posix.cpp
         src/platform/instance_lock_posix.cpp
+        src/platform/environment_posix.cpp
         src/exec/process_handle_posix.cpp
     )
     target_link_libraries(kairos_platform PRIVATE pthread)
