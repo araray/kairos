@@ -746,3 +746,15 @@ kairos_discover_tests(test_phase6
         LABELS "phase6"
         TIMEOUT 30
 )
+
+# Phase 7 tests: CLI filter, KEL eval, interactive selector
+add_executable(test_phase7
+    unit/phase7_test.cpp
+    ${CMAKE_SOURCE_DIR}/src/cli/interactive_selector.cpp
+)
+target_link_libraries(test_phase7 PRIVATE kairos_test_helpers)
+kairos_discover_tests(test_phase7
+    PROPERTIES
+        LABELS "phase7"
+        TIMEOUT 30
+)

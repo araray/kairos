@@ -180,6 +180,7 @@ add_executable(kairos
     src/main.cpp
     src/cli/cli_app.cpp
     src/cli/cli_migrate.cpp
+    src/cli/interactive_selector.cpp
     src/daemon/daemon.cpp
     src/daemon/command_reader.cpp
 )

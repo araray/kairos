@@ -5,6 +5,8 @@
 
 #include "kairos/cli/cli_app.hpp"
 #include "kairos/cli/cli_migrate.hpp"
+#include "kairos/cli/filter.hpp"
+#include "kairos/cli/interactive_selector.hpp"
 #include "kairos/cli/table.hpp"
 #include "kairos/config/config_store.hpp"
 #include "kairos/config/yaml_loader.hpp"
@@ -18,6 +20,7 @@
 #include "kairos/engine/workflow_registry.hpp"
 #include "kairos/exec/process_handle.hpp"
 #include "kairos/exec/runner_pool.hpp"
+#include "kairos/kel/errors.hpp"
 #include "kairos/kel/evaluator.hpp"
 #include "kairos/kel/value.hpp"
 #include "kairos/mcp/handler.hpp"
@@ -501,6 +504,12 @@ int run(int argc, char** argv) {
 
     auto* watches_list = cmd_watches->add_subcommand("list",
         "List watch groups and their status");
+    std::string watches_filter;
+    bool watches_interactive = false;
+    watches_list->add_option("--filter,-F", watches_filter,
+        "Regex filter on displayed rows (§5.1)");
+    watches_list->add_flag("-i,--interactive", watches_interactive,
+        "Interactive selection mode (§2.1)");
 
     auto* watches_show = cmd_watches->add_subcommand("show",
         "Show watch group detail");
@@ -536,6 +545,12 @@ int run(int argc, char** argv) {
         "Show full affected file paths");
     events_list->add_flag("--no-header", events_no_header,
         "Suppress table header");
+    std::string events_filter;
+    bool events_interactive = false;
+    events_list->add_option("--filter,-F", events_filter,
+        "Regex filter on displayed rows (§5.1)");
+    events_list->add_flag("-i,--interactive", events_interactive,
+        "Interactive selection mode (§2.1)");
 
     // ── mcp ──────────────────────────────────────────────────────
     auto* cmd_mcp = app.add_subcommand("mcp",
@@ -587,6 +602,12 @@ int run(int argc, char** argv) {
         "Show full run IDs (no truncation)");
     runs_list->add_flag("--no-header", runs_no_header,
         "Suppress table header (for scripting pipelines)");
+    std::string runs_filter;
+    bool runs_interactive = false;
+    runs_list->add_option("--filter,-F", runs_filter,
+        "Regex filter on displayed rows (§5.1)");
+    runs_list->add_flag("-i,--interactive", runs_interactive,
+        "Interactive selection mode (§2.1)");
 
     auto* runs_show = cmd_runs->add_subcommand("show",
         "Show run detail with jobs and steps");
@@ -620,6 +641,12 @@ int run(int argc, char** argv) {
     int triggers_limit = 50;
     triggers_list->add_option("-n,--limit", triggers_limit,
         "Max number of triggers to show (default: 50)");
+    std::string triggers_filter;
+    bool triggers_interactive = false;
+    triggers_list->add_option("--filter,-F", triggers_filter,
+        "Regex filter on displayed rows (§5.1)");
+    triggers_list->add_flag("-i,--interactive", triggers_interactive,
+        "Interactive selection mode (§2.1)");
 
     auto* triggers_next = cmd_triggers->add_subcommand("next",
         "Show the next N triggers to fire");
@@ -643,6 +670,12 @@ int run(int argc, char** argv) {
 
     auto* workflows_list = cmd_workflows->add_subcommand("list",
         "List all workflows");
+    std::string workflows_filter;
+    bool workflows_interactive = false;
+    workflows_list->add_option("--filter,-F", workflows_filter,
+        "Regex filter on displayed rows (§5.1)");
+    workflows_list->add_flag("-i,--interactive", workflows_interactive,
+        "Interactive selection mode (§2.1)");
 
     auto* workflows_show = cmd_workflows->add_subcommand("show",
         "Show workflow detail");
@@ -672,6 +705,12 @@ int run(int argc, char** argv) {
 
     auto* jobs_list = cmd_jobs->add_subcommand("list",
         "List standalone jobs");
+    std::string jobs_filter;
+    bool jobs_interactive = false;
+    jobs_list->add_option("--filter,-F", jobs_filter,
+        "Regex filter on displayed rows (§5.1)");
+    jobs_list->add_flag("-i,--interactive", jobs_interactive,
+        "Interactive selection mode (§2.1)");
 
     auto* jobs_show = cmd_jobs->add_subcommand("show",
         "Show job detail");
@@ -784,6 +823,21 @@ int run(int argc, char** argv) {
         "Path to Kairos SQLite database");
     cmd_dashboard->add_option("--refresh", dashboard_refresh,
         "Refresh interval in milliseconds (default: 1000)");
+
+    // ── kel (expression evaluator) ──────────────────────────────────
+    // Roadmap §7: KEL Interactive REPL
+    auto* cmd_kel = app.add_subcommand("kel",
+        "KEL expression evaluator (eval one-shot or interactive REPL)");
+    cmd_kel->require_subcommand(1);
+
+    auto* kel_eval = cmd_kel->add_subcommand("eval",
+        "Evaluate a single KEL expression");
+    std::string kel_eval_expr;
+    kel_eval->add_option("expression", kel_eval_expr,
+        "KEL expression to evaluate")->required();
+
+    auto* kel_repl = cmd_kel->add_subcommand("repl",
+        "Start interactive KEL REPL (read-eval-print loop)");
 
     // ── Parse ─────────────────────────────────────────────────────────
     try {
@@ -958,8 +1012,14 @@ int run(int argc, char** argv) {
         }
 
         if (json_output) {
+            // §5.1: Compile row filter.
+            auto filter = cli::make_filter(watches_filter);
             json arr = json::array();
             for (const auto& s : display_groups) {
+                if (filter.active()) {
+                    std::vector<std::string> rf = {s.name, s.mode};
+                    if (!filter.matches(rf)) continue;
+                }
                 arr.push_back({
                     {"name", s.name},
                     {"mode", s.mode},
@@ -971,29 +1031,67 @@ int run(int argc, char** argv) {
             }
             std::cout << json{{"watch_groups", arr}}.dump(2) << "\n";
         } else {
+            // §5.1: Compile row filter.
+            auto filter = cli::make_filter(watches_filter);
             if (display_groups.empty()) {
                 std::cout << "No watch groups configured.\n";
             } else {
                 bool use_color = cli::supports_color();
                 cli::Table table({"GROUP", "MODE", "PATHS", "FILES",
                                   "EVENTS", "LAST SCAN"});
+                std::vector<cli::SelectorItem> select_items;
+                int shown = 0;
                 for (const auto& s : display_groups) {
                     std::string last_scan = s.last_scan_time.empty()
                         ? "(no scans yet)" : s.last_scan_time;
                     if (last_scan.size() > 19) {
                         last_scan = last_scan.substr(0, 19);
                     }
-                    table.add_row({
+                    std::vector<std::string> row = {
                         s.name, s.mode,
                         std::to_string(s.watched_paths),
                         std::to_string(s.files_in_last_sample),
                         std::to_string(s.event_count),
                         last_scan
-                    });
+                    };
+
+                    // §5.1: Apply filter.
+                    if (!filter.matches(row)) continue;
+
+                    table.add_row(row);
+                    shown++;
+
+                    if (watches_interactive) {
+                        select_items.push_back({
+                            s.name,
+                            s.name + "  " + s.mode + "  "
+                                + std::to_string(s.event_count) + " events",
+                            s.name + " " + s.mode
+                        });
+                    }
                 }
+
+                // §2.1: Interactive selection → watches show.
+                if (watches_interactive && !select_items.empty()) {
+                    table.render(std::cout, use_color);
+                    std::cout << "\n";
+                    auto selected = cli::interactive_select(
+                        select_items,
+                        {.prompt = "Select watch group"});
+                    if (selected) {
+                        std::cout << "\nSelected: " << *selected
+                                  << "\n(use 'kairos watches show "
+                                  << *selected << "' for detail)\n";
+                    }
+                    return 0;
+                }
+
                 table.render(std::cout, use_color);
-                std::cout << "\n" << display_groups.size()
-                          << " watch group(s)\n";
+                std::cout << "\n" << shown << " watch group(s)";
+                if (filter.active())
+                    std::cout << " (filtered from "
+                              << display_groups.size() << ")";
+                std::cout << "\n";
             }
         }
         return 0;
@@ -1319,9 +1417,18 @@ int run(int argc, char** argv) {
             auto events = reader.query_watch_events(
                 events_limit, events_group);
 
+            // §5.1: Compile row filter.
+            auto filter = cli::make_filter(events_filter);
+
             if (json_output) {
                 json arr = json::array();
                 for (const auto& e : events) {
+                    if (filter.active()) {
+                        std::vector<std::string> rf = {
+                            e.watch_group, e.rule_name,
+                            e.event_type, e.severity};
+                        if (!filter.matches(rf)) continue;
+                    }
                     arr.push_back({
                         {"event_uid", e.event_uid},
                         {"watch_group", e.watch_group},
@@ -1335,7 +1442,7 @@ int run(int argc, char** argv) {
                 }
                 std::cout << json{
                     {"events", arr},
-                    {"count", static_cast<int>(events.size())}
+                    {"count", static_cast<int>(arr.size())}
                 }.dump(2) << "\n";
             } else {
                 if (events.empty()) {
@@ -1349,6 +1456,8 @@ int run(int argc, char** argv) {
                     cli::Table table({"GROUP", "RULE", "TYPE",
                                       "SEVERITY", "FILES", "CREATED"});
                     if (events_no_header) table.set_show_header(false);
+                    std::vector<cli::SelectorItem> select_items;
+                    int shown = 0;
                     for (const auto& e : events) {
                         std::string sev = e.severity;
                         if (use_color) {
@@ -1367,14 +1476,69 @@ int run(int argc, char** argv) {
                             ? e.created_at.substr(0, 19) : e.created_at;
                         std::string files = summarize_affected_files(
                             e.affected_files_json, events_verbose);
-                        table.add_row({
+
+                        std::vector<std::string> row = {
                             e.watch_group, e.rule_name,
                             e.event_type, sev, files, ts
-                        });
+                        };
+
+                        // §5.1: Apply filter.
+                        if (!filter.matches(row)) continue;
+
+                        table.add_row(row);
+                        shown++;
+
+                        if (events_interactive) {
+                            select_items.push_back({
+                                e.event_uid,
+                                e.watch_group + "  " + e.rule_name
+                                    + "  " + e.event_type,
+                                e.watch_group + " " + e.rule_name
+                                    + " " + e.event_type + " "
+                                    + e.severity
+                            });
+                        }
                     }
+
+                    // §2.1: Interactive selection — show detail.
+                    if (events_interactive && !select_items.empty()) {
+                        table.render(std::cout, use_color);
+                        std::cout << "\n";
+                        auto selected = cli::interactive_select(
+                            select_items,
+                            {.prompt = "Select event"});
+                        if (selected) {
+                            // Show full event detail.
+                            for (const auto& e : events) {
+                                if (e.event_uid == *selected) {
+                                    std::cout << "\nEvent: "
+                                              << e.event_uid << "\n"
+                                              << "Group: "
+                                              << e.watch_group << "\n"
+                                              << "Rule: "
+                                              << e.rule_name << "\n"
+                                              << "Type: "
+                                              << e.event_type << "\n"
+                                              << "Severity: "
+                                              << e.severity << "\n"
+                                              << "Created: "
+                                              << e.created_at << "\n"
+                                              << "Affected files: "
+                                              << e.affected_files_json
+                                              << "\n";
+                                    break;
+                                }
+                            }
+                        }
+                        return 0;
+                    }
+
                     table.render(std::cout, use_color);
-                    std::cout << "\n" << events.size()
-                              << " event(s)\n";
+                    std::cout << "\n" << shown << " event(s)";
+                    if (filter.active())
+                        std::cout << " (filtered from "
+                                  << events.size() << ")";
+                    std::cout << "\n";
                 }
             }
         } catch (const std::exception& e) {
@@ -1743,9 +1907,19 @@ int run(int argc, char** argv) {
             auto runs = reader.query_recent_runs(
                 runs_limit, runs_status, runs_workflow, runs_since);
 
+            // §5.1: Compile row filter.
+            auto filter = cli::make_filter(runs_filter);
+
             if (json_output) {
                 json arr = json::array();
                 for (const auto& r : runs) {
+                    // Apply filter to JSON rows too.
+                    if (filter.active()) {
+                        std::vector<std::string> row_fields = {
+                            r.run_id, r.target_name, r.status,
+                            r.trigger_type};
+                        if (!filter.matches(row_fields)) continue;
+                    }
                     arr.push_back({
                         {"run_id", r.run_id},
                         {"target_type", r.target_type},
@@ -1771,6 +1945,10 @@ int run(int argc, char** argv) {
                         "TRIGGER", "STARTED", "DURATION"});
                     if (runs_no_header) table.set_show_header(false);
 
+                    // §2.1: Collect items for interactive selection.
+                    std::vector<cli::SelectorItem> select_items;
+                    int shown = 0;
+
                     for (const auto& r : runs) {
                         std::string status_str =
                             cli::status_icon(r.status, use_color) + " " +
@@ -1778,17 +1956,80 @@ int run(int argc, char** argv) {
                         std::string display_id = runs_full_id
                             ? r.run_id
                             : cli::truncate(r.run_id, 12);
-                        table.add_row({
+
+                        std::vector<std::string> row = {
                             display_id,
                             cli::truncate(r.target_name, 20),
                             status_str,
                             r.trigger_type,
                             format_display_ts(r.start_ts),
                             cli::format_duration(r.duration_ms)
-                        });
+                        };
+
+                        // §5.1: Apply filter.
+                        if (!filter.matches(row)) continue;
+
+                        table.add_row(row);
+                        shown++;
+
+                        if (runs_interactive) {
+                            select_items.push_back({
+                                r.run_id,
+                                display_id + "  " + r.target_name
+                                    + "  " + r.status,
+                                r.run_id + " " + r.target_name
+                                    + " " + r.status + " "
+                                    + r.trigger_type
+                            });
+                        }
                     }
+
+                    // §2.1: Interactive selection mode.
+                    if (runs_interactive && !select_items.empty()) {
+                        table.render(std::cout, use_color);
+                        std::cout << "\n";
+                        auto selected = cli::interactive_select(
+                            select_items,
+                            {.prompt = "Select run"});
+                        if (selected) {
+                            // Re-invoke as "runs show <id>".
+                            std::cout << "\n";
+                            auto detail = reader.get_run_detail(*selected);
+                            if (detail) {
+                                std::cout << "Run: " << detail->run.run_id
+                                          << "\n";
+                                std::cout << "Target: "
+                                          << detail->run.target_name << "\n";
+                                std::cout << "Status: "
+                                          << detail->run.status << "\n";
+                                std::cout << "Started: "
+                                          << format_display_ts(
+                                                 detail->run.start_ts) << "\n";
+                                std::cout << "Duration: "
+                                          << cli::format_duration(
+                                                 detail->run.duration_ms)
+                                          << "\n";
+                                if (!detail->jobs.empty()) {
+                                    std::cout << "\nJobs:\n";
+                                    for (const auto& j : detail->jobs) {
+                                        std::cout << "  "
+                                            << cli::status_icon(
+                                                   j.status, use_color)
+                                            << " " << j.job_name
+                                            << " (" << j.status << ")\n";
+                                    }
+                                }
+                            }
+                        }
+                        return 0;
+                    }
+
                     table.render(std::cout, use_color);
-                    std::cout << "\n" << runs.size() << " run(s)\n";
+                    std::cout << "\n" << shown << " run(s)";
+                    if (filter.active())
+                        std::cout << " (filtered from "
+                                  << runs.size() << ")";
+                    std::cout << "\n";
                 }
             }
         } catch (const std::exception& e) {
@@ -2178,8 +2419,15 @@ int run(int argc, char** argv) {
         if (db) reader = std::make_unique<persist::QueryReader>(*db);
 
         if (json_output) {
+            auto filter = cli::make_filter(triggers_filter);
             json arr = json::array();
             for (const auto& t : triggers) {
+                if (filter.active()) {
+                    std::vector<std::string> rf = {
+                        t.trigger_id, t.target_name,
+                        engine::trigger_spec_type_name(t.spec)};
+                    if (!filter.matches(rf)) continue;
+                }
                 auto nf = compute_next_fire(t);
                 auto lr = last_run_for_target(reader.get(), t.target_name);
                 arr.push_back({
@@ -2196,11 +2444,14 @@ int run(int argc, char** argv) {
             }
             std::cout << json(arr).dump(2) << "\n";
         } else {
+            auto filter = cli::make_filter(triggers_filter);
             if (triggers.empty()) {
                 std::cout << "No triggers configured.\n";
             } else {
                 cli::Table table({"TRIGGER", "TYPE", "TARGET",
                                   "SCHEDULE", "NEXT FIRE", "LAST RUN"});
+                std::vector<cli::SelectorItem> select_items;
+                int shown = 0;
                 for (const auto& t : triggers) {
                     auto nf = compute_next_fire(t);
                     auto lr = last_run_for_target(reader.get(), t.target_name);
@@ -2208,17 +2459,50 @@ int run(int argc, char** argv) {
                     if (use_color && lr.status != "--") {
                         status_str = cli::colorize_status(lr.status, true);
                     }
-                    table.add_row({
+                    std::vector<std::string> row = {
                         cli::truncate(t.trigger_id, 16),
                         engine::trigger_spec_type_name(t.spec),
                         t.target_name,
                         nf.schedule_expr,
                         nf.relative,
                         status_str
-                    });
+                    };
+
+                    if (!filter.matches(row)) continue;
+                    table.add_row(row);
+                    shown++;
+
+                    if (triggers_interactive) {
+                        select_items.push_back({
+                            t.trigger_id,
+                            t.target_name + "  "
+                                + engine::trigger_spec_type_name(t.spec)
+                                + "  " + nf.schedule_expr,
+                            t.trigger_id + " " + t.target_name
+                                + " " + nf.schedule_expr
+                        });
+                    }
                 }
+
+                if (triggers_interactive && !select_items.empty()) {
+                    table.render(std::cout, use_color);
+                    std::cout << "\n";
+                    auto selected = cli::interactive_select(
+                        select_items,
+                        {.prompt = "Select trigger"});
+                    if (selected) {
+                        std::cout << "\nSelected trigger: " << *selected
+                                  << "\n";
+                    }
+                    return 0;
+                }
+
                 table.render(std::cout, use_color);
-                std::cout << "\n" << triggers.size() << " trigger(s)\n";
+                std::cout << "\n" << shown << " trigger(s)";
+                if (filter.active())
+                    std::cout << " (filtered from "
+                              << triggers.size() << ")";
+                std::cout << "\n";
             }
         }
         return 0;
@@ -2423,9 +2707,17 @@ int run(int argc, char** argv) {
 
         const auto& workflows = registry->workflows();
 
+        // §5.1: Compile row filter.
+        auto filter = cli::make_filter(workflows_filter);
+
         if (json_output) {
             json arr = json::array();
             for (const auto* wf : workflows) {
+                if (filter.active()) {
+                    std::vector<std::string> rf = {
+                        wf->workflow_name, wf->workflow_id};
+                    if (!filter.matches(rf)) continue;
+                }
                 json jobs_arr = json::array();
                 for (const auto& j : wf->jobs) {
                     jobs_arr.push_back(j.job_name);
@@ -2457,6 +2749,8 @@ int run(int argc, char** argv) {
                 bool use_color = cli::supports_color();
                 cli::Table t({"WORKFLOW", "JOBS", "LAST RUN",
                                "WHEN", "NEXT FIRE"});
+                std::vector<cli::SelectorItem> select_items;
+                int shown = 0;
                 for (const auto* wf : workflows) {
                     auto lr = last_run_for_target(
                         reader.get(), wf->workflow_name);
@@ -2471,7 +2765,8 @@ int run(int argc, char** argv) {
                         status_str = cli::status_icon(lr.status, true)
                             + " " + cli::colorize_status(lr.status, true);
                     }
-                    t.add_row({
+
+                    std::vector<std::string> row = {
                         use_color ? cli::colorize(wf->workflow_name,
                                                   cli::ansi::bold, true)
                                   : wf->workflow_name,
@@ -2479,11 +2774,47 @@ int run(int argc, char** argv) {
                         status_str,
                         lr.when,
                         next_fire
-                    });
+                    };
+
+                    // §5.1: Apply filter.
+                    if (!filter.matches(row)) continue;
+
+                    t.add_row(row);
+                    shown++;
+
+                    if (workflows_interactive) {
+                        select_items.push_back({
+                            wf->workflow_name,
+                            wf->workflow_name + "  ("
+                                + std::to_string(wf->jobs.size())
+                                + " jobs)  " + lr.status,
+                            wf->workflow_name + " "
+                                + wf->workflow_id + " " + lr.status
+                        });
+                    }
                 }
+
+                // §2.1: Interactive selection → workflows show.
+                if (workflows_interactive && !select_items.empty()) {
+                    t.render(std::cout, use_color);
+                    std::cout << "\n";
+                    auto selected = cli::interactive_select(
+                        select_items,
+                        {.prompt = "Select workflow"});
+                    if (selected) {
+                        std::cout << "\nSelected: " << *selected
+                                  << "\n(use 'kairos workflows show "
+                                  << *selected << "' for detail)\n";
+                    }
+                    return 0;
+                }
+
                 t.render(std::cout, use_color);
-                std::cout << "\n" << workflows.size()
-                          << " workflow(s)\n";
+                std::cout << "\n" << shown << " workflow(s)";
+                if (filter.active())
+                    std::cout << " (filtered from "
+                              << workflows.size() << ")";
+                std::cout << "\n";
             }
         }
         return 0;
@@ -3192,9 +3523,16 @@ int run(int argc, char** argv) {
 
         const auto& jobs = registry->standalone_jobs();
 
+        // §5.1: Compile row filter.
+        auto filter = cli::make_filter(jobs_filter);
+
         if (json_output) {
             json arr = json::array();
             for (const auto* j : jobs) {
+                if (filter.active()) {
+                    std::vector<std::string> rf = {j->job_name, j->job_id};
+                    if (!filter.matches(rf)) continue;
+                }
                 auto lr = last_run_for_target(reader.get(), j->job_name);
                 auto trigs = triggers_for_target(
                     *registry, j->job_id, j->job_name);
@@ -3219,6 +3557,8 @@ int run(int argc, char** argv) {
             } else {
                 cli::Table table({"JOB", "STEPS", "LAST RUN",
                                    "WHEN", "NEXT FIRE"});
+                std::vector<cli::SelectorItem> select_items;
+                int shown = 0;
                 for (const auto* j : jobs) {
                     auto lr = last_run_for_target(
                         reader.get(), j->job_name);
@@ -3232,16 +3572,50 @@ int run(int argc, char** argv) {
                         status_str = cli::status_icon(lr.status, true)
                             + " " + cli::colorize_status(lr.status, true);
                     }
-                    table.add_row({
+                    std::vector<std::string> row = {
                         j->job_name,
                         std::to_string(j->steps.size()),
                         status_str,
                         lr.when,
                         next_fire
-                    });
+                    };
+
+                    if (!filter.matches(row)) continue;
+                    table.add_row(row);
+                    shown++;
+
+                    if (jobs_interactive) {
+                        select_items.push_back({
+                            j->job_name,
+                            j->job_name + "  ("
+                                + std::to_string(j->steps.size())
+                                + " steps)  " + lr.status,
+                            j->job_name + " " + j->job_id
+                                + " " + lr.status
+                        });
+                    }
                 }
+
+                if (jobs_interactive && !select_items.empty()) {
+                    table.render(std::cout, use_color);
+                    std::cout << "\n";
+                    auto selected = cli::interactive_select(
+                        select_items,
+                        {.prompt = "Select job"});
+                    if (selected) {
+                        std::cout << "\nSelected: " << *selected
+                                  << "\n(use 'kairos jobs show "
+                                  << *selected << "' for detail)\n";
+                    }
+                    return 0;
+                }
+
                 table.render(std::cout, use_color);
-                std::cout << "\n" << jobs.size() << " standalone job(s)\n";
+                std::cout << "\n" << shown << " standalone job(s)";
+                if (filter.active())
+                    std::cout << " (filtered from "
+                              << jobs.size() << ")";
+                std::cout << "\n";
             }
         }
         return 0;
@@ -4273,6 +4647,209 @@ complete -c kairos -n "__fish_seen_subcommand_from logs" -l step -d "Filter by s
 
         spdlog::info("MCP server stopped ({} requests processed)",
                      transport.requests_processed());
+        return 0;
+    }
+
+    // ── kel eval ─────────────────────────────────────────────────
+    // Roadmap §7: Single-expression evaluation.
+    if (kel_eval->parsed()) {
+        setup_logging(log_level, json_output, false);
+
+        auto cfg = load_config_or_die(config_path, {});
+        if (!cfg) return static_cast<int>(ExitCode::kConfigError);
+
+        try {
+            // Build evaluation context with DB bindings.
+            kel::EvalContext ctx = kel::make_default_context();
+
+            // Open DB for job() function bindings (best-effort).
+            auto db = try_open_db(cfg);
+            std::unique_ptr<persist::QueryReader> reader;
+            if (db) {
+                reader = std::make_unique<persist::QueryReader>(*db);
+                reader->register_kel_bindings(ctx);
+                reader->register_watch_kel_bindings(ctx);
+            }
+
+            kel::EvalLimits limits;
+            auto result = kel::eval_expression(kel_eval_expr, ctx, limits);
+
+            if (json_output) {
+                json j;
+                j["expression"] = kel_eval_expr;
+                j["type"] = result.type_name();
+                // Serialize based on type.
+                if (result.is_bool()) {
+                    j["value"] = result.as_bool();
+                } else if (result.is_int()) {
+                    j["value"] = result.as_int();
+                } else if (result.is_float()) {
+                    j["value"] = result.as_float();
+                } else if (result.is_string()) {
+                    j["value"] = result.as_string();
+                } else {
+                    j["value"] = result.to_display_string();
+                }
+                std::cout << j.dump(2) << "\n";
+            } else {
+                bool use_color = cli::supports_color();
+                std::string val = result.to_display_string();
+                std::string type = result.type_name();
+                if (use_color) {
+                    // Color value by type.
+                    if (result.is_bool()) {
+                        val = cli::colorize(val,
+                            result.as_bool() ? cli::ansi::green
+                                             : cli::ansi::red, true);
+                    } else if (result.is_int() ||
+                               result.is_float()) {
+                        val = cli::colorize(val, cli::ansi::cyan, true);
+                    } else if (result.is_string()) {
+                        val = cli::colorize(val, cli::ansi::yellow, true);
+                    }
+                    type = cli::colorize(type, cli::ansi::gray, true);
+                }
+                std::cout << val << "  " << type << "\n";
+            }
+        } catch (const kel::KelError& e) {
+            if (json_output) {
+                std::cout << json{
+                    {"expression", kel_eval_expr},
+                    {"error", e.what()}
+                }.dump(2) << "\n";
+            } else {
+                std::cerr << "KEL error: " << e.what() << "\n";
+            }
+            return 1;
+        } catch (const std::exception& e) {
+            std::cerr << "Error: " << e.what() << "\n";
+            return 1;
+        }
+        return 0;
+    }
+
+    // ── kel repl ─────────────────────────────────────────────────
+    // Roadmap §7: Interactive REPL mode.
+    if (kel_repl->parsed()) {
+        setup_logging("error", false, false);  // Quiet logging for REPL.
+
+        auto cfg = load_config_or_die(config_path, {});
+        if (!cfg) return static_cast<int>(ExitCode::kConfigError);
+
+        bool use_color = cli::supports_color();
+
+        // Build evaluation context with DB bindings.
+        kel::EvalContext ctx = kel::make_default_context();
+
+        auto db = try_open_db(cfg);
+        std::unique_ptr<persist::QueryReader> reader;
+        if (db) {
+            reader = std::make_unique<persist::QueryReader>(*db);
+            reader->register_kel_bindings(ctx);
+            reader->register_watch_kel_bindings(ctx);
+        }
+
+        kel::EvalLimits limits;
+
+        // Print banner.
+        if (use_color) {
+            std::cout << cli::colorize("Kairos KEL REPL",
+                                       cli::ansi::bold, true)
+                      << " — type expressions, 'help' for info, "
+                      << "'exit' or Ctrl-D to quit\n";
+            if (db) {
+                std::cout << cli::colorize(
+                    "  Database connected — job() functions available",
+                    cli::ansi::green, true) << "\n";
+            } else {
+                std::cout << cli::colorize(
+                    "  No database — job() functions unavailable",
+                    cli::ansi::yellow, true) << "\n";
+            }
+        } else {
+            std::cout << "Kairos KEL REPL — type expressions, "
+                      << "'help' for info, 'exit' or Ctrl-D to quit\n";
+            if (db) std::cout << "  Database connected\n";
+            else    std::cout << "  No database\n";
+        }
+        std::cout << "\n";
+
+        std::string line;
+        while (true) {
+            // Prompt.
+            if (use_color) {
+                std::cout << cli::colorize("KEL", cli::ansi::cyan, true)
+                          << "> ";
+            } else {
+                std::cout << "KEL> ";
+            }
+            std::cout.flush();
+
+            if (!std::getline(std::cin, line)) break;  // EOF / Ctrl-D.
+
+            // Trim whitespace.
+            auto start = line.find_first_not_of(" \t\r\n");
+            if (start == std::string::npos) continue;
+            auto end = line.find_last_not_of(" \t\r\n");
+            line = line.substr(start, end - start + 1);
+
+            if (line.empty()) continue;
+            if (line == "exit" || line == "quit") break;
+
+            if (line == "help") {
+                std::cout << "KEL REPL commands:\n"
+                    << "  <expression>   Evaluate a KEL expression\n"
+                    << "  help           Show this help\n"
+                    << "  exit / quit    Exit the REPL\n"
+                    << "\n"
+                    << "Examples:\n"
+                    << "  2 + 3 * 4\n"
+                    << "  \"hello\" + \" world\"\n"
+                    << "  true and not false\n"
+                    << "  now()\n";
+                if (db) {
+                    std::cout
+                        << "  job(\"backup\").last_success\n"
+                        << "  job(\"backup\").finished_within(24h)\n"
+                        << "  job(\"backup\").last_status\n"
+                        << "  job(\"backup\").run_count\n";
+                }
+                std::cout << "\n";
+                continue;
+            }
+
+            try {
+                auto result = kel::eval_expression(line, ctx, limits);
+                std::string val = result.to_display_string();
+                std::string type = result.type_name();
+                if (use_color) {
+                    if (result.is_bool()) {
+                        val = cli::colorize(val,
+                            result.as_bool() ? cli::ansi::green
+                                             : cli::ansi::red, true);
+                    } else if (result.is_int() ||
+                               result.is_float()) {
+                        val = cli::colorize(val, cli::ansi::cyan, true);
+                    } else if (result.is_string()) {
+                        val = cli::colorize(val, cli::ansi::yellow, true);
+                    }
+                    type = cli::colorize(type, cli::ansi::gray, true);
+                }
+                std::cout << val << "  " << type << "\n";
+            } catch (const kel::KelError& e) {
+                if (use_color) {
+                    std::cout << cli::colorize("error: ",
+                                               cli::ansi::red, true)
+                              << e.what() << "\n";
+                } else {
+                    std::cout << "error: " << e.what() << "\n";
+                }
+            } catch (const std::exception& e) {
+                std::cout << "error: " << e.what() << "\n";
+            }
+        }
+
+        std::cout << "\n";
         return 0;
     }
 
