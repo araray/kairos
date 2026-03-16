@@ -187,6 +187,7 @@ public:
         std::string start_ts;
         std::string end_ts;
         int64_t duration_ms = 0;
+        std::string tags_json;         ///< §6 JSON array of tags (from runs.tags_json)
     };
 
     /// Query recent runs with optional filters.

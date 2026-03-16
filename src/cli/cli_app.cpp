@@ -454,11 +454,70 @@ static std::string summarize_affected_files(
     }
 }
 
+// ── Sorted help formatter ────────────────────────────────────────────────
+// CLI11 displays subcommands in registration order. This formatter sorts
+// them alphabetically within each group so `--help` is easy to scan.
+// Inherits all other formatting from CLI::Formatter.
+
+class SortedHelpFormatter : public CLI::Formatter {
+public:
+    using CLI::Formatter::Formatter;
+
+    std::string make_subcommands(const CLI::App *app,
+                                 CLI::AppFormatMode mode) const override {
+        std::string out;
+        auto subcommands = app->get_subcommands({});
+
+        // Collect unique group names in first-seen order.
+        std::vector<std::string> groups_seen;
+        for (const auto *com : subcommands) {
+            if (com->get_name().empty()) {
+                if (!com->get_group().empty()) {
+                    out += make_expanded(com);
+                }
+                continue;
+            }
+            const auto &gk = com->get_group();
+            if (!gk.empty() &&
+                std::find(groups_seen.begin(), groups_seen.end(), gk)
+                    == groups_seen.end()) {
+                groups_seen.push_back(gk);
+            }
+        }
+
+        // For each group: collect, sort, format.
+        for (const auto &group : groups_seen) {
+            std::vector<const CLI::App *> group_cmds;
+            for (const auto *sub : subcommands) {
+                if (sub->get_group() == group)
+                    group_cmds.push_back(sub);
+            }
+
+            std::sort(group_cmds.begin(), group_cmds.end(),
+                [](const CLI::App *a, const CLI::App *b) {
+                    return a->get_name() < b->get_name();
+                });
+
+            out += "\n" + group + ":\n";
+            for (const auto *cmd : group_cmds) {
+                if (mode != CLI::AppFormatMode::All) {
+                    out += make_subcommand(cmd);
+                } else {
+                    out += make_expanded(cmd);
+                    out += "\n";
+                }
+            }
+        }
+        return out;
+    }
+};
+
 }  // anonymous namespace
 
 int run(int argc, char** argv) {
     // ── Root CLI app ──────────────────────────────────────────────────
     CLI::App app{"Kairos — Unified Orchestration Daemon"};
+    app.formatter(std::make_shared<SortedHelpFormatter>());
     app.require_subcommand(1);
     app.fallthrough();  // Allow global options after subcommand name
 

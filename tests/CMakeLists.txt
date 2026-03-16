@@ -758,3 +758,43 @@ kairos_discover_tests(test_phase7
         LABELS "phase7"
         TIMEOUT 30
 )
+
+# ══════════════════════════════════════════════════════════════════════════
+# Phase 8: Tags & Search
+# ══════════════════════════════════════════════════════════════════════════
+
+# ── TagStore CRUD, AND/OR filtering, JSON helpers, migration v2 ─────────
+
+add_executable(test_tags
+    unit/persist/tags_test.cpp
+)
+target_link_libraries(test_tags PRIVATE kairos_test_helpers)
+kairos_discover_tests(test_tags
+    PROPERTIES
+        LABELS "phase8;tags"
+        TIMEOUT 30
+)
+
+# ── DAG graph ASCII rendering, JSON output, topological sort ────────────
+
+add_executable(test_dag_graph
+    unit/cli/dag_graph_test.cpp
+)
+target_link_libraries(test_dag_graph PRIVATE kairos_test_helpers)
+kairos_discover_tests(test_dag_graph
+    PROPERTIES
+        LABELS "phase8;cli"
+        TIMEOUT 30
+)
+
+# ── Phase 8 integration: tag lifecycle, run propagation, config reload ──
+
+add_executable(test_phase8
+    unit/phase8_test.cpp
+)
+target_link_libraries(test_phase8 PRIVATE kairos_test_helpers)
+kairos_discover_tests(test_phase8
+    PROPERTIES
+        LABELS "phase8"
+        TIMEOUT 30
+)

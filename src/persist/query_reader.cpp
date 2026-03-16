@@ -618,7 +618,8 @@ std::vector<QueryReader::RunSummary> QueryReader::query_recent_runs(
     std::string sql =
         "SELECT run_id, target_type, target_id, target_name, "
         "trigger_type, status, COALESCE(exit_code, 0), "
-        "start_ts, COALESCE(end_ts, ''), COALESCE(duration_ms, 0) "
+        "start_ts, COALESCE(end_ts, ''), COALESCE(duration_ms, 0), "
+        "COALESCE(tags_json, '') "
         "FROM runs WHERE 1=1 ";
 
     if (!status_filter.empty()) {
@@ -658,6 +659,7 @@ std::vector<QueryReader::RunSummary> QueryReader::query_recent_runs(
         r.start_ts     = query.getColumn(7).getString();
         r.end_ts       = query.getColumn(8).getString();
         r.duration_ms  = query.getColumn(9).getInt64();
+        r.tags_json    = query.getColumn(10).getString();
         results.push_back(std::move(r));
     }
 
@@ -724,7 +726,8 @@ std::optional<QueryReader::RunSummary> QueryReader::get_run_summary(
     SQLite::Statement query(db_,
         "SELECT run_id, target_type, target_id, target_name, "
         "trigger_type, status, COALESCE(exit_code, 0), "
-        "start_ts, COALESCE(end_ts, ''), COALESCE(duration_ms, 0) "
+        "start_ts, COALESCE(end_ts, ''), COALESCE(duration_ms, 0), "
+        "COALESCE(tags_json, '') "
         "FROM runs WHERE run_id = ?");
     query.bind(1, run_id);
 
@@ -740,6 +743,7 @@ std::optional<QueryReader::RunSummary> QueryReader::get_run_summary(
         r.start_ts     = query.getColumn(7).getString();
         r.end_ts       = query.getColumn(8).getString();
         r.duration_ms  = query.getColumn(9).getInt64();
+        r.tags_json    = query.getColumn(10).getString();
         return r;
     }
     return std::nullopt;

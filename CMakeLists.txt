@@ -98,6 +98,8 @@ add_library(kairos_core STATIC
     src/migration/migration_tool.cpp
     src/tui/tui_helpers.cpp
     src/platform/timezone.cpp
+    src/persist/tag_store.cpp
+    src/cli/dag_graph.cpp
 )
 
 # ── Platform-conditional sources in kairos_core ────────────────────────
