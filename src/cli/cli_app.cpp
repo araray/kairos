@@ -29,6 +29,7 @@
 #include "kairos/persist/database.hpp"
 #include "kairos/persist/migration.hpp"
 #include "kairos/persist/query_reader.hpp"
+#include "kairos/persist/tag_store.hpp"
 #include "kairos/platform/platform.hpp"
 #include "kairos/platform/time_compat.hpp"
 #include "kairos/platform/timezone.hpp"
@@ -817,6 +818,30 @@ int run(int argc, char** argv) {
     std::string completions_shell;
     cmd_completions->add_option("shell", completions_shell,
         "Shell type: bash, zsh, or fish")->required();
+
+    // ── Dynamic completion helpers (Phase 8.5, Roadmap §2.3) ────
+    // Hidden subcommands that output one entity name/ID per line.
+    // Called by shell completion scripts for <TAB> completion of
+    // workflow names, job names, run IDs, watch group names, etc.
+    auto* cpl_workflows = app.add_subcommand("__complete_workflows",
+        "List workflow names for shell completion");
+    cpl_workflows->group("");  // Hidden.
+
+    auto* cpl_jobs = app.add_subcommand("__complete_jobs",
+        "List standalone job names for shell completion");
+    cpl_jobs->group("");
+
+    auto* cpl_runs = app.add_subcommand("__complete_runs",
+        "List recent run IDs for shell completion");
+    cpl_runs->group("");
+
+    auto* cpl_watches = app.add_subcommand("__complete_watches",
+        "List watch group names for shell completion");
+    cpl_watches->group("");
+
+    auto* cpl_triggers = app.add_subcommand("__complete_triggers",
+        "List trigger IDs for shell completion");
+    cpl_triggers->group("");
 
     // ── migrate-config ───────────────────────────────────────────────
     auto* cmd_migrate_config = app.add_subcommand("migrate-config",
@@ -4444,15 +4469,71 @@ _kairos_completions() {
 
     local -a top_cmds=(start stop status mcp version init-db prune
                        workflows jobs runs logs events watches config
-                       completions)
+                       completions dashboard kel triggers migrate-config
+                       migrate-db)
 
-    local -a wf_cmds=(list show run explain)
+    local -a wf_cmds=(list show run explain graph)
     local -a jobs_cmds=(list show run)
     local -a runs_cmds=(list show cancel)
     local -a events_cmds=(list tail)
     local -a watches_cmds=(list show scan-once)
     local -a config_cmds=(show validate reload)
     local -a completions_cmds=(bash zsh fish)
+    local -a kel_cmds=(eval repl)
+    local -a triggers_cmds=(list next preview)
+
+    # Dynamic completions: when the 3rd word is needed (entity name/ID),
+    # call the hidden __complete_* subcommands to get candidates from the DB.
+    if [[ $cword -ge 3 ]]; then
+        case "${words[1]}" in
+            workflows)
+                case "${words[2]}" in
+                    show|run|explain|graph)
+                        local names
+                        names=$(kairos __complete_workflows 2>/dev/null)
+                        COMPREPLY=($(compgen -W "$names" -- "$cur"))
+                        return
+                        ;;
+                esac
+                ;;
+            jobs)
+                case "${words[2]}" in
+                    show|run)
+                        local names
+                        names=$(kairos __complete_jobs 2>/dev/null)
+                        COMPREPLY=($(compgen -W "$names" -- "$cur"))
+                        return
+                        ;;
+                esac
+                ;;
+            runs)
+                case "${words[2]}" in
+                    show|cancel)
+                        local ids
+                        ids=$(kairos __complete_runs 2>/dev/null)
+                        COMPREPLY=($(compgen -W "$ids" -- "$cur"))
+                        return
+                        ;;
+                esac
+                ;;
+            watches)
+                case "${words[2]}" in
+                    show|scan-once)
+                        local names
+                        names=$(kairos __complete_watches 2>/dev/null)
+                        COMPREPLY=($(compgen -W "$names" -- "$cur"))
+                        return
+                        ;;
+                esac
+                ;;
+            logs)
+                local ids
+                ids=$(kairos __complete_runs 2>/dev/null)
+                COMPREPLY=($(compgen -W "$ids" -- "$cur"))
+                return
+                ;;
+        esac
+    fi
 
     case "${words[1]}" in
         workflows) COMPREPLY=($(compgen -W "${wf_cmds[*]}" -- "$cur")) ;;
@@ -4462,6 +4543,8 @@ _kairos_completions() {
         watches)   COMPREPLY=($(compgen -W "${watches_cmds[*]}" -- "$cur")) ;;
         config)    COMPREPLY=($(compgen -W "${config_cmds[*]}" -- "$cur")) ;;
         completions) COMPREPLY=($(compgen -W "${completions_cmds[*]}" -- "$cur")) ;;
+        kel)       COMPREPLY=($(compgen -W "${kel_cmds[*]}" -- "$cur")) ;;
+        triggers)  COMPREPLY=($(compgen -W "${triggers_cmds[*]}" -- "$cur")) ;;
         *)
             case "$cur" in
                 -*)
@@ -4610,6 +4693,95 @@ complete -c kairos -n "__fish_seen_subcommand_from logs" -l step -d "Filter by s
         return 0;
     }
 
+    // ── Dynamic completion handlers (Phase 8.5, §2.3) ────────────
+    // These hidden subcommands output one name/ID per line for shell
+    // completion scripts. They open the DB read-only, query names,
+    // and exit. No logging, no color — pure stdout for consumption.
+
+    auto complete_helper = [&](auto* cmd, auto query_fn) -> std::optional<int> {
+        if (!cmd->parsed()) return std::nullopt;
+        try {
+            setup_logging("off", false, false);
+            auto cfg = load_config_or_die(config_path, {});
+            if (!cfg) return 1;
+            auto db = try_open_db(cfg);
+            if (!db) return 1;
+            query_fn(*db, cfg);
+        } catch (...) {
+            // Silently fail — completions should never produce errors.
+        }
+        return 0;
+    };
+
+    // __complete_workflows: emit workflow names.
+    if (auto rc = complete_helper(cpl_workflows,
+        [](SQLite::Database& /*db*/,
+           const std::shared_ptr<const config::ConfigState>& cfg) {
+            // Load registry from YAML for workflow names.
+            auto log = spdlog::default_logger();
+            auto registry = load_registry_from_yaml(cfg, log);
+            for (const auto* wf : registry->workflows()) {
+                std::cout << wf->workflow_name << "\n";
+            }
+        })) {
+        return *rc;
+    }
+
+    // __complete_jobs: emit standalone job names.
+    if (auto rc = complete_helper(cpl_jobs,
+        [](SQLite::Database& /*db*/,
+           const std::shared_ptr<const config::ConfigState>& cfg) {
+            auto log = spdlog::default_logger();
+            auto registry = load_registry_from_yaml(cfg, log);
+            for (const auto* sj : registry->standalone_jobs()) {
+                std::cout << sj->job_name << "\n";
+            }
+        })) {
+        return *rc;
+    }
+
+    // __complete_runs: emit recent run IDs (last 50).
+    if (auto rc = complete_helper(cpl_runs,
+        [](SQLite::Database& db,
+           const std::shared_ptr<const config::ConfigState>&) {
+            try {
+                SQLite::Statement q(db,
+                    "SELECT run_id FROM runs "
+                    "ORDER BY start_ts DESC LIMIT 50");
+                while (q.executeStep()) {
+                    std::cout << q.getColumn(0).getString() << "\n";
+                }
+            } catch (...) {}
+        })) {
+        return *rc;
+    }
+
+    // __complete_watches: emit watch group names.
+    if (auto rc = complete_helper(cpl_watches,
+        [](SQLite::Database& /*db*/,
+           const std::shared_ptr<const config::ConfigState>& cfg) {
+            auto log = spdlog::default_logger();
+            auto registry = load_registry_from_yaml(cfg, log);
+            for (const auto& wg : registry->watch_groups()) {
+                std::cout << wg.group_name << "\n";
+            }
+        })) {
+        return *rc;
+    }
+
+    // __complete_triggers: emit trigger IDs.
+    if (auto rc = complete_helper(cpl_triggers,
+        [](SQLite::Database& /*db*/,
+           const std::shared_ptr<const config::ConfigState>& cfg) {
+            auto log = spdlog::default_logger();
+            auto registry = load_registry_from_yaml(cfg, log);
+            for (const auto& t : registry->triggers()) {
+                std::cout << t.trigger_id << "\n";
+            }
+        })) {
+        return *rc;
+    }
+
     // ── migrate-config ───────────────────────────────────────────────
     if (cmd_migrate_config->parsed()) {
         return handle_migrate_config(mc_source, mc_source_config,
@@ -4724,10 +4896,33 @@ complete -c kairos -n "__fish_seen_subcommand_from logs" -l step -d "Filter by s
             // Open DB for job() function bindings (best-effort).
             auto db = try_open_db(cfg);
             std::unique_ptr<persist::QueryReader> reader;
+            std::unique_ptr<persist::TagStore> tag_store_ptr;
             if (db) {
                 reader = std::make_unique<persist::QueryReader>(*db);
                 reader->register_kel_bindings(ctx);
                 reader->register_watch_kel_bindings(ctx);
+
+                // Phase 8.5: Register has_tag() for CLI kel eval.
+                tag_store_ptr = std::make_unique<persist::TagStore>(*db);
+                auto* ts = tag_store_ptr.get();
+                ctx.functions["has_tag"] = [ts](
+                    const std::vector<kel::KelValue>& args) -> kel::KelValue
+                {
+                    if (args.size() != 2 || !args[0].is_string() ||
+                        !args[1].is_string())
+                        throw kel::KelEvalError(
+                            "has_tag() requires two string arguments "
+                            "(entity_id, tag)");
+                    const auto& eid = args[0].as_string();
+                    const auto& tag = args[1].as_string();
+                    static const std::string types[] = {
+                        "workflow", "job", "watch_group", "trigger"};
+                    for (const auto& t : types) {
+                        if (ts->has_tag(t, eid, tag))
+                            return kel::KelValue(true);
+                    }
+                    return kel::KelValue(false);
+                };
             }
 
             kel::EvalLimits limits;

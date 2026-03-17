@@ -798,3 +798,15 @@ kairos_discover_tests(test_phase8
         LABELS "phase8"
         TIMEOUT 30
 )
+
+# ── Phase 8.5 integration: has_tag KEL wiring, tag sync ─────────────────
+
+add_executable(test_phase85
+    unit/phase8_5_test.cpp
+)
+target_link_libraries(test_phase85 PRIVATE kairos_test_helpers)
+kairos_discover_tests(test_phase85
+    PROPERTIES
+        LABELS "phase85"
+        TIMEOUT 30
+)
