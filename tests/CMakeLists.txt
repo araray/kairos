@@ -635,12 +635,12 @@ if(KAIROS_OTEL)
         ${CMAKE_SOURCE_DIR}/src/observability/otel_tracer.cpp
     )
     target_link_libraries(test_otel_tracer PRIVATE
-        opentelemetry-cpp::trace
-        opentelemetry-cpp::ostream_span_exporter
+        ${KAIROS_OTEL_TRACE_LIB}
+        ${KAIROS_OTEL_OSTREAM_LIB}
     )
     if(KAIROS_OTEL_OTLP)
         target_link_libraries(test_otel_tracer PRIVATE
-            opentelemetry-cpp::otlp_http_exporter
+            ${KAIROS_OTEL_OTLP_LIB}
         )
         target_compile_definitions(test_otel_tracer PRIVATE KAIROS_OTEL_OTLP)
     endif()

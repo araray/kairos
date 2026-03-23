@@ -209,14 +209,14 @@ if(KAIROS_OTEL)
     target_sources(kairos_core PRIVATE src/observability/otel_tracer.cpp)
     target_compile_definitions(kairos_core PUBLIC KAIROS_OTEL)
     target_link_libraries(kairos_core PUBLIC
-        opentelemetry-cpp::trace
-        opentelemetry-cpp::ostream_span_exporter
+        ${KAIROS_OTEL_TRACE_LIB}
+        ${KAIROS_OTEL_OSTREAM_LIB}
     )
     # OTLP HTTP exporter is only available when the system SDK is installed
     # (FetchContent builds omit it to avoid protobuf/abseil dependency).
     if(KAIROS_OTEL_OTLP)
         target_link_libraries(kairos_core PUBLIC
-            opentelemetry-cpp::otlp_http_exporter
+            ${KAIROS_OTEL_OTLP_LIB}
         )
         target_compile_definitions(kairos_core PUBLIC KAIROS_OTEL_OTLP)
         message(STATUS "OTel: OTLP HTTP exporter enabled")

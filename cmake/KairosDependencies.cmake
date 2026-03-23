@@ -123,26 +123,55 @@ endif()
 
 # ── Optional: OpenTelemetry tracing ────────────────────────────────────
 if(KAIROS_OTEL)
-    # Strategy:
-    #   1. Try find_package — system SDK has OTLP with all deps resolved.
-    #   2. FetchContent fallback — build WITHOUT OTLP (which needs
-    #      protobuf + abseil). Use ostream exporter instead.
-    #      Users wanting OTLP export should install the SDK system-wide.
+    # Strategy (v0.2.0+):
+    #   Default: FetchContent — static libs, ostream exporter, zero
+    #   transitive deps (no protobuf, no abseil, no curl).  This avoids
+    #   the fragile scenario where an OS upgrade breaks the system SDK's
+    #   shared-library dependency chain (e.g. libprotobuf.so.NN).
+    #
+    #   Opt-in:  -DKAIROS_OTEL_SYSTEM=ON  →  try find_package first.
+    #   If found AND runtime deps validate, use system SDK with OTLP.
+    #   Otherwise fall back to FetchContent automatically.
     #
     # The KAIROS_OTEL_OTLP variable tracks whether OTLP is available.
     # otel_tracer.cpp checks #ifdef KAIROS_OTEL_OTLP at compile time.
 
-    find_package(opentelemetry-cpp QUIET)
-    if(opentelemetry-cpp_FOUND)
-        message(STATUS "opentelemetry-cpp found (system)")
-        # System SDK — assume OTLP HTTP exporter is available.
-        set(KAIROS_OTEL_OTLP ON CACHE BOOL "OTLP HTTP exporter available" FORCE)
-    else()
+    set(_use_fetchcontent TRUE)
+
+    if(KAIROS_OTEL_SYSTEM)
+        find_package(opentelemetry-cpp QUIET)
+        if(opentelemetry-cpp_FOUND)
+            # Validate transitive deps before committing to system SDK.
+            include(${CMAKE_CURRENT_LIST_DIR}/CheckOtelSystemDeps.cmake)
+            kairos_check_otel_system_deps()
+
+            if(KAIROS_OTEL_SYSTEM_DEPS_OK)
+                message(STATUS "opentelemetry-cpp found (system) — OTLP enabled")
+                set(KAIROS_OTEL_OTLP ON CACHE BOOL "OTLP HTTP exporter available" FORCE)
+                set(_use_fetchcontent FALSE)
+
+                # System SDK exports namespaced targets.
+                set(KAIROS_OTEL_TRACE_LIB   opentelemetry-cpp::trace              CACHE STRING "" FORCE)
+                set(KAIROS_OTEL_OSTREAM_LIB opentelemetry-cpp::ostream_span_exporter CACHE STRING "" FORCE)
+                set(KAIROS_OTEL_OTLP_LIB    opentelemetry-cpp::otlp_http_exporter CACHE STRING "" FORCE)
+            else()
+                message(WARNING
+                    "System OTel SDK found but has broken runtime dependencies. "
+                    "Falling back to FetchContent (ostream exporter, no OTLP).")
+            endif()
+        else()
+            message(STATUS
+                "KAIROS_OTEL_SYSTEM=ON but opentelemetry-cpp not found. "
+                "Falling back to FetchContent.")
+        endif()
+    endif()
+
+    if(_use_fetchcontent)
         message(STATUS
-            "opentelemetry-cpp not found — building from source via FetchContent. "
+            "Building opentelemetry-cpp from source via FetchContent. "
             "OTLP export disabled (requires protobuf + abseil). "
             "Traces will use ostream exporter (stderr). "
-            "Install the SDK system-wide for OTLP support.")
+            "Pass -DKAIROS_OTEL_SYSTEM=ON to use system SDK for OTLP support.")
 
         FetchContent_Declare(opentelemetry-cpp
             GIT_REPOSITORY https://github.com/open-telemetry/opentelemetry-cpp.git
@@ -152,7 +181,6 @@ if(KAIROS_OTEL)
         # No OTLP — avoids protobuf/abseil dependency entirely.
         set(WITH_OTLP_HTTP OFF CACHE BOOL "" FORCE)
         set(WITH_OTLP_GRPC OFF CACHE BOOL "" FORCE)
-        set(WITH_OTLP OFF CACHE BOOL "" FORCE)
         set(BUILD_TESTING OFF CACHE BOOL "" FORCE)
         set(WITH_EXAMPLES OFF CACHE BOOL "" FORCE)
         set(WITH_BENCHMARK OFF CACHE BOOL "" FORCE)
@@ -177,5 +205,12 @@ if(KAIROS_OTEL)
         unset(CMAKE_DISABLE_FIND_PACKAGE_protobuf)
         unset(CMAKE_DISABLE_FIND_PACKAGE_CURL)
         set(KAIROS_OTEL_OTLP OFF CACHE BOOL "OTLP HTTP exporter not available" FORCE)
+
+        # FetchContent creates non-namespaced targets.
+        set(KAIROS_OTEL_TRACE_LIB       opentelemetry_trace              CACHE STRING "" FORCE)
+        set(KAIROS_OTEL_OSTREAM_LIB     opentelemetry_exporter_ostream_span CACHE STRING "" FORCE)
+        set(KAIROS_OTEL_OTLP_LIB        ""                               CACHE STRING "" FORCE)
     endif()
+
+    unset(_use_fetchcontent)
 endif()
