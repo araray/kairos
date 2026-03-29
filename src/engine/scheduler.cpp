@@ -164,6 +164,17 @@ void Scheduler::compute_next_fire(TimerEntry& entry) {
         using T = std::decay_t<decltype(t)>;
         if constexpr (std::is_same_v<T, CronTrigger>) {
             entry.next_fire_wall = t.next_fire_after(now_wall);
+            // Defense-in-depth: if next_fire is not strictly in the
+            // future (should not happen with the sub-second ceil fix
+            // in CronTrigger::next_fire_after, but guard anyway),
+            // advance by 1 second and retry.
+            if (entry.next_fire_wall <= now_wall) {
+                spdlog::warn("Scheduler: cron next_fire not in future for "
+                             "'{}', advancing 1s and retrying",
+                             t.expression);
+                entry.next_fire_wall = t.next_fire_after(
+                    now_wall + std::chrono::seconds(1));
+            }
             auto wall_delta = entry.next_fire_wall - now_wall;
             entry.next_fire_mono = now_mono +
                 std::chrono::duration_cast<std::chrono::steady_clock::duration>(wall_delta);
@@ -189,6 +200,16 @@ bool Scheduler::reschedule(TimerEntry& entry) {
         using T = std::decay_t<decltype(t)>;
         if constexpr (std::is_same_v<T, CronTrigger>) {
             entry.next_fire_wall = t.next_fire_after(now_wall);
+            // Defense-in-depth: guarantee forward progress.
+            // Without this, a bug in next_fire_after could cause
+            // an infinite spin loop in the scheduler.
+            if (entry.next_fire_wall <= now_wall) {
+                spdlog::warn("Scheduler: reschedule cron not in future for "
+                             "'{}', advancing 1s and retrying",
+                             t.expression);
+                entry.next_fire_wall = t.next_fire_after(
+                    now_wall + std::chrono::seconds(1));
+            }
             auto wall_delta = entry.next_fire_wall - now_wall;
             entry.next_fire_mono = now_mono +
                 std::chrono::duration_cast<std::chrono::steady_clock::duration>(wall_delta);
