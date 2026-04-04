@@ -99,6 +99,7 @@ add_library(kairos_core STATIC
     src/tui/tui_helpers.cpp
     src/platform/timezone.cpp
     src/persist/tag_store.cpp
+    src/persist/stale_recovery.cpp
     src/cli/dag_graph.cpp
 )
 
@@ -250,20 +251,13 @@ else()
     target_sources(kairos_core PRIVATE src/exec/ansible_process_handle_stub.cpp)
 endif()
 
-# ── Optional: systemd integration (Linux only) ───────────────────────────
-if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
-    find_package(PkgConfig QUIET)
-    if(PkgConfig_FOUND)
-        pkg_check_modules(SYSTEMD QUIET libsystemd)
-        if(SYSTEMD_FOUND)
-            target_compile_definitions(kairos PRIVATE KAIROS_SYSTEMD)
-            target_link_libraries(kairos PRIVATE ${SYSTEMD_LIBRARIES})
-            target_include_directories(kairos PRIVATE ${SYSTEMD_INCLUDE_DIRS})
-            message(STATUS "systemd: sd_notify integration enabled")
-        else()
-            message(STATUS "systemd: libsystemd not found — sd_notify stubs used")
-        endif()
-    endif()
+# ── sd_notify integration (cross-platform) ───────────────────────────────
+# Uses raw AF_UNIX datagram socket on Linux — no libsystemd dependency.
+# No-op stubs on macOS and Windows.
+if(WIN32)
+    target_sources(kairos_platform PRIVATE src/platform/sd_notify_win32.cpp)
+else()
+    target_sources(kairos_platform PRIVATE src/platform/sd_notify_posix.cpp)
 endif()
 
 # ── Windows Service integration ───────────────────────────────────────────

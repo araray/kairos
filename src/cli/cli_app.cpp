@@ -653,7 +653,7 @@ int run(int argc, char** argv) {
     runs_list->add_option("-n,--limit", runs_limit,
         "Max runs to show (default 20)");
     runs_list->add_option("--status", runs_status,
-        "Filter by status (SUCCESS|FAILURE|RUNNING|CANCELLED)");
+        "Filter by status (SUCCESS|FAILURE|RUNNING|CANCELLED|INTERRUPTED)");
     runs_list->add_option("--workflow", runs_workflow,
         "Filter by workflow name (substring match)");
     runs_list->add_option("--since", runs_since,
@@ -4672,7 +4672,7 @@ complete -c kairos -n "__fish_seen_subcommand_from workflows; and __fish_seen_su
 
 # Runs list flags
 complete -c kairos -n "__fish_seen_subcommand_from runs; and __fish_seen_subcommand_from list" -s n -l limit -d "Number of runs"
-complete -c kairos -n "__fish_seen_subcommand_from runs; and __fish_seen_subcommand_from list" -l status -d "Filter by status" -ra "SUCCESS FAILURE RUNNING CANCELLED"
+complete -c kairos -n "__fish_seen_subcommand_from runs; and __fish_seen_subcommand_from list" -l status -d "Filter by status" -ra "SUCCESS FAILURE RUNNING CANCELLED INTERRUPTED"
 complete -c kairos -n "__fish_seen_subcommand_from runs; and __fish_seen_subcommand_from list" -l workflow -d "Filter by workflow"
 
 # Prune flags

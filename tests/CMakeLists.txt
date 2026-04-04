@@ -810,3 +810,15 @@ kairos_discover_tests(test_phase85
         LABELS "phase85"
         TIMEOUT 30
 )
+
+# ── Stale run recovery on startup ─────────────────────────────────────────
+
+add_executable(test_stale_recovery
+    unit/persist/stale_recovery_test.cpp
+)
+target_link_libraries(test_stale_recovery PRIVATE kairos_test_helpers)
+kairos_discover_tests(test_stale_recovery
+    PROPERTIES
+        LABELS "persist;recovery"
+        TIMEOUT 30
+)

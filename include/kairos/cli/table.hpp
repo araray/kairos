@@ -93,6 +93,10 @@ inline std::string status_icon(const std::string& status,
         return color ? colorize("\xe2\x8a\x98", ansi::yellow, true) // ⊘
                      : "[--]";
     }
+    if (status == "INTERRUPTED" || status == "interrupted") {
+        return color ? colorize("\xe2\x9a\xa1", ansi::magenta, true) // ⚡
+                     : "[!!]";
+    }
     if (status == "TIMED_OUT" || status == "timed_out") {
         return color ? colorize("\xe2\x8f\xb0", ansi::red, true)    // ⏰
                      : "[TO]";
@@ -108,6 +112,7 @@ inline std::string colorize_status(const std::string& status,
     if (status == "FAILURE") return colorize(status, ansi::red, true);
     if (status == "RUNNING") return colorize(status, ansi::cyan, true);
     if (status == "CANCELLED") return colorize(status, ansi::yellow, true);
+    if (status == "INTERRUPTED") return colorize(status, ansi::magenta, true);
     if (status == "SKIPPED") return colorize(status, ansi::yellow, true);
     if (status == "TIMED_OUT") return colorize(status, ansi::red, true);
     return status;

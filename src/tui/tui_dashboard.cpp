@@ -278,6 +278,7 @@ Color status_color(const std::string& status) {
     if (status == "FAILED")    return Color::Red;
     if (status == "RUNNING")   return Color::Cyan;
     if (status == "CANCELLED") return Color::Yellow;
+    if (status == "INTERRUPTED") return Color::Magenta;
     if (status == "TIMED_OUT") return Color::Red;
     return Color::White;
 }

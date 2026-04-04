@@ -35,8 +35,10 @@
 #include "kairos/persist/db_writer.hpp"
 #include "kairos/persist/migration.hpp"
 #include "kairos/persist/query_reader.hpp"
+#include "kairos/persist/stale_recovery.hpp"
 #include "kairos/persist/tag_store.hpp"
 #include "kairos/platform/platform.hpp"
+#include "kairos/platform/sd_notify.hpp"
 #include "kairos/platform/environment.hpp"
 #include "kairos/platform/timezone.hpp"
 #include "kairos/security/secret_store.hpp"
@@ -331,6 +333,19 @@ int run_daemon(std::shared_ptr<const kairos::config::ConfigState> config) {
     } catch (const std::exception& e) {
         log->error("Failed to open database: {}", e.what());
         return 1;
+    }
+
+    // ── Step 2.5: Recover stale runs from previous crash ──────────
+    // If the daemon was killed (SIGKILL, OOM, systemd timeout, power
+    // loss), any in-flight runs are left with status='RUNNING' in the
+    // database.  Mark them as INTERRUPTED before engines start so that
+    // KEL conditions, max_instances, and `kairos status` are accurate.
+    {
+        auto recovery = persist::recover_stale_runs(*db);
+        if (recovery.runs_recovered > 0) {
+            log->warn("Recovered {} stale run(s) from unclean shutdown",
+                      recovery.runs_recovered);
+        }
     }
 
     // ── Step 3: Log startup banner ─────────────────────────────────
@@ -784,6 +799,22 @@ int run_daemon(std::shared_ptr<const kairos::config::ConfigState> config) {
     // ── Step 17: Startup complete ──────────────────────────────────
     log->info("Kairos v{} started — daemon ready", std::string(kairos::kVersion));
 
+    // ── Step 17.5: Notify systemd we're ready (§27.4) ─────────────
+    // On Linux with Type=notify, this tells systemd to transition from
+    // "activating (start)" → "active (running)".  No-op elsewhere.
+    platform::sd_notify_ready();
+    platform::sd_notify_status("Kairos daemon ready");
+
+    // Watchdog: ping at half the configured interval per sd_notify(7).
+    // $WATCHDOG_USEC is set by systemd when WatchdogSec= is configured.
+    int watchdog_full_s = platform::sd_watchdog_interval_s();
+    int watchdog_ping_s = (watchdog_full_s > 0) ? watchdog_full_s / 2 : 0;
+    auto last_watchdog_ping = std::chrono::steady_clock::now();
+    if (watchdog_ping_s > 0) {
+        log->info("systemd watchdog: interval={}s, pinging every {}s",
+                  watchdog_full_s, watchdog_ping_s);
+    }
+
     auto uptime_start = std::chrono::steady_clock::now();
 
     // Metrics snapshot interval (§20.5).
@@ -1027,6 +1058,19 @@ int run_daemon(std::shared_ptr<const kairos::config::ConfigState> config) {
             }
         }
 
+        // ── systemd watchdog ping (§27.4) ──────────────────────────
+        // Per sd_notify(7), ping at half the WatchdogSec interval.
+        // The main loop runs every 5s, so for WatchdogSec=60 we ping
+        // every 30s — well within the deadline.
+        if (watchdog_ping_s > 0) {
+            auto since_ping = std::chrono::duration<double>(
+                now - last_watchdog_ping).count();
+            if (since_ping >= static_cast<double>(watchdog_ping_s)) {
+                platform::sd_notify_watchdog();
+                last_watchdog_ping = now;
+            }
+        }
+
         // Sleep for 5 seconds (or until stop).
         clock.sleep_for(std::chrono::milliseconds(5000));
     }
@@ -1035,6 +1079,10 @@ int run_daemon(std::shared_ptr<const kairos::config::ConfigState> config) {
     // Shutdown in reverse-dependency order per §27.7:
     //   Scheduler → WatchEngine → TriggerBus → Pipeline →
     //   RunnerPool → DBWriter → DB → Lock
+
+    // Notify systemd that we're stopping (§27.4).
+    platform::sd_notify_stopping();
+
     log->info("Kairos shutting down...");
 
     // Start shutdown watchdog.
