@@ -4866,6 +4866,16 @@ complete -c kairos -n "__fish_seen_subcommand_from logs" -l step -d "Filter by s
 
         mcp::McpHandler handler(mcp_deps);
 
+        // Load the workflow/watch registry from YAML so the workflow, job, and
+        // watch-group tools actually work (without this the handler's registry is
+        // null and every such tool returns "Workflow registry not available").
+        // Reuses the same loader the daemon and the CLI query commands use.
+        try {
+            handler.update_registry(load_registry_from_yaml(cfg, logger));
+        } catch (const std::exception& e) {
+            spdlog::warn("MCP: failed to load workflow registry: {}", e.what());
+        }
+
         mcp::StdioTransport transport(
             [&handler](const std::string& method,
                        const json& params,
