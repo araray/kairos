@@ -118,7 +118,8 @@ static std::unique_ptr<SQLite::Database> make_test_db() {
             start_ts TEXT NOT NULL DEFAULT '',
             end_ts TEXT NOT NULL DEFAULT '',
             duration_ms INTEGER NOT NULL DEFAULT 0,
-            created_at TEXT NOT NULL DEFAULT (datetime('now'))
+            created_at TEXT NOT NULL DEFAULT (datetime('now')),
+            tags_json TEXT
         );
 
         CREATE TABLE IF NOT EXISTS job_runs (

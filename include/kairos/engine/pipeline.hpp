@@ -22,6 +22,7 @@
 #include "kairos/kel/evaluator.hpp"
 #include "kairos/persist/db_writer.hpp"
 #include "kairos/persist/query_reader.hpp"
+#include "kairos/persist/tag_store.hpp"
 #include "kairos/testing/fake_clock.hpp"
 
 #include <atomic>
@@ -142,6 +143,10 @@ public:
         persist::QueryReader* query_reader = nullptr;
         exec::RunStream* run_stream = nullptr;
         CancelRegistry* cancel_registry = nullptr;
+
+        /// Tag store for KEL has_tag() builtin (Phase 8.5, Roadmap §6).
+        /// If null, has_tag() always returns false.
+        persist::TagStore* tag_store = nullptr;
 
         /// Secret resolver for ${{ secrets.key }} substitution (§17.1).
         /// If null, secret references are left unresolved.

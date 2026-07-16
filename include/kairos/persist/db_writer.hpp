@@ -40,6 +40,7 @@ struct InsertRun {
     std::string correlation_id;
     std::string status;             ///< "RUNNING"
     std::string start_ts;           ///< ISO-8601
+    std::string tags_json;          ///< §6 JSON array of tags (propagated from config)
 };
 
 /// Update a completed run record.

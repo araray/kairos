@@ -98,7 +98,20 @@ add_library(kairos_core STATIC
     src/migration/migration_tool.cpp
     src/tui/tui_helpers.cpp
     src/platform/timezone.cpp
+    src/persist/tag_store.cpp
+    src/persist/stale_recovery.cpp
+    src/cli/dag_graph.cpp
 )
+
+# ── Platform-conditional sources in kairos_core ────────────────────────
+
+# Environment variable abstraction (§13): _dupenv_s on Windows, getenv on POSIX.
+# Lives in kairos_core (not kairos_platform) because config_store.cpp needs it.
+if(WIN32)
+    target_sources(kairos_core PRIVATE src/platform/environment_win32.cpp)
+else()
+    target_sources(kairos_core PRIVATE src/platform/environment_posix.cpp)
+endif()
 
 # ── Native watch backends (platform-specific) ─────────────────────────────
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
@@ -170,6 +183,7 @@ add_executable(kairos
     src/main.cpp
     src/cli/cli_app.cpp
     src/cli/cli_migrate.cpp
+    src/cli/interactive_selector.cpp
     src/daemon/daemon.cpp
     src/daemon/command_reader.cpp
 )
@@ -196,14 +210,14 @@ if(KAIROS_OTEL)
     target_sources(kairos_core PRIVATE src/observability/otel_tracer.cpp)
     target_compile_definitions(kairos_core PUBLIC KAIROS_OTEL)
     target_link_libraries(kairos_core PUBLIC
-        opentelemetry-cpp::trace
-        opentelemetry-cpp::ostream_span_exporter
+        ${KAIROS_OTEL_TRACE_LIB}
+        ${KAIROS_OTEL_OSTREAM_LIB}
     )
     # OTLP HTTP exporter is only available when the system SDK is installed
     # (FetchContent builds omit it to avoid protobuf/abseil dependency).
     if(KAIROS_OTEL_OTLP)
         target_link_libraries(kairos_core PUBLIC
-            opentelemetry-cpp::otlp_http_exporter
+            ${KAIROS_OTEL_OTLP_LIB}
         )
         target_compile_definitions(kairos_core PUBLIC KAIROS_OTEL_OTLP)
         message(STATUS "OTel: OTLP HTTP exporter enabled")
@@ -237,20 +251,13 @@ else()
     target_sources(kairos_core PRIVATE src/exec/ansible_process_handle_stub.cpp)
 endif()
 
-# ── Optional: systemd integration (Linux only) ───────────────────────────
-if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
-    find_package(PkgConfig QUIET)
-    if(PkgConfig_FOUND)
-        pkg_check_modules(SYSTEMD QUIET libsystemd)
-        if(SYSTEMD_FOUND)
-            target_compile_definitions(kairos PRIVATE KAIROS_SYSTEMD)
-            target_link_libraries(kairos PRIVATE ${SYSTEMD_LIBRARIES})
-            target_include_directories(kairos PRIVATE ${SYSTEMD_INCLUDE_DIRS})
-            message(STATUS "systemd: sd_notify integration enabled")
-        else()
-            message(STATUS "systemd: libsystemd not found — sd_notify stubs used")
-        endif()
-    endif()
+# ── sd_notify integration (cross-platform) ───────────────────────────────
+# Uses raw AF_UNIX datagram socket on Linux — no libsystemd dependency.
+# No-op stubs on macOS and Windows.
+if(WIN32)
+    target_sources(kairos_platform PRIVATE src/platform/sd_notify_win32.cpp)
+else()
+    target_sources(kairos_platform PRIVATE src/platform/sd_notify_posix.cpp)
 endif()
 
 # ── Windows Service integration ───────────────────────────────────────────

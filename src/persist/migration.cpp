@@ -218,6 +218,35 @@ CREATE TABLE IF NOT EXISTS config_snapshots (
     created_at      TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
 );
         )SQL"
+    },
+    {
+        2,
+        "Tags system — entity_tags table and runs.tags_json column",
+        R"SQL(
+-- ╔════════════════════════════════════════════════════════════════╗
+-- ║  ENTITY_TAGS — Tag associations for all entity types          ║
+-- ║  §6 Tags System (Roadmap Phase 8)                             ║
+-- ╚════════════════════════════════════════════════════════════════╝
+
+CREATE TABLE IF NOT EXISTS entity_tags (
+    entity_type  TEXT NOT NULL,
+    entity_id    TEXT NOT NULL,
+    tag          TEXT NOT NULL,
+    created_at   TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    PRIMARY KEY (entity_type, entity_id, tag)
+);
+
+CREATE INDEX IF NOT EXISTS idx_tags_tag
+    ON entity_tags (tag);
+
+CREATE INDEX IF NOT EXISTS idx_tags_entity
+    ON entity_tags (entity_type, entity_id);
+
+-- Add tags_json column to runs for historical tag propagation.
+-- Stores a JSON array of strings, e.g. '["deploy","production"]'.
+-- NULL for runs created before this migration.
+ALTER TABLE runs ADD COLUMN tags_json TEXT;
+        )SQL"
     }
 };
 

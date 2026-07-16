@@ -7,6 +7,7 @@
 #include "kairos/engine/pipeline.hpp"
 #include "kairos/core/id_generator.hpp"
 #include "kairos/exec/output_sink.hpp"
+#include "kairos/kel/errors.hpp"
 
 #include <spdlog/spdlog.h>
 
@@ -537,6 +538,29 @@ ConditionDecision Pipeline::evaluate_condition(const DagNode& node,
 
     if (deps_.query_reader)
         deps_.query_reader->register_kel_bindings(kel_ctx, ctx.now);
+
+    // Phase 8.5: Register has_tag(entity_id, tag) → bool.
+    // Checks all entity types (workflow, job, watch_group, trigger).
+    if (deps_.tag_store) {
+        auto* ts = deps_.tag_store;
+        kel_ctx.functions["has_tag"] = [ts](
+            const std::vector<kel::KelValue>& args) -> kel::KelValue
+        {
+            if (args.size() != 2 || !args[0].is_string() || !args[1].is_string())
+                throw kel::KelEvalError(
+                    "has_tag() requires two string arguments (entity_id, tag)");
+            const auto& entity_id = args[0].as_string();
+            const auto& tag = args[1].as_string();
+            // Check all entity types sequentially.
+            static const std::string types[] = {
+                "workflow", "job", "watch_group", "trigger"};
+            for (const auto& t : types) {
+                if (ts->has_tag(t, entity_id, tag))
+                    return kel::KelValue(true);
+            }
+            return kel::KelValue(false);
+        };
+    }
 
     try {
         auto result = kel::eval_expression(expr, kel_ctx, config_.kel_limits);

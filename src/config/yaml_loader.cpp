@@ -70,6 +70,27 @@ std::vector<std::string> read_string_vec(const YAML::Node& node) {
     return result;
 }
 
+/// §6 Tags: Parse a `tags:` array from a YAML node.
+/// Returns empty vector if the key is missing or not a sequence.
+/// Tags are sorted and deduplicated.
+std::vector<std::string> parse_tags(const YAML::Node& node) {
+    std::vector<std::string> tags;
+    if (!node["tags"] || !node["tags"].IsSequence()) {
+        return tags;
+    }
+    for (const auto& tag_node : node["tags"]) {
+        if (tag_node.IsScalar()) {
+            auto tag = tag_node.as<std::string>("");
+            if (!tag.empty()) {
+                tags.push_back(tag);
+            }
+        }
+    }
+    std::sort(tags.begin(), tags.end());
+    tags.erase(std::unique(tags.begin(), tags.end()), tags.end());
+    return tags;
+}
+
 /// Read an env map (string → string) from a YAML mapping node.
 std::unordered_map<std::string, std::string> read_env_map(
     const YAML::Node& node)
@@ -241,6 +262,9 @@ JobDef parse_job(const std::string& job_key, const YAML::Node& node,
 
     // continue_on_error.
     job.continue_on_error = opt_bool(node, "continue_on_error", false);
+
+    // §6 Tags.
+    job.tags = parse_tags(node);
 
     // Job-level env.
     job.env = read_env_map(node["env"]);
@@ -484,6 +508,10 @@ YamlLoadResult parse_workflow_node(
         if (root["continue_on_error"]) {
             job_node["continue_on_error"] = root["continue_on_error"];
         }
+        // §6 Tags: forward tags to the synthetic job node.
+        if (root["tags"] && root["tags"].IsSequence()) {
+            job_node["tags"] = root["tags"];
+        }
 
         auto job = parse_job(wf_name, job_node, standalone_wf_id,
                              result.errors, file);
@@ -591,7 +619,8 @@ YamlLoadResult parse_workflow_node(
             wf_id,
             wf_name,
             std::move(jobs),
-            std::move(dag)
+            std::move(dag),
+            parse_tags(root)  // §6 Workflow-level tags
         };
 
         // ── Extract triggers ────────────────────────────────────
@@ -854,6 +883,9 @@ WatchGroupDef parse_watch_group_node(
             group.rules.push_back(std::move(rule));
         }
     }
+
+    // §6 Tags.
+    group.tags = parse_tags(node);
 
     // Generate content-addressable ID.
     std::string hash_input = group.group_name;

@@ -67,8 +67,8 @@ void DBWriter::release_statements() {
 void DBWriter::prepare_statements() {
     stmt_insert_run_ = std::make_unique<SQLite::Statement>(db_,
         "INSERT INTO runs (run_id, target_type, target_id, target_name, "
-        "trigger_type, trigger_id, correlation_id, status, start_ts) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)");
+        "trigger_type, trigger_id, correlation_id, status, start_ts, tags_json) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
 
     stmt_update_run_ = std::make_unique<SQLite::Statement>(db_,
         "UPDATE runs SET status = ?, end_ts = ?, exit_code = ?, "
@@ -214,6 +214,11 @@ void DBWriter::execute_request(const DBWriteRequest& req) {
             stmt_insert_run_->bind(7, r.correlation_id);
             stmt_insert_run_->bind(8, r.status);
             stmt_insert_run_->bind(9, r.start_ts);
+            if (r.tags_json.empty()) {
+                stmt_insert_run_->bind(10);  // NULL
+            } else {
+                stmt_insert_run_->bind(10, r.tags_json);
+            }
             stmt_insert_run_->exec();
 
         } else if constexpr (std::is_same_v<T, UpdateRunComplete>) {

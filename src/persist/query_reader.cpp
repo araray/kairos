@@ -618,7 +618,8 @@ std::vector<QueryReader::RunSummary> QueryReader::query_recent_runs(
     std::string sql =
         "SELECT run_id, target_type, target_id, target_name, "
         "trigger_type, status, COALESCE(exit_code, 0), "
-        "start_ts, COALESCE(end_ts, ''), COALESCE(duration_ms, 0) "
+        "start_ts, COALESCE(end_ts, ''), COALESCE(duration_ms, 0), "
+        "COALESCE(tags_json, '') "
         "FROM runs WHERE 1=1 ";
 
     if (!status_filter.empty()) {
@@ -658,10 +659,65 @@ std::vector<QueryReader::RunSummary> QueryReader::query_recent_runs(
         r.start_ts     = query.getColumn(7).getString();
         r.end_ts       = query.getColumn(8).getString();
         r.duration_ms  = query.getColumn(9).getInt64();
+        r.tags_json    = query.getColumn(10).getString();
         results.push_back(std::move(r));
     }
 
     return results;
+}
+
+// ── Run ID prefix resolution (§1.1) ──────────────────────────────────────
+
+QueryReader::PrefixResult QueryReader::resolve_run_id_prefix(
+    const std::string& prefix) const
+{
+    PrefixResult result;
+
+    if (prefix.empty()) {
+        result.status = PrefixResult::kEmpty;
+        return result;
+    }
+
+    // Full UUID length (run-XXXXXXXX-XXXX-XXXX-XXXX-XXXXXXXXXXXX = 40 chars,
+    // or just the UUID part = 36). If the input is already >= 36 chars,
+    // treat as exact match to avoid LIKE overhead.
+    if (prefix.size() >= 36) {
+        SQLite::Statement query(db_,
+            "SELECT run_id FROM runs WHERE run_id = ?");
+        query.bind(1, prefix);
+        if (query.executeStep()) {
+            result.status = PrefixResult::kExact;
+            result.resolved_id = query.getColumn(0).getString();
+        } else {
+            result.status = PrefixResult::kNotFound;
+        }
+        return result;
+    }
+
+    // Prefix search: LIKE prefix% (limited to 10 candidates for
+    // ambiguity reporting).
+    std::string like_pattern = prefix + "%";
+    SQLite::Statement query(db_,
+        "SELECT run_id FROM runs WHERE run_id LIKE ? "
+        "ORDER BY start_ts DESC LIMIT 10");
+    query.bind(1, like_pattern);
+
+    std::vector<std::string> matches;
+    while (query.executeStep()) {
+        matches.push_back(query.getColumn(0).getString());
+    }
+
+    if (matches.empty()) {
+        result.status = PrefixResult::kNotFound;
+    } else if (matches.size() == 1) {
+        result.status = PrefixResult::kUnique;
+        result.resolved_id = matches[0];
+    } else {
+        result.status = PrefixResult::kAmbiguous;
+        result.candidates = std::move(matches);
+    }
+
+    return result;
 }
 
 std::optional<QueryReader::RunSummary> QueryReader::get_run_summary(
@@ -670,7 +726,8 @@ std::optional<QueryReader::RunSummary> QueryReader::get_run_summary(
     SQLite::Statement query(db_,
         "SELECT run_id, target_type, target_id, target_name, "
         "trigger_type, status, COALESCE(exit_code, 0), "
-        "start_ts, COALESCE(end_ts, ''), COALESCE(duration_ms, 0) "
+        "start_ts, COALESCE(end_ts, ''), COALESCE(duration_ms, 0), "
+        "COALESCE(tags_json, '') "
         "FROM runs WHERE run_id = ?");
     query.bind(1, run_id);
 
@@ -686,6 +743,7 @@ std::optional<QueryReader::RunSummary> QueryReader::get_run_summary(
         r.start_ts     = query.getColumn(7).getString();
         r.end_ts       = query.getColumn(8).getString();
         r.duration_ms  = query.getColumn(9).getInt64();
+        r.tags_json    = query.getColumn(10).getString();
         return r;
     }
     return std::nullopt;

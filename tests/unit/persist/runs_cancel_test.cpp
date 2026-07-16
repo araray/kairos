@@ -43,7 +43,8 @@ protected:
                 duration_ms INTEGER DEFAULT 0,
                 plan_json TEXT DEFAULT '',
                 error_message TEXT DEFAULT '',
-                created_at TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+                created_at TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+                tags_json TEXT
             )
         )");
         db_->exec(R"(

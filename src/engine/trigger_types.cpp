@@ -22,6 +22,31 @@ SystemTimePoint CronTrigger::next_fire_after(
     // Convert system_clock time_point to std::time_t for croncpp.
     auto tt = std::chrono::system_clock::to_time_t(after);
 
+    // ── FIX: ceil sub-second precision to next whole second ───────
+    //
+    // system_clock has sub-second precision (typically nanoseconds)
+    // but time_t is seconds-only.  std::chrono::system_clock::to_time_t
+    // truncates (floors) the sub-second component.
+    //
+    // This causes a critical bug in the scheduler loop:
+    //   1. Cron fires at wall time 23:55:00.300 (sub-second past match)
+    //   2. Scheduler calls reschedule → next_fire_after(23:55:00.300)
+    //   3. to_time_t truncates to 23:55:00 (the exact cron match!)
+    //   4. croncpp's cron_next(23:55:00) returns 23:55:00 again
+    //      (same second — not strictly after)
+    //   5. from_time_t(23:55:00) → next_fire_wall = 23:55:00.000
+    //   6. time_until_fire = 23:55:00.000 - 23:55:00.300 = negative
+    //   7. Scheduler fires AGAIN immediately → spin loop until the
+    //      wall clock crosses the second boundary (~700ms of spinning)
+    //
+    // Fix: if the input has any sub-second component, advance time_t
+    // by 1 second so croncpp evaluates from the next whole second.
+    // This guarantees the returned time_point is strictly > after.
+    auto after_floor = std::chrono::system_clock::from_time_t(tt);
+    if (after > after_floor) {
+        tt += 1;  // Ceil to next whole second.
+    }
+
     // Apply timezone delta: shift time_t so that when croncpp calls
     // localtime_r internally, the resulting civil-time fields correspond
     // to the configured timezone (kairos.timezone), not the system timezone.

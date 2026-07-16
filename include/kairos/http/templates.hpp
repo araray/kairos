@@ -386,7 +386,8 @@ inline constexpr std::string_view kEventsTemplate = R"html(<!DOCTYPE html>
         <thead>
           <tr>
             <th>Event ID</th><th>Watch Group</th><th>Rule</th>
-            <th>Type</th><th>Severity</th><th>Time</th>
+            <th>Type</th><th>Severity</th>
+            <th>Affected Files</th><th>Time</th>
           </tr>
         </thead>
         <tbody>
@@ -397,12 +398,26 @@ inline constexpr std::string_view kEventsTemplate = R"html(<!DOCTYPE html>
             <td>{{ event.rule_name }}</td>
             <td>{{ event.event_type }}</td>
             <td>{{ event.severity }}</td>
+            <td>
+{% if existsIn(event, "affected_files") and event.affected_files != "" %}
+              <details>
+                <summary style="max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;cursor:pointer;">{{ event.affected_files }}</summary>
+                <ul class="mt-1 mb-0 ps-3" style="font-size:0.85em;">
+{% for f in event.affected_files_list %}
+                  <li><code>{{ f }}</code></li>
+{% endfor %}
+                </ul>
+              </details>
+{% else %}
+              <span class="text-muted">—</span>
+{% endif %}
+            </td>
             <td>{{ event.created_at }}</td>
           </tr>
 {% endfor %}
 {% if length(events) == 0 %}
           <tr>
-            <td colspan="6" class="text-center text-muted">No events recorded yet</td>
+            <td colspan="7" class="text-center text-muted">No events recorded yet</td>
           </tr>
 {% endif %}
         </tbody>

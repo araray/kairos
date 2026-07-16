@@ -91,6 +91,9 @@ struct WatchGroupDef {
 
     /// Whether the group is enabled.
     bool enabled = true;
+
+    /// §6 Tags from YAML `tags:` array.
+    std::vector<std::string> tags;
 };
 
 /// Result of a triggered watch rule, ready for persistence and

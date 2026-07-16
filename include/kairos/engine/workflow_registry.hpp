@@ -49,6 +49,7 @@ struct JobDef {
     bool continue_on_error = false;
     std::unordered_map<std::string, std::string> env;  ///< Job-level env
     std::filesystem::path working_dir;  ///< Job-level working dir
+    std::vector<std::string> tags;  ///< §6 Tags from YAML `tags:` array
 };
 
 // ── Workflow definition (parsed from YAML) ──────────────────────────────
@@ -59,6 +60,7 @@ struct WorkflowDef {
     std::string workflow_name;   ///< Human-readable name
     std::vector<JobDef> jobs;    ///< All jobs in the workflow
     WorkflowDag dag;             ///< Pre-built DAG from job definitions
+    std::vector<std::string> tags;  ///< §6 Tags from YAML `tags:` array
 };
 
 // ── Workflow Registry ───────────────────────────────────────────────────

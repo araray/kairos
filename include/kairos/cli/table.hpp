@@ -10,6 +10,7 @@
 #pragma once
 
 #include "kairos/platform/platform.hpp"
+#include "kairos/platform/environment.hpp"
 
 #include <spdlog/fmt/fmt.h>
 
@@ -26,8 +27,8 @@ namespace kairos::cli {
 /// Respects NO_COLOR env var (https://no-color.org/).
 inline bool supports_color() {
     static const bool result = []() {
-        // Respect NO_COLOR env var.
-        if (const char* nc = std::getenv("NO_COLOR"); nc != nullptr)
+        // Respect NO_COLOR env var (§13: thread-safe via platform::get_env).
+        if (platform::get_env("NO_COLOR").has_value())
             return false;
         // Check if stdout is a TTY.
         return platform::is_tty();
@@ -92,6 +93,10 @@ inline std::string status_icon(const std::string& status,
         return color ? colorize("\xe2\x8a\x98", ansi::yellow, true) // ⊘
                      : "[--]";
     }
+    if (status == "INTERRUPTED" || status == "interrupted") {
+        return color ? colorize("\xe2\x9a\xa1", ansi::magenta, true) // ⚡
+                     : "[!!]";
+    }
     if (status == "TIMED_OUT" || status == "timed_out") {
         return color ? colorize("\xe2\x8f\xb0", ansi::red, true)    // ⏰
                      : "[TO]";
@@ -107,6 +112,7 @@ inline std::string colorize_status(const std::string& status,
     if (status == "FAILURE") return colorize(status, ansi::red, true);
     if (status == "RUNNING") return colorize(status, ansi::cyan, true);
     if (status == "CANCELLED") return colorize(status, ansi::yellow, true);
+    if (status == "INTERRUPTED") return colorize(status, ansi::magenta, true);
     if (status == "SKIPPED") return colorize(status, ansi::yellow, true);
     if (status == "TIMED_OUT") return colorize(status, ansi::red, true);
     return status;
@@ -167,33 +173,38 @@ public:
         rows_.push_back(std::move(row));
     }
 
+    /// Control whether to render the header and separator lines.
+    /// When false, only data rows are emitted (useful for scripting).
+    void set_show_header(bool show) { show_header_ = show; }
+
     /// Render the table to an output stream.
     /// @param out        Output stream (default: std::cout).
     /// @param use_color  If true, render headers in bold.
     void render(std::ostream& out = std::cout,
                 bool use_color = false) const {
-        // Header
-        for (std::size_t i = 0; i < headers_.size(); ++i) {
-            if (i > 0) out << "  ";
-            std::string h = headers_[i];
-            if (use_color) {
-                h = std::string(ansi::bold) + h + ansi::reset;
+        if (show_header_) {
+            // Header
+            for (std::size_t i = 0; i < headers_.size(); ++i) {
+                if (i > 0) out << "  ";
+                std::string h = headers_[i];
+                if (use_color) {
+                    h = std::string(ansi::bold) + h + ansi::reset;
+                }
+                size_t pad = widths_[i] > headers_[i].size()
+                    ? widths_[i] - headers_[i].size() : 0;
+                out << h << std::string(pad, ' ');
             }
-            // Pad based on visible length (headers have no ANSI).
-            size_t pad = widths_[i] > headers_[i].size()
-                ? widths_[i] - headers_[i].size() : 0;
-            out << h << std::string(pad, ' ');
-        }
-        out << '\n';
+            out << '\n';
 
-        // Separator line (Unicode ─ character, U+2500).
-        for (std::size_t i = 0; i < headers_.size(); ++i) {
-            if (i > 0) out << "  ";
-            for (std::size_t j = 0; j < widths_[i]; ++j) {
-                out << "\xe2\x94\x80";  // ─ (3-byte UTF-8)
+            // Separator line (Unicode ─ character, U+2500).
+            for (std::size_t i = 0; i < headers_.size(); ++i) {
+                if (i > 0) out << "  ";
+                for (std::size_t j = 0; j < widths_[i]; ++j) {
+                    out << "\xe2\x94\x80";  // ─ (3-byte UTF-8)
+                }
             }
+            out << '\n';
         }
-        out << '\n';
 
         // Rows
         for (const auto& row : rows_) {
@@ -235,6 +246,7 @@ private:
     std::vector<std::string> headers_;
     std::vector<Row> rows_;
     std::vector<std::size_t> widths_;
+    bool show_header_ = true;
 };
 
 }  // namespace kairos::cli

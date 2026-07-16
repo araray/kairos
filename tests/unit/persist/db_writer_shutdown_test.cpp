@@ -66,7 +66,8 @@ protected:
                 exit_code INTEGER DEFAULT 0,
                 start_ts TEXT NOT NULL,
                 end_ts TEXT DEFAULT '',
-                duration_ms INTEGER DEFAULT 0
+                duration_ms INTEGER DEFAULT 0,
+                tags_json TEXT
             )
         )");
         db_->exec(R"(

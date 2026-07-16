@@ -187,6 +187,7 @@ public:
         std::string start_ts;
         std::string end_ts;
         int64_t duration_ms = 0;
+        std::string tags_json;         ///< §6 JSON array of tags (from runs.tags_json)
     };
 
     /// Query recent runs with optional filters.
@@ -199,6 +200,28 @@ public:
         const std::string& status_filter = "",
         const std::string& target_filter = "",
         const std::string& since = "") const;
+
+    // ── Run ID prefix resolution (§1.1 — Roadmap Phase 6) ──────
+
+    /// Result of resolving a run ID prefix.
+    struct PrefixResult {
+        enum Status { kExact, kUnique, kAmbiguous, kNotFound, kEmpty };
+        Status status = kNotFound;
+        std::string resolved_id;        ///< Full run_id (if kExact or kUnique).
+        std::vector<std::string> candidates;  ///< Multiple matches (if kAmbiguous).
+    };
+
+    /// Resolve a (possibly truncated) run ID prefix to a full run_id.
+    ///
+    /// Logic:
+    ///  - If prefix is empty → kEmpty.
+    ///  - If prefix length >= 36 (full UUID) → exact match.
+    ///  - Otherwise → LIKE prefix% query.
+    ///    - 0 results → kNotFound.
+    ///    - 1 result  → kUnique (returns full ID).
+    ///    - N results → kAmbiguous (returns up to 10 candidates).
+    [[nodiscard]] PrefixResult resolve_run_id_prefix(
+        const std::string& prefix) const;
 
     /// Get a single run summary by run_id.
     [[nodiscard]] std::optional<RunSummary> get_run_summary(

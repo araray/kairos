@@ -35,7 +35,11 @@
 #include "kairos/persist/db_writer.hpp"
 #include "kairos/persist/migration.hpp"
 #include "kairos/persist/query_reader.hpp"
+#include "kairos/persist/stale_recovery.hpp"
+#include "kairos/persist/tag_store.hpp"
 #include "kairos/platform/platform.hpp"
+#include "kairos/platform/sd_notify.hpp"
+#include "kairos/platform/environment.hpp"
 #include "kairos/platform/timezone.hpp"
 #include "kairos/security/secret_store.hpp"
 #include "kairos/testing/fake_clock.hpp"
@@ -223,7 +227,8 @@ static bool perform_config_reload(
     engine::Pipeline& pipeline,
     watch::WatchEngine& watch_engine,
     std::shared_ptr<spdlog::logger> log,
-    mcp::McpHandler* mcp_handler = nullptr)
+    mcp::McpHandler* mcp_handler = nullptr,
+    persist::TagStore* tag_store = nullptr)
 {
     log->info("Config reload: re-parsing {}", config_path.string());
 
@@ -239,6 +244,55 @@ static bool perform_config_reload(
 
     // Reload YAML workflows and watch groups.
     auto new_registry = load_registry_from_yaml(result.state, log);
+
+    // Phase 8.5: Sync tags from reloaded registry into DB.
+    if (tag_store) {
+        try {
+            // Collect workflow tags.
+            std::vector<persist::EntityTagSet> wf_tags;
+            for (const auto* wf : new_registry->workflows()) {
+                if (!wf->tags.empty()) {
+                    wf_tags.push_back({persist::TagEntityType::Workflow,
+                                       wf->workflow_id, wf->tags});
+                }
+            }
+            tag_store->sync_all_tags(persist::TagEntityType::Workflow, wf_tags);
+
+            // Collect job tags (workflow + standalone).
+            std::vector<persist::EntityTagSet> job_tags;
+            for (const auto* wf : new_registry->workflows()) {
+                for (const auto& j : wf->jobs) {
+                    if (!j.tags.empty()) {
+                        job_tags.push_back({persist::TagEntityType::Job,
+                                            j.job_id, j.tags});
+                    }
+                }
+            }
+            for (const auto* sj : new_registry->standalone_jobs()) {
+                if (!sj->tags.empty()) {
+                    job_tags.push_back({persist::TagEntityType::Job,
+                                        sj->job_id, sj->tags});
+                }
+            }
+            tag_store->sync_all_tags(persist::TagEntityType::Job, job_tags);
+
+            // Collect watch group tags.
+            std::vector<persist::EntityTagSet> wg_tags;
+            for (const auto& wg : new_registry->watch_groups()) {
+                if (!wg.tags.empty()) {
+                    wg_tags.push_back({persist::TagEntityType::WatchGroup,
+                                       wg.group_id, wg.tags});
+                }
+            }
+            tag_store->sync_all_tags(persist::TagEntityType::WatchGroup, wg_tags);
+
+            log->info("Tag sync complete: {} wf, {} job, {} wg tags",
+                      wf_tags.size(), job_tags.size(), wg_tags.size());
+        } catch (const std::exception& e) {
+            log->warn("Tag sync failed during reload: {}", e.what());
+            // Non-fatal — tags are a convenience feature.
+        }
+    }
 
     // Propagate to engines.
     scheduler.request_reload(new_registry);
@@ -281,6 +335,19 @@ int run_daemon(std::shared_ptr<const kairos::config::ConfigState> config) {
         return 1;
     }
 
+    // ── Step 2.5: Recover stale runs from previous crash ──────────
+    // If the daemon was killed (SIGKILL, OOM, systemd timeout, power
+    // loss), any in-flight runs are left with status='RUNNING' in the
+    // database.  Mark them as INTERRUPTED before engines start so that
+    // KEL conditions, max_instances, and `kairos status` are accurate.
+    {
+        auto recovery = persist::recover_stale_runs(*db);
+        if (recovery.runs_recovered > 0) {
+            log->warn("Recovered {} stale run(s) from unclean shutdown",
+                      recovery.runs_recovered);
+        }
+    }
+
     // ── Step 3: Log startup banner ─────────────────────────────────
     log->info("Kairos v{} starting", std::string(kairos::kVersion));
     log->info("Config: {}", config->config_file_path.string());
@@ -317,6 +384,54 @@ int run_daemon(std::shared_ptr<const kairos::config::ConfigState> config) {
     // ── Step 6: Load workflow/watch-group definitions ──────────────
     auto registry = load_registry_from_yaml(config, log);
 
+    // ── Step 6.1: Sync tags into DB (Phase 8.5) ──────────────────
+    persist::TagStore tag_store(*db);
+    try {
+        // Collect workflow tags.
+        std::vector<persist::EntityTagSet> wf_tags;
+        for (const auto* wf : registry->workflows()) {
+            if (!wf->tags.empty()) {
+                wf_tags.push_back({persist::TagEntityType::Workflow,
+                                   wf->workflow_id, wf->tags});
+            }
+        }
+        tag_store.sync_all_tags(persist::TagEntityType::Workflow, wf_tags);
+
+        // Collect job tags (workflow jobs + standalone).
+        std::vector<persist::EntityTagSet> job_tags;
+        for (const auto* wf : registry->workflows()) {
+            for (const auto& j : wf->jobs) {
+                if (!j.tags.empty()) {
+                    job_tags.push_back({persist::TagEntityType::Job,
+                                        j.job_id, j.tags});
+                }
+            }
+        }
+        for (const auto* sj : registry->standalone_jobs()) {
+            if (!sj->tags.empty()) {
+                job_tags.push_back({persist::TagEntityType::Job,
+                                    sj->job_id, sj->tags});
+            }
+        }
+        tag_store.sync_all_tags(persist::TagEntityType::Job, job_tags);
+
+        // Collect watch group tags.
+        std::vector<persist::EntityTagSet> wg_tags;
+        for (const auto& wg : registry->watch_groups()) {
+            if (!wg.tags.empty()) {
+                wg_tags.push_back({persist::TagEntityType::WatchGroup,
+                                   wg.group_id, wg.tags});
+            }
+        }
+        tag_store.sync_all_tags(persist::TagEntityType::WatchGroup, wg_tags);
+
+        log->info("Initial tag sync: {} wf, {} job, {} wg tag sets",
+                  wf_tags.size(), job_tags.size(), wg_tags.size());
+    } catch (const std::exception& e) {
+        log->warn("Initial tag sync failed: {}", e.what());
+        // Non-fatal — tags are a convenience feature.
+    }
+
     // ── Step 6.5: Load SecretStore (§17.1) ────────────────────────
     security::SecretStore secret_store;
     bool vault_enabled = config->global.get<bool>(
@@ -347,13 +462,13 @@ int run_daemon(std::shared_ptr<const kairos::config::ConfigState> config) {
                 vault_password.pop_back();
             }
         } else {
-            const char* pw = std::getenv(password_env.c_str());
-            if (!pw || pw[0] == '\0') {
+            auto pw = platform::get_env(password_env.c_str());
+            if (!pw || pw->empty()) {
                 log->error("Vault enabled but {} env var is empty/unset",
                            password_env);
                 return 1;
             }
-            vault_password = pw;
+            vault_password = *pw;
         }
 
         try {
@@ -452,6 +567,7 @@ int run_daemon(std::shared_ptr<const kairos::config::ConfigState> config) {
         .query_reader = &query_reader,
         .run_stream = &run_stream,
         .cancel_registry = &cancel_registry,
+        .tag_store = &tag_store,
         .secret_resolver = secret_resolver,
         .secret_values = secret_values,
     });
@@ -564,11 +680,12 @@ int run_daemon(std::shared_ptr<const kairos::config::ConfigState> config) {
 
         // Config reload callback: delegates to the daemon's reload logic.
         mcp_deps.reload_config =
-            [&config, &scheduler, &pipeline, &watch_engine, &log]
+            [&config, &scheduler, &pipeline, &watch_engine, &log, &tag_store]
             (std::vector<std::string>& errors) -> bool {
                 bool ok = perform_config_reload(
                     config->config_file_path,
-                    scheduler, pipeline, watch_engine, log);
+                    scheduler, pipeline, watch_engine, log,
+                    nullptr, &tag_store);
                 if (!ok) {
                     errors.push_back("Config reload failed — see logs");
                 }
@@ -648,10 +765,11 @@ int run_daemon(std::shared_ptr<const kairos::config::ConfigState> config) {
             return ok ? run_id : std::string{};
         };
         http_deps.reload_config = [&config, &scheduler, &pipeline,
-                                    &watch_engine, &log]() -> bool {
+                                    &watch_engine, &log, &tag_store]() -> bool {
             return perform_config_reload(
                 config->config_file_path,
-                scheduler, pipeline, watch_engine, log);
+                scheduler, pipeline, watch_engine, log,
+                nullptr, &tag_store);
         };
 
         http_server = std::make_unique<http::HttpServer>(
@@ -680,6 +798,22 @@ int run_daemon(std::shared_ptr<const kairos::config::ConfigState> config) {
 
     // ── Step 17: Startup complete ──────────────────────────────────
     log->info("Kairos v{} started — daemon ready", std::string(kairos::kVersion));
+
+    // ── Step 17.5: Notify systemd we're ready (§27.4) ─────────────
+    // On Linux with Type=notify, this tells systemd to transition from
+    // "activating (start)" → "active (running)".  No-op elsewhere.
+    platform::sd_notify_ready();
+    platform::sd_notify_status("Kairos daemon ready");
+
+    // Watchdog: ping at half the configured interval per sd_notify(7).
+    // $WATCHDOG_USEC is set by systemd when WatchdogSec= is configured.
+    int watchdog_full_s = platform::sd_watchdog_interval_s();
+    int watchdog_ping_s = (watchdog_full_s > 0) ? watchdog_full_s / 2 : 0;
+    auto last_watchdog_ping = std::chrono::steady_clock::now();
+    if (watchdog_ping_s > 0) {
+        log->info("systemd watchdog: interval={}s, pinging every {}s",
+                  watchdog_full_s, watchdog_ping_s);
+    }
 
     auto uptime_start = std::chrono::steady_clock::now();
 
@@ -886,7 +1020,7 @@ int run_daemon(std::shared_ptr<const kairos::config::ConfigState> config) {
             bool ok = perform_config_reload(
                 config->config_file_path,
                 scheduler, pipeline, watch_engine, log,
-                mcp_handler.get());
+                mcp_handler.get(), &tag_store);
             if (ok) {
                 counter_reloads_ok->increment();
             } else {
@@ -924,6 +1058,19 @@ int run_daemon(std::shared_ptr<const kairos::config::ConfigState> config) {
             }
         }
 
+        // ── systemd watchdog ping (§27.4) ──────────────────────────
+        // Per sd_notify(7), ping at half the WatchdogSec interval.
+        // The main loop runs every 5s, so for WatchdogSec=60 we ping
+        // every 30s — well within the deadline.
+        if (watchdog_ping_s > 0) {
+            auto since_ping = std::chrono::duration<double>(
+                now - last_watchdog_ping).count();
+            if (since_ping >= static_cast<double>(watchdog_ping_s)) {
+                platform::sd_notify_watchdog();
+                last_watchdog_ping = now;
+            }
+        }
+
         // Sleep for 5 seconds (or until stop).
         clock.sleep_for(std::chrono::milliseconds(5000));
     }
@@ -932,6 +1079,10 @@ int run_daemon(std::shared_ptr<const kairos::config::ConfigState> config) {
     // Shutdown in reverse-dependency order per §27.7:
     //   Scheduler → WatchEngine → TriggerBus → Pipeline →
     //   RunnerPool → DBWriter → DB → Lock
+
+    // Notify systemd that we're stopping (§27.4).
+    platform::sd_notify_stopping();
+
     log->info("Kairos shutting down...");
 
     // Start shutdown watchdog.

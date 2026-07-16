@@ -278,6 +278,7 @@ Color status_color(const std::string& status) {
     if (status == "FAILED")    return Color::Red;
     if (status == "RUNNING")   return Color::Cyan;
     if (status == "CANCELLED") return Color::Yellow;
+    if (status == "INTERRUPTED") return Color::Magenta;
     if (status == "TIMED_OUT") return Color::Red;
     return Color::White;
 }
@@ -503,6 +504,10 @@ int run_dashboard(const DashboardConfig& config) {
     std::atomic<bool> force_refresh{false};
     bool show_logs = true;
 
+    // Phase 8.5: Filter bar state (§4.1 TUI search/filter).
+    std::string filter_text;
+    bool filter_active = false;
+
     // Initial refresh.
     refresh_state(state, config);
 
@@ -510,6 +515,28 @@ int run_dashboard(const DashboardConfig& config) {
 
     auto renderer = Renderer([&] {
         std::lock_guard<std::mutex> lock(state_mutex);
+
+        // Phase 8.5: Case-insensitive substring filter matcher.
+        auto matches_filter = [&](const std::string& text) -> bool {
+            if (!filter_active || filter_text.empty()) return true;
+            // Case-insensitive search.
+            std::string lower_text = text;
+            std::string lower_filter = filter_text;
+            std::transform(lower_text.begin(), lower_text.end(),
+                           lower_text.begin(),
+                           [](unsigned char c) { return std::tolower(c); });
+            std::transform(lower_filter.begin(), lower_filter.end(),
+                           lower_filter.begin(),
+                           [](unsigned char c) { return std::tolower(c); });
+            return lower_text.find(lower_filter) != std::string::npos;
+        };
+
+        // Helper: check if any field in a RunInfo matches.
+        auto run_matches = [&](const RunInfo& r) -> bool {
+            return matches_filter(r.run_id) ||
+                   matches_filter(r.workflow) ||
+                   matches_filter(r.status);
+        };
 
         // ── Header bar ───────────────────────────────────────────
         auto status_indicator = state.daemon_running
@@ -532,7 +559,7 @@ int run_dashboard(const DashboardConfig& config) {
                 | color(Color::GrayLight),
             filler(),
             text(state.last_refresh + " ") | color(Color::GrayDark),
-            text("q=quit r=refresh l=logs") | dim,
+            text("q=quit r=refresh l=logs /=filter") | dim,
         }) | borderLight;
 
         // ── Error banner ─────────────────────────────────────────
@@ -548,6 +575,7 @@ int run_dashboard(const DashboardConfig& config) {
             active_items.push_back(text("  No active runs") | dim);
         } else {
             for (const auto& r : state.active_runs) {
+                if (!run_matches(r)) continue;
                 active_items.push_back(hbox({
                     text("  ● ") | color(Color::Cyan),
                     text(r.workflow) | bold,
@@ -555,6 +583,8 @@ int run_dashboard(const DashboardConfig& config) {
                     text("(" + r.duration + ")") | dim,
                 }));
             }
+            if (active_items.empty())
+                active_items.push_back(text("  (filtered)") | dim);
         }
         auto active_panel = vbox(std::move(active_items))
             | borderLight | size(HEIGHT, LESS_THAN, 8);
@@ -572,6 +602,10 @@ int run_dashboard(const DashboardConfig& config) {
                 text("  No trigger history") | dim);
         } else {
             for (const auto& t : state.trigger_fires) {
+                if (!matches_filter(t.trigger_id) &&
+                    !matches_filter(t.trigger_type) &&
+                    !matches_filter(t.target_id))
+                    continue;
                 auto short_id = t.trigger_id.size() > 16
                     ? t.trigger_id.substr(0, 16) : t.trigger_id;
                 trigger_items.push_back(hbox({
@@ -581,6 +615,8 @@ int run_dashboard(const DashboardConfig& config) {
                     text(t.fired_at) | dim,
                 }));
             }
+            if (trigger_items.empty())
+                trigger_items.push_back(text("  (filtered)") | dim);
         }
         auto trigger_panel = vbox(std::move(trigger_items))
             | borderLight | size(HEIGHT, LESS_THAN, 8);
@@ -606,6 +642,7 @@ int run_dashboard(const DashboardConfig& config) {
             run_rows.push_back(text("  No completed runs") | dim);
         } else {
             for (const auto& r : state.recent_runs) {
+                if (!run_matches(r)) continue;
                 auto short_id = r.run_id.size() > 12
                     ? r.run_id.substr(0, 12) : r.run_id;
                 auto short_wf = r.workflow.size() > 18
@@ -632,6 +669,7 @@ int run_dashboard(const DashboardConfig& config) {
             wg_items.push_back(text("  No watch groups") | dim);
         } else {
             for (const auto& wg : state.watch_groups) {
+                if (!matches_filter(wg.name)) continue;
                 wg_items.push_back(hbox({
                     text("  " + wg.name) | bold,
                     filler(),
@@ -640,6 +678,8 @@ int run_dashboard(const DashboardConfig& config) {
                     text("  " + wg.last_scan) | dim,
                 }));
             }
+            if (wg_items.empty())
+                wg_items.push_back(text("  (filtered)") | dim);
         }
         auto watch_panel = vbox({
             text(" Watch Groups (" +
@@ -654,6 +694,11 @@ int run_dashboard(const DashboardConfig& config) {
             event_items.push_back(text("  No events") | dim);
         } else {
             for (const auto& ev : state.events) {
+                if (!matches_filter(ev.watch_group) &&
+                    !matches_filter(ev.rule_name) &&
+                    !matches_filter(ev.event_type) &&
+                    !matches_filter(ev.affected_files))
+                    continue;
                 auto short_uid = ev.event_uid.size() > 8
                     ? ev.event_uid.substr(0, 8) : ev.event_uid;
                 auto short_group = ev.watch_group.size() > 14
@@ -670,6 +715,8 @@ int run_dashboard(const DashboardConfig& config) {
                     text("  " + ev.created_at) | dim,
                 }));
             }
+            if (event_items.empty())
+                event_items.push_back(text("  (filtered)") | dim);
         }
         auto events_panel = vbox({
             text(" Events (" +
@@ -705,6 +752,18 @@ int run_dashboard(const DashboardConfig& config) {
             });
         }
 
+        // ── Filter bar (Phase 8.5) ────────────────────────────────
+        Element filter_bar = text("");
+        if (filter_active) {
+            filter_bar = hbox({
+                text(" / ") | bold | color(Color::Cyan),
+                text(filter_text) | bold | color(Color::White),
+                text("█") | blink | color(Color::Cyan),
+                filler(),
+                text("[Esc] clear  [Enter] keep") | dim,
+            }) | borderLight | color(Color::Cyan);
+        }
+
         // ── Compose the full layout ──────────────────────────────
         return vbox({
             header,
@@ -719,11 +778,40 @@ int run_dashboard(const DashboardConfig& config) {
                 watch_panel | flex,
                 log_panel   | flex,
             }),
+            filter_bar,
         });
     });
 
     // ── Keyboard handler ─────────────────────────────────────────
     auto component = CatchEvent(renderer, [&](Event event) {
+        // Phase 8.5: Filter mode input handling.
+        if (filter_active) {
+            if (event == Event::Escape) {
+                // Clear filter and exit filter mode.
+                filter_text.clear();
+                filter_active = false;
+                return true;
+            }
+            if (event == Event::Return) {
+                // Keep filter text, exit filter mode.
+                filter_active = false;
+                return true;
+            }
+            if (event == Event::Backspace) {
+                if (!filter_text.empty()) {
+                    filter_text.pop_back();
+                }
+                return true;
+            }
+            // Accept printable characters into the filter.
+            if (event.is_character()) {
+                filter_text += event.character();
+                return true;
+            }
+            return false;
+        }
+
+        // Normal mode key handling.
         if (event == Event::Character('q') ||
             event == Event::Escape) {
             should_quit = true;
@@ -736,6 +824,11 @@ int run_dashboard(const DashboardConfig& config) {
         }
         if (event == Event::Character('l')) {
             show_logs = !show_logs;
+            return true;
+        }
+        if (event == Event::Character('/')) {
+            filter_active = true;
+            filter_text.clear();
             return true;
         }
         return false;
