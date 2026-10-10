@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="docs/kairos-logo.svg" alt="Kairos" width="200"/>
+  <img src="assets/brand/kairos-logo.svg" alt="Kairos" width="420"/>
 </p>
 
 <h1 align="center">Kairos</h1>
@@ -38,9 +38,16 @@ Kairos replaces three legacy Python tools — **LocalFlow** (workflow/DAG execut
 
 Every trigger — schedule tick, filesystem change, manual run, or MCP agent call — flows through the same pipeline:
 
+![Unified Pipeline](assets/diagrams/repository/readme-unified-pipeline.svg)
+
+<details>
+<summary>Text version</summary>
+
 ```
 Trigger → Evaluate Conditions (KEL) → Plan (DAG) → Execute → Persist → Emit Observability
 ```
+
+</details>
 
 ### Scheduling Engine
 
@@ -202,6 +209,11 @@ docker run -v /path/to/config:/etc/kairos kairos
 
 ## Architecture
 
+![Architecture](assets/diagrams/repository/readme-architecture.svg)
+
+<details>
+<summary>Text version</summary>
+
 ```
 ┌─────────────────────────────────────────────────────────────────────────┐
 │                          INTERFACE LAYER                                 │
@@ -248,6 +260,8 @@ docker run -v /path/to/config:/etc/kairos kairos
 │  └──────────────┘  └──────────────┘  └────────────────┘  └──────────┘│
 └─────────────────────────────────────────────────────────────────────────┘
 ```
+
+</details>
 
 ### Threading Model
 
@@ -337,9 +351,10 @@ See [`deploy/kairos.toml.example`](deploy/kairos.toml.example) for the complete 
 | Document | Description |
 |----------|-------------|
 | [`USAGE.md`](USAGE.md) | Complete CLI reference, examples, and operational guide |
-| [`BUILD.md`](BUILD.md) | Build system, options, cross-platform instructions, and testing |
-| [`AUTHORING.md`](AUTHORING.md) | Workflow, watch group, and KEL authoring guide |
+| [`Build.md`](Build.md) | Build system, options, cross-platform instructions, and testing |
+| [`Authoring.md`](Authoring.md) | Workflow, watch group, and KEL authoring guide |
 | [`deploy/kairos.toml.example`](deploy/kairos.toml.example) | Annotated default configuration reference |
+| [Artwork and diagram assets](assets/README.md) | Approved cobalt/coral identity, palette, editable source, and SVG diagrams |
 | [`docs/DESIGN_SPEC_PART1-7.md`](docs/) | Complete design and architecture specification |
 
 ---
