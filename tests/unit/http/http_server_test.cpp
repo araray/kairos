@@ -29,6 +29,7 @@
 
 #include <chrono>
 #include <filesystem>
+#include <future>
 #include <set>
 #include <stop_token>
 #include <thread>
@@ -1339,6 +1340,83 @@ TEST_F(HttpServerTest, ActionButtonsPresent) {
     auto run = cli.Get("/runs/run-dddd");
     ASSERT_TRUE(run);
     EXPECT_NE(run->body.find("cancel-run"), std::string::npos);
+
+    ss.request_stop();
+    server->stop();
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  Phase 11 — SSE streams (Roadmap §3.8.6)
+// ═══════════════════════════════════════════════════════════════════════════
+
+TEST_F(HttpServerTest, SseRunsStreamEmitsNewAndChangedRuns) {
+    seed_run("run-eeee11112222333344445555666677788899",
+             "ci-pipeline", "RUNNING");
+
+    auto server = make_server(18474);
+    std::stop_source ss;
+    server->start(ss.get_token());
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+
+    // Client consumes the stream in the background; we mutate the DB
+    // mid-stream and then check what arrived.
+    std::string received;
+    auto consumer = std::async(std::launch::async, [&received]() {
+        httplib::Client cli("http://127.0.0.1:18474");
+        cli.set_read_timeout(6, 0);
+        cli.Get("/sse/runs",
+                [&received](const char* data, size_t len) -> bool {
+                    received.append(data, len);
+                    // Stop after the completion event arrives.
+                    return received.find("run_finished") ==
+                           std::string::npos;
+                });
+    });
+
+    // Wait for the stream to pick up the RUNNING run, then complete it.
+    std::this_thread::sleep_for(std::chrono::milliseconds(3500));
+    {
+        SQLite::Statement up(*db_,
+            "UPDATE runs SET status='SUCCESS', end_ts='2026-03-16T10:00:05Z'"
+            " WHERE run_id='run-eeee11112222333344445555666677788899'");
+        up.exec();
+    }
+    consumer.wait();
+
+    EXPECT_NE(received.find("run_started"), std::string::npos);
+    EXPECT_NE(received.find("RUNNING"), std::string::npos);
+    EXPECT_NE(received.find("run_finished"), std::string::npos);
+    EXPECT_NE(received.find("SUCCESS"), std::string::npos);
+
+    ss.request_stop();
+    server->stop();
+}
+
+TEST_F(HttpServerTest, SseEventsStreamEmitsNewEvents) {
+    auto server = make_server(18475);
+    std::stop_source ss;
+    server->start(ss.get_token());
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+
+    std::string received;
+    auto consumer = std::async(std::launch::async, [&received]() {
+        httplib::Client cli("http://127.0.0.1:18475");
+        cli.set_read_timeout(6, 0);
+        cli.Get("/sse/events",
+                [&received](const char* data, size_t len) -> bool {
+                    received.append(data, len);
+                    return received.find("watch_event") ==
+                           std::string::npos;
+                });
+    });
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(1500));
+    seed_event("live-group", R"(["/var/log/live.log"])");
+    consumer.wait();
+
+    EXPECT_NE(received.find("watch_event"), std::string::npos);
+    EXPECT_NE(received.find("live-group"), std::string::npos);
+    EXPECT_NE(received.find("/var/log/live.log"), std::string::npos);
 
     ss.request_stop();
     server->stop();

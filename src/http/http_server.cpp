@@ -68,6 +68,7 @@
 #include <chrono>
 #include <cmath>
 #include <fstream>
+#include <map>
 #include <thread>
 
 namespace kairos::http {
@@ -2640,6 +2641,149 @@ struct HttpServer::Impl {
     }
 
     void register_sse_routes() {
+        // ── SSE: Run status stream (§3.8.6) ────────────────────────
+        // Poll-diff loop: emits `run` events for new runs and status
+        // transitions of recent runs. Browsers auto-reconnect when the
+        // stream closes at the 30-minute cap.
+        svr.Get("/sse/runs",
+            [this](const httplib::Request&, httplib::Response& res) {
+                res.set_header("Cache-Control", "no-cache");
+                res.set_header("Connection", "keep-alive");
+                if (config.enable_cors) {
+                    res.set_header("Access-Control-Allow-Origin",
+                                   config.cors_origins);
+                }
+
+                res.set_chunked_content_provider(
+                    "text/event-stream",
+                    [this](std::size_t, httplib::DataSink& sink) -> bool {
+                        std::map<std::string, std::string> last_status;
+                        const auto deadline =
+                            std::chrono::steady_clock::now() +
+                            std::chrono::minutes(30);
+                        auto last_ping =
+                            std::chrono::steady_clock::now();
+
+                        while (std::chrono::steady_clock::now() <
+                                   deadline) {
+                            if (deps.reader) {
+                                auto runs =
+                                    deps.reader->query_recent_runs(50);
+                                for (const auto& r : runs) {
+                                    auto it =
+                                        last_status.find(r.run_id);
+                                    bool is_new =
+                                        it == last_status.end();
+                                    bool changed =
+                                        !is_new &&
+                                        it->second != r.status;
+                                    if (is_new || changed) {
+                                        last_status[r.run_id] =
+                                            r.status;
+                                        json ev = run_json(r);
+                                        ev["kind"] = is_new
+                                            ? "run_started"
+                                            : "run_finished";
+                                        std::string msg =
+                                            "data: " + ev.dump() +
+                                            "\n\n";
+                                        if (!sink.write(msg.data(),
+                                                        msg.size()))
+                                            return false;
+                                    }
+                                }
+                            }
+
+                            // Keep-alive comment every ~15s.
+                            if (std::chrono::steady_clock::now() -
+                                    last_ping >
+                                std::chrono::seconds(15)) {
+                                if (!sink.write(": ping\n\n", 8))
+                                    return false;
+                                last_ping =
+                                    std::chrono::steady_clock::now();
+                            }
+
+                            std::this_thread::sleep_for(
+                                std::chrono::seconds(2));
+                        }
+                        return false;
+                    });
+            });
+
+        // ── SSE: Watch event stream (§3.8.6) ───────────────────────
+        svr.Get("/sse/events",
+            [this](const httplib::Request&, httplib::Response& res) {
+                res.set_header("Cache-Control", "no-cache");
+                res.set_header("Connection", "keep-alive");
+                if (config.enable_cors) {
+                    res.set_header("Access-Control-Allow-Origin",
+                                   config.cors_origins);
+                }
+
+                res.set_chunked_content_provider(
+                    "text/event-stream",
+                    [this](std::size_t, httplib::DataSink& sink) -> bool {
+                        int64_t cursor = deps.reader
+                            ? deps.reader->query_max_event_id()
+                            : 0;
+                        const auto deadline =
+                            std::chrono::steady_clock::now() +
+                            std::chrono::minutes(30);
+                        auto last_ping =
+                            std::chrono::steady_clock::now();
+
+                        while (std::chrono::steady_clock::now() <
+                                   deadline) {
+                            if (deps.reader) {
+                                auto events =
+                                    deps.reader
+                                        ->query_watch_events_since(
+                                            cursor, 100);
+                                for (const auto& e : events) {
+                                    auto files =
+                                        files_display(
+                                            e.affected_files_json);
+                                    json ev{
+                                        {"kind", "watch_event"},
+                                        {"event_uid", e.event_uid},
+                                        {"watch_group", e.watch_group},
+                                        {"rule_name", e.rule_name},
+                                        {"event_type", e.event_type},
+                                        {"severity", e.severity},
+                                        {"affected_files", files.list},
+                                        {"created_at",
+                                         platform::format_display_time(
+                                             e.created_at, tz)},
+                                    };
+                                    std::string msg =
+                                        "data: " + ev.dump() + "\n\n";
+                                    if (!sink.write(msg.data(),
+                                                    msg.size()))
+                                        return false;
+                                }
+                                if (!events.empty()) {
+                                    cursor = deps.reader
+                                        ->query_max_event_id();
+                                }
+                            }
+
+                            if (std::chrono::steady_clock::now() -
+                                    last_ping >
+                                std::chrono::seconds(15)) {
+                                if (!sink.write(": ping\n\n", 8))
+                                    return false;
+                                last_ping =
+                                    std::chrono::steady_clock::now();
+                            }
+
+                            std::this_thread::sleep_for(
+                                std::chrono::seconds(2));
+                        }
+                        return false;
+                    });
+            });
+
         // ── SSE: Log stream (push-based via RunStream) ────────────
         svr.Get(R"(/sse/logs/([^/]+))",
             [this](const httplib::Request& req,
