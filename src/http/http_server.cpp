@@ -46,6 +46,7 @@
 #ifdef KAIROS_HTTP_ENABLED
 
 #include "kairos/http/http_server.hpp"
+#include "kairos/http/dag_svg.hpp"
 #include "kairos/http/web_catalog.hpp"
 
 #include "kairos/config/yaml_loader.hpp"
@@ -988,6 +989,11 @@ struct HttpServer::Impl {
                     }
                     data["last_runs"] = std::move(last_runs);
 
+                    // DAG visualization (§3.7): definition view, nodes
+                    // link to their job pages.
+                    data["dag_svg"] = dag::render_dag_svg(
+                        wf->dag, "/jobs");
+
                     send_page(res, "templates/workflows/detail.html",
                               std::move(data),
                               "Workflow " + wf->workflow_name,
@@ -1236,6 +1242,22 @@ struct HttpServer::Impl {
                         });
                     }
                     data["logs"] = std::move(logs);
+
+                    // DAG visualization (§3.7): run view, nodes colored
+                    // by per-job status when the target is a workflow.
+                    data["dag_svg"] = "";
+                    if (auto reg = registry()) {
+                        if (const auto* wf = reg->workflow(
+                                detail->run.target_id)) {
+                            std::map<std::string, dag::NodeStatus> sts;
+                            for (const auto& jd : detail->jobs) {
+                                sts[jd.job_id] = dag::NodeStatus{
+                                    jd.status, jd.duration_ms};
+                            }
+                            data["dag_svg"] = dag::render_dag_svg(
+                                wf->dag, "/jobs", sts);
+                        }
+                    }
 
                     send_page(res, "templates/runs/detail.html",
                               std::move(data),

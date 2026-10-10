@@ -30,6 +30,13 @@
   </div>
 </div>
 
+{% if dag_svg != "" %}
+<div class="card p-3 mb-4" data-kairos-nofilter>
+  <h5>DAG <span class="text-muted small">— jobs colored by status</span></h5>
+  <div class="table-responsive">{{ dag_svg }}</div>
+</div>
+{% endif %}
+
 <div class="row g-4">
   <div class="col-lg-8">
     <div class="card p-3 mb-4">

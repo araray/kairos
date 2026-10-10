@@ -12,6 +12,7 @@
 #ifdef KAIROS_HTTP_ENABLED
 
 #include "kairos/http/http_server.hpp"
+#include "kairos/http/dag_svg.hpp"
 #include "kairos/config/yaml_loader.hpp"
 #include "kairos/engine/trigger_types.hpp"
 #include "kairos/observability/metrics.hpp"
@@ -27,6 +28,7 @@
 #include <nlohmann/json.hpp>
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <chrono>
 #include <filesystem>
 #include <future>
@@ -1417,6 +1419,103 @@ TEST_F(HttpServerTest, SseEventsStreamEmitsNewEvents) {
     EXPECT_NE(received.find("watch_event"), std::string::npos);
     EXPECT_NE(received.find("live-group"), std::string::npos);
     EXPECT_NE(received.find("/var/log/live.log"), std::string::npos);
+
+    ss.request_stop();
+    server->stop();
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  Phase 11 — DAG visualization (Roadmap §3.7)
+// ═══════════════════════════════════════════════════════════════════════════
+
+TEST_F(HttpServerTest, DagSvgRender) {
+    set_registry_from_yaml(R"(
+name: dag-flow
+jobs:
+  build:
+    steps:
+      - name: b
+        run: "true"
+  test:
+    needs: [build]
+    steps:
+      - name: t
+        run: "true"
+  deploy:
+    needs: [test]
+    steps:
+      - name: d
+        run: "true"
+)");
+    const auto* wf = registry_->workflow_by_name("dag-flow");
+    ASSERT_NE(wf, nullptr);
+
+    auto svg = dag::render_dag_svg(wf->dag, "/jobs");
+    EXPECT_NE(svg.find("class=\"dag-svg\""), std::string::npos);
+    // All three nodes present with links.
+    EXPECT_NE(svg.find(">build</text>"), std::string::npos);
+    EXPECT_NE(svg.find(">test</text>"), std::string::npos);
+    EXPECT_NE(svg.find(">deploy</text>"), std::string::npos);
+    EXPECT_NE(svg.find("href=\"/jobs/"), std::string::npos);
+    // Two dependency edges.
+    EXPECT_EQ(std::count(svg.begin(), svg.end(), 'C'),
+              2);  // two cubic bezier segments start with 'C'
+}
+
+TEST_F(HttpServerTest, DagSvgStatusesColorNodes) {
+    set_registry_from_yaml(R"(
+name: dag-flow
+jobs:
+  build:
+    steps:
+      - name: b
+        run: "true"
+  test:
+    needs: [build]
+    steps:
+      - name: t
+        run: "true"
+)");
+    const auto* wf = registry_->workflow_by_name("dag-flow");
+    ASSERT_NE(wf, nullptr);
+
+    std::string build_id, test_id;
+    for (const auto& j : wf->jobs) {
+        if (j.job_name == "build") build_id = j.job_id;
+        if (j.job_name == "test") test_id = j.job_id;
+    }
+    std::map<std::string, dag::NodeStatus> sts{
+        {build_id, {"SUCCESS", 120}},
+        {test_id, {"FAILURE", 300}},
+    };
+    auto svg = dag::render_dag_svg(wf->dag, "", sts);
+    EXPECT_NE(svg.find("dag-success"), std::string::npos);
+    EXPECT_NE(svg.find("dag-failure"), std::string::npos);
+    EXPECT_NE(svg.find("SUCCESS · 120ms"), std::string::npos);
+    // No link base → no anchors.
+    EXPECT_EQ(svg.find("href="), std::string::npos);
+}
+
+TEST_F(HttpServerTest, WorkflowDetailShowsDag) {
+    set_registry_from_yaml(R"(
+name: dag-flow
+jobs:
+  build:
+    steps:
+      - name: b
+        run: "true"
+)");
+    auto server = make_server(18476);
+    std::stop_source ss;
+    server->start(ss.get_token());
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+
+    httplib::Client cli("http://127.0.0.1:18476");
+    auto res = cli.Get("/workflows/dag-flow");
+    ASSERT_TRUE(res);
+    EXPECT_EQ(res->status, 200);
+    EXPECT_NE(res->body.find("class=\"dag-svg\""), std::string::npos);
+    EXPECT_NE(res->body.find(">build</text>"), std::string::npos);
 
     ss.request_stop();
     server->stop();

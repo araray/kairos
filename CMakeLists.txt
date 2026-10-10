@@ -203,6 +203,7 @@ if(KAIROS_HTTP)
     target_sources(kairos PRIVATE
         src/http/http_server.cpp
         src/http/web_catalog.cpp
+        src/http/dag_svg.cpp
         ${KAIROS_WEB_GENERATED_SRC}
     )
     target_compile_definitions(kairos PRIVATE KAIROS_HTTP_ENABLED)

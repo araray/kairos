@@ -566,6 +566,7 @@ if(KAIROS_HTTP)
     target_sources(test_http_server PRIVATE
         ${CMAKE_SOURCE_DIR}/src/http/http_server.cpp
         ${CMAKE_SOURCE_DIR}/src/http/web_catalog.cpp
+        ${CMAKE_SOURCE_DIR}/src/http/dag_svg.cpp
         ${TEST_WEB_GENERATED_SRC}
     )
     target_link_libraries(test_http_server PRIVATE httplib::httplib)
@@ -628,6 +629,7 @@ if(KAIROS_HTTP)
     target_sources(test_http_integration PRIVATE
         ${CMAKE_SOURCE_DIR}/src/http/http_server.cpp
         ${CMAKE_SOURCE_DIR}/src/http/web_catalog.cpp
+        ${CMAKE_SOURCE_DIR}/src/http/dag_svg.cpp
         ${TEST_WEB_GENERATED_SRC}
     )
     target_link_libraries(test_http_integration PRIVATE httplib::httplib)
