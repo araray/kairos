@@ -52,7 +52,7 @@
           <td class="text-muted">{{ run.trigger_type }}</td>
           <td class="fit">{{ run.start_ts }}</td>
           <td class="fit">{{ run.duration_ms }}ms</td>
-          <td>{% for t in run.tags %}<span class="kairos-tag">{{ t }}</span>{% endfor %}</td>
+          <td>{% for t in run.tags %}<a class="kairos-tag" href="/runs?tag={{ t }}" title="Filter runs by tag">{{ t }}</a>{% endfor %}</td>
         </tr>
 {% endfor %}
 {% if length(runs) == 0 %}

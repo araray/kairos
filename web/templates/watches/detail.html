@@ -17,6 +17,8 @@
     {% for t in group.tags %}<span class="kairos-tag">{{ t }}</span>{% endfor %}
   </div>
   <div class="d-flex gap-2">
+    <a href="/watches/{{ group.name }}/edit" class="btn btn-outline-info btn-sm">Edit</a>
+    <button class="btn btn-outline-danger btn-sm" type="button" data-kairos-action="delete-entity" data-kind="watch" data-name="{{ group.name }}">Delete</button>
     <a href="/api/v1/watches/{{ group.name }}/yaml" class="btn btn-outline-info btn-sm">YAML</a>
     <a href="/events?watch_group={{ group.name }}" class="btn btn-outline-info btn-sm">Events</a>
   </div>

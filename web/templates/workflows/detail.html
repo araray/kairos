@@ -17,6 +17,9 @@
     {% for t in wf.tags %}<span class="kairos-tag">{{ t }}</span>{% endfor %}
   </div>
   <div class="d-flex gap-2">
+    <button class="btn btn-info btn-sm" type="button" data-kairos-action="run-workflow" data-name="{{ wf.name }}">▶ Run now</button>
+    <a href="/workflows/{{ wf.name }}/edit" class="btn btn-outline-info btn-sm">Edit</a>
+    <button class="btn btn-outline-danger btn-sm" type="button" data-kairos-action="delete-entity" data-kind="workflow" data-name="{{ wf.name }}">Delete</button>
     <a href="/api/v1/workflows/{{ wf.name }}/yaml" class="btn btn-outline-info btn-sm">YAML</a>
     <a href="/api/v1/explain/{{ wf.name }}" class="btn btn-outline-info btn-sm">Explain JSON</a>
     <a href="/runs?workflow={{ wf.name }}" class="btn btn-outline-info btn-sm">Run History</a>

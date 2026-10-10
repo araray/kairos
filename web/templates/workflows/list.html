@@ -1,7 +1,10 @@
 <!-- Workflows list (wrapped by base.html) -->
 <!-- Data: workflows[{name, id, job_count, tags[], trigger_summary, last_status, last_badge, last_when}] -->
 
-<h4 class="page-header">Workflows</h4>
+<h4 class="page-header">
+  Workflows
+  <a href="/workflows/new" class="btn btn-info btn-sm">+ New Workflow</a>
+</h4>
 
 <div class="card p-3">
   <div class="table-responsive">
@@ -19,7 +22,7 @@
           <td class="fit">{{ wf.job_count }}</td>
           <td class="text-muted">{{ wf.trigger_summary }}</td>
           <td>
-{% for t in wf.tags %}<span class="kairos-tag">{{ t }}</span>{% endfor %}
+{% for t in wf.tags %}<span class="kairos-tag" data-filter-tag="{{ t }}" title="Click to filter by tag">{{ t }}</span>{% endfor %}
           </td>
           <td>
 {% if wf.last_status != "" %}

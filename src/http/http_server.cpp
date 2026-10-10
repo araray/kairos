@@ -837,6 +837,55 @@ struct HttpServer::Impl {
             }
         });
 
+        // ── Workflow YAML editor (§3.8.3/§3.8.4) ──────────────────
+        svr.Get("/workflows/new",
+            [this](const httplib::Request&, httplib::Response& res) {
+                json data;
+                data["mode"] = "new";
+                data["name"] = "";
+                data["kind"] = "workflow";
+                data["yaml"] =
+                    "name: my-workflow\n"
+                    "tags: []\n"
+                    "jobs:\n"
+                    "  build:\n"
+                    "    steps:\n"
+                    "      - name: do-it\n"
+                    "        run: echo hello\n";
+                data["save_url"] = "/api/v1/workflows";
+                data["save_method"] = "POST";
+                send_page(res, "templates/workflows/edit.html",
+                          std::move(data), "New Workflow", "workflows");
+            });
+
+        svr.Get(R"(/workflows/([^/]+)/edit)",
+            [this](const httplib::Request& req, httplib::Response& res) {
+                auto name = req.matches[1].str();
+                auto reg = registry();
+                if (!reg) {
+                    send_error_page(res, 503, "No Registry",
+                                    "Workflow registry not available.");
+                    return;
+                }
+                const engine::WorkflowDef* wf = reg->workflow_by_name(name);
+                if (!wf) wf = reg->workflow(name);
+                if (!wf) {
+                    send_error_page(res, 404, "Not Found",
+                                    "Workflow '" + name + "' not found.");
+                    return;
+                }
+                json data;
+                data["mode"] = "edit";
+                data["name"] = wf->workflow_name;
+                data["kind"] = "workflow";
+                data["yaml"] = yaml_source(wf->source_path);
+                data["save_url"] = "/api/v1/workflows/" + wf->workflow_name;
+                data["save_method"] = "PUT";
+                send_page(res, "templates/workflows/edit.html",
+                          std::move(data),
+                          "Edit " + wf->workflow_name, "workflows");
+            });
+
         // ── Workflow detail ───────────────────────────────────────
         svr.Get(R"(/workflows/([^/]+))",
             [this](const httplib::Request& req, httplib::Response& res) {
@@ -1327,6 +1376,62 @@ struct HttpServer::Impl {
                 send_error_page(res, 500, "Render Error", e.what());
             }
         });
+
+        // ── Watch group YAML editor (§3.8.3/§3.8.4) ───────────────
+        svr.Get("/watches/new",
+            [this](const httplib::Request&, httplib::Response& res) {
+                json data;
+                data["mode"] = "new";
+                data["name"] = "";
+                data["kind"] = "watch";
+                data["yaml"] =
+                    "watch_groups:\n"
+                    "  - name: my-watch\n"
+                    "    watch_items:\n"
+                    "      - \"/tmp/**/*.log\"\n"
+                    "    rules:\n"
+                    "      - name: created\n"
+                    "        condition: \"event.type == 'created'\"\n"
+                    "        severity: info\n";
+                data["save_url"] = "/api/v1/watches";
+                data["save_method"] = "POST";
+                send_page(res, "templates/watches/edit.html",
+                          std::move(data), "New Watch Group", "watches");
+            });
+
+        svr.Get(R"(/watches/([^/]+)/edit)",
+            [this](const httplib::Request& req, httplib::Response& res) {
+                auto name = req.matches[1].str();
+                auto reg = registry();
+                if (!reg) {
+                    send_error_page(res, 503, "No Registry",
+                                    "Workflow registry not available.");
+                    return;
+                }
+                const watch::WatchGroupDef* group = nullptr;
+                for (const auto& g : reg->watch_groups()) {
+                    if (g.group_name == name || g.group_id == name) {
+                        group = &g;
+                        break;
+                    }
+                }
+                if (!group) {
+                    send_error_page(res, 404, "Not Found",
+                                    "Watch group '" + name +
+                                    "' not found.");
+                    return;
+                }
+                json data;
+                data["mode"] = "edit";
+                data["name"] = group->group_name;
+                data["kind"] = "watch";
+                data["yaml"] = yaml_source(group->source_path);
+                data["save_url"] = "/api/v1/watches/" + group->group_name;
+                data["save_method"] = "PUT";
+                send_page(res, "templates/watches/edit.html",
+                          std::move(data),
+                          "Edit " + group->group_name, "watches");
+            });
 
         // ── Watch group detail ────────────────────────────────────
         svr.Get(R"(/watches/([^/]+))",

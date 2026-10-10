@@ -1,0 +1,46 @@
+<!-- Workflow YAML editor (wrapped by base.html) — Roadmap §3.8.3/§3.8.4 -->
+<!-- Data: mode ("new"|"edit"), name, yaml, kind ("workflow") -->
+
+<nav aria-label="breadcrumb">
+  <ol class="breadcrumb">
+    <li class="breadcrumb-item"><a href="/workflows">Workflows</a></li>
+{% if mode == "new" %}
+    <li class="breadcrumb-item active">New</li>
+{% else %}
+    <li class="breadcrumb-item"><a href="/workflows/{{ name }}">{{ name }}</a></li>
+    <li class="breadcrumb-item active">Edit</li>
+{% endif %}
+  </ol>
+</nav>
+
+<div class="page-header">
+  <h4>
+{% if mode == "new" %}
+    New Workflow
+{% else %}
+    Edit Workflow — {{ name }}
+{% endif %}
+  </h4>
+  <div class="d-flex gap-2">
+    <button id="btn-validate" class="btn btn-outline-secondary btn-sm" type="button">Validate</button>
+    <button id="btn-revert" class="btn btn-outline-secondary btn-sm" type="button">Revert</button>
+    <button id="btn-save" class="btn btn-outline-info btn-sm" type="button">Save &amp; Reload</button>
+  </div>
+</div>
+
+<div class="card p-3">
+  <div class="d-flex justify-content-between align-items-center mb-2">
+    <span class="text-muted small">YAML — validated live against the Kairos schema; Ctrl+S saves</span>
+    <span id="editor-status" class="small text-muted"></span>
+  </div>
+  <textarea id="yaml-editor" class="yaml-block w-100" rows="24" spellcheck="false" style="resize: vertical;"
+            data-validate-url="/api/v1/config/validate"
+            data-save-url="{{ save_url }}"
+            data-save-method="{{ save_method }}"
+            data-kind="workflow"
+            data-name="{{ name }}">{{ yaml }}</textarea>
+  <ul id="editor-errors" class="mt-2 mb-0 small" style="list-style: none; padding-left: 0;"></ul>
+</div>
+
+<script src="/static/js/editor.js"></script>
+<script src="/static/js/actions.js"></script>

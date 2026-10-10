@@ -19,11 +19,14 @@
     {% for t in tags %}<span class="kairos-tag">{{ t }}</span>{% endfor %}
   </div>
   <div class="d-flex gap-2">
+{% if is_running %}
+    <button class="btn btn-outline-warning btn-sm" type="button" data-kairos-action="cancel-run" data-run="{{ run_id }}">✕ Cancel</button>
+    <span class="badge badge-primary align-self-center">● live</span>
+{% else %}
+    <button class="btn btn-info btn-sm" type="button" data-kairos-action="run-workflow" data-name="{{ target_name }}">↻ Re-run</button>
+{% endif %}
     <a href="/api/v1/runs/{{ run_id }}" class="btn btn-outline-info btn-sm">JSON</a>
     <a href="/api/v1/runs/{{ run_id }}/logs" class="btn btn-outline-info btn-sm">Logs API</a>
-{% if is_running %}
-    <span class="badge badge-primary align-self-center">● live</span>
-{% endif %}
   </div>
 </div>
 

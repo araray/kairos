@@ -1281,6 +1281,69 @@ TEST_F(HttpServerTest, WriteApi_DisabledWithoutDirs) {
     server->stop();
 }
 
+TEST_F(HttpServerTest, EditorPagesRender) {
+    set_registry_from_yaml(kValidWfYaml);
+
+    auto server = make_server(18472);
+    std::stop_source ss;
+    server->start(ss.get_token());
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+
+    httplib::Client cli("http://127.0.0.1:18472");
+
+    // New-workflow editor: starter template + textarea.
+    auto wf_new = cli.Get("/workflows/new");
+    ASSERT_TRUE(wf_new);
+    EXPECT_EQ(wf_new->status, 200);
+    EXPECT_NE(wf_new->body.find("yaml-editor"), std::string::npos);
+    EXPECT_NE(wf_new->body.find("my-workflow"), std::string::npos);
+    EXPECT_NE(wf_new->body.find("btn-save"), std::string::npos);
+
+    // Edit page for the loaded workflow.
+    auto wf_edit = cli.Get("/workflows/api-made/edit");
+    ASSERT_TRUE(wf_edit);
+    EXPECT_EQ(wf_edit->status, 200);
+    EXPECT_NE(wf_edit->body.find("api-made"), std::string::npos);
+
+    // New-watch editor.
+    auto wg_new = cli.Get("/watches/new");
+    ASSERT_TRUE(wg_new);
+    EXPECT_EQ(wg_new->status, 200);
+    EXPECT_NE(wg_new->body.find("watch_groups:"), std::string::npos);
+
+    ss.request_stop();
+    server->stop();
+}
+
+TEST_F(HttpServerTest, ActionButtonsPresent) {
+    set_registry_from_yaml(kValidWfYaml);
+    seed_run("run-dddd11112222333344445555666677788899",
+             "api-made", "RUNNING");
+
+    auto server = make_server(18473);
+    std::stop_source ss;
+    server->start(ss.get_token());
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+
+    httplib::Client cli("http://127.0.0.1:18473");
+
+    // Workflow detail: Run / Edit / Delete buttons.
+    auto wf = cli.Get("/workflows/api-made");
+    ASSERT_TRUE(wf);
+    EXPECT_NE(wf->body.find("run-workflow"), std::string::npos);
+    EXPECT_NE(wf->body.find("delete-entity"), std::string::npos);
+    EXPECT_NE(wf->body.find("/workflows/api-made/edit"),
+              std::string::npos);
+
+    // Run detail: Cancel button for a RUNNING run.
+    auto run = cli.Get("/runs/run-dddd");
+    ASSERT_TRUE(run);
+    EXPECT_NE(run->body.find("cancel-run"), std::string::npos);
+
+    ss.request_stop();
+    server->stop();
+}
+
 }  // namespace
 }  // namespace kairos::http
 
