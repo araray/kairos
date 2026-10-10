@@ -17,6 +17,7 @@ namespace kairos::config {
 namespace {
 
 namespace fs = std::filesystem;
+using kairos::engine::NotificationDef;
 using kairos::engine::RetryPolicy;
 
 // ── Helpers ─────────────────────────────────────────────────────────────
@@ -1169,7 +1170,7 @@ watch_groups:
 // ═══════════════════════════════════════════════════════════════════════════
 
 TEST(YamlLoaderTest, ParsesWorkflowNotifications) {
-    auto r = load_workflow_string(R"(
+    auto r = load_workflow_string(R"yaml(
 name: notify-flow
 notifications:
   on_failure:
@@ -1185,7 +1186,7 @@ jobs:
   a:
     steps:
       - run: "true"
-)");
+)yaml");
     ASSERT_TRUE(r.ok()) << (r.errors.empty() ? "?" : r.errors[0].message);
     const auto& n = r.workflows[0].notifications;
     ASSERT_EQ(n.on_failure.size(), 2u);
