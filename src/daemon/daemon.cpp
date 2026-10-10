@@ -805,6 +805,7 @@ int run_daemon(std::shared_ptr<const kairos::config::ConfigState> config) {
         http_deps.run_stream = &run_stream;
         // Write API (§3.8.1/§3.8.2): YAML dirs, audit trail, cancellation.
         http_deps.db_writer = &db_writer;
+        http_deps.tag_store = &tag_store;
         http_deps.workflows_dir = resolve_yaml_dir(
             config->config_file_path,
             config->global.get<std::string>(

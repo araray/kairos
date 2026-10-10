@@ -1521,6 +1521,73 @@ jobs:
     server->stop();
 }
 
+// ═══════════════════════════════════════════════════════════════════════════
+//  Phase 11 — KEL playground (§3.8.7) and run comparison (§3.8.6)
+// ═══════════════════════════════════════════════════════════════════════════
+
+TEST_F(HttpServerTest, KelEvalEndpoint) {
+    auto server = make_server(18477);
+    std::stop_source ss;
+    server->start(ss.get_token());
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+
+    httplib::Client cli("http://127.0.0.1:18477");
+
+    auto ok = cli.Post("/api/v1/kel/eval",
+                       R"({"expr": "2 + 3 * 4"})", "application/json");
+    ASSERT_TRUE(ok);
+    EXPECT_EQ(ok->status, 200);
+    auto j = json::parse(ok->body);
+    EXPECT_EQ(j["value"], 14);
+    EXPECT_EQ(j["type"], "int");
+
+    auto bad = cli.Post("/api/v1/kel/eval",
+                        R"({"expr": "1 +"})", "application/json");
+    ASSERT_TRUE(bad);
+    EXPECT_EQ(bad->status, 400);
+    EXPECT_TRUE(json::parse(bad->body).contains("error"));
+
+    auto missing = cli.Post("/api/v1/kel/eval", R"({})", "application/json");
+    ASSERT_TRUE(missing);
+    EXPECT_EQ(missing->status, 400);
+
+    // The playground page itself renders.
+    auto page = cli.Get("/kel");
+    ASSERT_TRUE(page);
+    EXPECT_EQ(page->status, 200);
+    EXPECT_NE(page->body.find("kel-expr"), std::string::npos);
+
+    ss.request_stop();
+    server->stop();
+}
+
+TEST_F(HttpServerTest, RunComparisonPage) {
+    seed_run("run-ffff11112222333344445555666677788899",
+             "ci-pipeline", "SUCCESS");
+    seed_run("run-ffff22223333444455556666777788899",
+             "ci-pipeline", "FAILURE");
+
+    auto server = make_server(18478);
+    std::stop_source ss;
+    server->start(ss.get_token());
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+
+    httplib::Client cli("http://127.0.0.1:18478");
+    auto res = cli.Get("/runs/run-ffff1111/vs/run-ffff2222");
+    ASSERT_TRUE(res);
+    EXPECT_EQ(res->status, 200);
+    EXPECT_NE(res->body.find("Run Comparison"), std::string::npos);
+    EXPECT_NE(res->body.find("SUCCESS"), std::string::npos);
+    EXPECT_NE(res->body.find("FAILURE"), std::string::npos);
+
+    auto missing = cli.Get("/runs/run-zzzz/vs/run-ffff1111");
+    ASSERT_TRUE(missing);
+    EXPECT_EQ(missing->status, 404);
+
+    ss.request_stop();
+    server->stop();
+}
+
 }  // namespace
 }  // namespace kairos::http
 

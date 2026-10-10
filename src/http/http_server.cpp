@@ -52,6 +52,8 @@
 #include "kairos/config/yaml_loader.hpp"
 #include "kairos/core/version.hpp"
 #include "kairos/engine/explain.hpp"
+#include "kairos/kel/errors.hpp"
+#include "kairos/kel/evaluator.hpp"
 #include "kairos/platform/timezone.hpp"
 
 // cpp-httplib — header-only HTTP server.
@@ -1511,6 +1513,110 @@ struct HttpServer::Impl {
                 }
             });
 
+        // ── KEL playground (§3.8.7) ────────────────────────────────
+        svr.Get("/kel",
+            [this](const httplib::Request&, httplib::Response& res) {
+                json data;
+                send_page(res, "templates/kel.html", std::move(data),
+                          "KEL Playground", "kel");
+            });
+
+        // ── Run comparison (§3.8.6) ────────────────────────────────
+        svr.Get(R"(/runs/([^/]+)/vs/([^/]+))",
+            [this](const httplib::Request& req, httplib::Response& res) {
+                auto a_in = req.matches[1].str();
+                auto b_in = req.matches[2].str();
+                try {
+                    if (!deps.reader) {
+                        send_error_page(res, 503, "No Database",
+                                        "Run history is not available.");
+                        return;
+                    }
+                    std::vector<std::string> candidates;
+                    auto a_id = resolve_run_id(a_in, candidates);
+                    if (a_id.empty()) {
+                        send_error_page(res, 404, "Not Found",
+                                        "Run '" + a_in + "' not found.");
+                        return;
+                    }
+                    auto b_id = resolve_run_id(b_in, candidates);
+                    if (b_id.empty()) {
+                        send_error_page(res, 404, "Not Found",
+                                        "Run '" + b_in + "' not found.");
+                        return;
+                    }
+
+                    auto da = deps.reader->get_run_detail(a_id);
+                    auto db_ = deps.reader->get_run_detail(b_id);
+                    if (!da || !db_) {
+                        send_error_page(res, 404, "Not Found",
+                                        "Run detail unavailable.");
+                        return;
+                    }
+
+                    // Union of job names across both runs, in the
+                    // order they appear in A then B.
+                    std::vector<std::string> job_order;
+                    std::map<std::string, bool> seen;
+                    for (const auto& j : da->jobs)
+                        if (seen.emplace(j.job_name, true).second)
+                            job_order.push_back(j.job_name);
+                    for (const auto& j : db_->jobs)
+                        if (seen.emplace(j.job_name, true).second)
+                            job_order.push_back(j.job_name);
+
+                    auto find_job =
+                        [](const persist::QueryReader::RunDetail& d,
+                           const std::string& name)
+                        -> const persist::QueryReader::JobDetail* {
+                        for (const auto& j : d.jobs)
+                            if (j.job_name == name) return &j;
+                        return nullptr;
+                    };
+
+                    json data;
+                    data["a"] = run_json(da->run);
+                    data["b"] = run_json(db_->run);
+                    data["a_id"] = a_id;
+                    data["b_id"] = b_id;
+
+                    json rows = json::array();
+                    for (const auto& name : job_order) {
+                        const auto* ja = find_job(*da, name);
+                        const auto* jb = find_job(*db_, name);
+                        json row;
+                        row["job"] = name;
+                        row["a_status"] = ja ? ja->status : "—";
+                        row["a_badge"] =
+                            ja ? status_to_badge(ja->status) : "secondary";
+                        row["a_exit"] = ja ? std::to_string(ja->exit_code)
+                                           : "—";
+                        row["a_dur"] =
+                            ja ? std::to_string(ja->duration_ms) + "ms"
+                               : "—";
+                        row["b_status"] = jb ? jb->status : "—";
+                        row["b_badge"] =
+                            jb ? status_to_badge(jb->status) : "secondary";
+                        row["b_exit"] = jb ? std::to_string(jb->exit_code)
+                                           : "—";
+                        row["b_dur"] =
+                            jb ? std::to_string(jb->duration_ms) + "ms"
+                               : "—";
+                        row["same"] =
+                            ja && jb && ja->status == jb->status &&
+                            ja->exit_code == jb->exit_code;
+                        rows.push_back(std::move(row));
+                    }
+                    data["jobs"] = std::move(rows);
+
+                    send_page(res, "templates/runs/compare.html",
+                              std::move(data),
+                              "Compare runs", "runs");
+                } catch (const std::exception& e) {
+                    spdlog::error("Run compare error: {}", e.what());
+                    send_error_page(res, 500, "Render Error", e.what());
+                }
+            });
         // ── Triggers list ─────────────────────────────────────────
         svr.Get("/triggers", [this](const httplib::Request&,
                                      httplib::Response& res) {
@@ -2628,6 +2734,90 @@ struct HttpServer::Impl {
                     {"cancelled", cancelled},
                     {"status", cancelled ? "cancelling" : "not_active"},
                 }.dump(), "application/json");
+                set_cors(res);
+            });
+
+        // ── KEL playground eval (§3.8.7) ───────────────────────────
+        // Body: {"expr": "<expression>"} (JSON).
+        svr.Post("/api/v1/kel/eval",
+            [this](const httplib::Request& req, httplib::Response& res) {
+                if (!check_auth(req, res)) return;
+
+                std::string expr;
+                try {
+                    auto body = json::parse(req.body);
+                    expr = body.value("expr", std::string{});
+                } catch (...) {
+                    res.status = 400;
+                    res.set_content(R"({"error":"Body must be JSON: {\"expr\": \"...\"}"})",
+                                    "application/json");
+                    return;
+                }
+                if (expr.empty()) {
+                    res.status = 400;
+                    res.set_content(R"({"error":"Missing expr"})",
+                                    "application/json");
+                    return;
+                }
+
+                try {
+                    kel::EvalContext ctx = kel::make_default_context();
+                    if (deps.reader) {
+                        deps.reader->register_kel_bindings(ctx);
+                        deps.reader
+                            ->register_watch_kel_bindings(ctx);
+                    }
+                    if (deps.tag_store) {
+                        auto* ts = deps.tag_store;
+                        ctx.functions["has_tag"] =
+                            [ts](const std::vector<kel::KelValue>& args)
+                                -> kel::KelValue {
+                            if (args.size() != 2 ||
+                                !args[0].is_string() ||
+                                !args[1].is_string()) {
+                                throw kel::KelEvalError(
+                                    "has_tag() requires two string "
+                                    "arguments (entity_id, tag)");
+                            }
+                            const auto& eid = args[0].as_string();
+                            const auto& tag = args[1].as_string();
+                            static const std::string types[] = {
+                                "workflow", "job", "watch_group",
+                                "trigger"};
+                            for (const auto& t : types) {
+                                if (ts->has_tag(t, eid, tag))
+                                    return kel::KelValue(true);
+                            }
+                            return kel::KelValue(false);
+                        };
+                    }
+
+                    kel::EvalLimits limits;
+                    auto result =
+                        kel::eval_expression(expr, ctx, limits);
+
+                    json j;
+                    j["expression"] = expr;
+                    j["type"] = result.type_name();
+                    if (result.is_bool()) {
+                        j["value"] = result.as_bool();
+                    } else if (result.is_int()) {
+                        j["value"] = result.as_int();
+                    } else if (result.is_float()) {
+                        j["value"] = result.as_float();
+                    } else if (result.is_string()) {
+                        j["value"] = result.as_string();
+                    } else {
+                        j["value"] = result.to_display_string();
+                    }
+                    res.set_content(j.dump(2), "application/json");
+                } catch (const std::exception& e) {
+                    res.status = 400;
+                    res.set_content(json{
+                        {"expression", expr},
+                        {"error", e.what()},
+                    }.dump(2), "application/json");
+                }
                 set_cors(res);
             });
 

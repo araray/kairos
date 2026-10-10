@@ -24,6 +24,7 @@
 #include "kairos/observability/metrics.hpp"
 #include "kairos/persist/db_writer.hpp"
 #include "kairos/persist/query_reader.hpp"
+#include "kairos/persist/tag_store.hpp"
 
 #include <cstdint>
 #include <filesystem>
@@ -84,6 +85,10 @@ struct HttpDependencies {
     /// Async DB writer for audit entries (Roadmap §3.8.2).
     /// Null disables the audit trail (writes still succeed).
     persist::DBWriter* db_writer = nullptr;
+
+    /// Optional tag store — enables has_tag() in the KEL playground
+    /// (§3.8.7). Null degrades gracefully.
+    persist::TagStore* tag_store = nullptr;
 
     /// Workflow YAML directory — enables the workflow write API.
     /// Empty path disables POST/PUT/DELETE (503).
