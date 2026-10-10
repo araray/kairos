@@ -1193,6 +1193,7 @@ POST   /api/v1/runs/{id}/cancel            # cancel a running run
 POST   /api/v1/config/reload               # reload configuration
 GET    /api/v1/audit                       # audit trail (who changed what)
 POST   /api/v1/kel/eval                    # {"expr": "..."} → {value, type}
+GET    /api/v1/runs/{id}/outputs            # captured ${{ }} outputs (§8)
 
 # Streaming
 GET  /sse/logs/{run_id}                    # live log stream (SSE)
@@ -1212,6 +1213,73 @@ RUN=$(curl -s -X POST http://127.0.0.1:8420/api/v1/workflows/backup/run \
       -d '' | jq -r .run_id)
 curl -s "http://127.0.0.1:8420/api/v1/runs/$RUN" | jq .status
 ```
+
+### 18.4 Workflow Intelligence (v0.2)
+
+**Env files (§11)** — jobs can load `.env` files; inline `env:` wins:
+
+```yaml
+jobs:
+  deploy:
+    env_file: [.env, .env.production]
+    env: { OVERRIDE: wins }
+```
+
+**Step outputs & variable passing (§8)** — steps append `KEY=VALUE`
+lines to `$KAIROS_OUTPUT`; later steps and jobs read them back:
+
+```yaml
+jobs:
+  build:
+    steps:
+      - name: compile
+        run: echo "VERSION=1.2.3" >> "$KAIROS_OUTPUT"
+  deploy:
+    needs: [build]
+    steps:
+      - run: deploy --version ${{ jobs.build.compile.VERSION }}
+```
+
+Job-scoped `${{ steps.<step>.KEY }}` and workflow-scoped
+`${{ jobs.<job>.<step>.KEY }}` are substituted server-side (unknown
+references fail the job with a precise error). Conditions can read the
+live run context with `output('job', 'step', 'key')`. Outputs are
+persisted (`GET /api/v1/runs/{id}/outputs`) and capped at 64 KiB per
+value / 1 MiB per run; invalid keys are dropped, not fatal.
+
+**Retries (§15.2)**:
+
+```yaml
+steps:
+  - run: curl -f https://api
+    retry:
+      max_attempts: 3
+      delay: 5s
+      backoff: exponential   # fixed | linear | exponential
+      retry_on: [1, 2]       # default: any non-zero exit
+```
+
+Each attempt is its own `step_runs` row (attempt 1-based).
+
+**Dry-run (§15.1)** — `kairos workflows run <id> --dry-run` executes
+the whole DAG with every step as a no-op that logs what would run;
+the run is recorded with trigger type `dry-run`.
+
+**Watch actions (§10)** — explicit action blocks with cooldowns:
+
+```yaml
+rules:
+  - name: new_package
+    condition: "event.type == 'created'"
+    action:
+      type: run_workflow      # or run_job
+      target: deploy_pipeline
+      cooldown: 60s
+```
+
+Triggered runs receive `KAIROS_TRIGGER_EVENT_TYPE`,
+`KAIROS_TRIGGER_WATCH_GROUP`, `KAIROS_TRIGGER_RULE`, and
+`KAIROS_TRIGGER_AFFECTED_FILES` (comma-separated).
 
 > **curl note:** always pass `-d ''` on bodiless POSTs. Plain
 > `curl -X POST` sends no `Content-Length` header, and the server then
