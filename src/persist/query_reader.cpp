@@ -1064,6 +1064,29 @@ std::vector<QueryReader::WatchEventRow> QueryReader::query_watch_events_since(
     return results;
 }
 
+int64_t QueryReader::count_stale_runs(int timeout_seconds) const {
+    // start_ts is ISO-8601 UTC; compare lexicographically against the
+    // cutoff in the same format.
+    auto cutoff_sys = std::chrono::system_clock::now() -
+                      std::chrono::seconds(timeout_seconds);
+    auto tt = std::chrono::system_clock::to_time_t(cutoff_sys);
+    std::tm tm{};
+#ifdef _WIN32
+    gmtime_s(&tm, &tt);
+#else
+    gmtime_r(&tt, &tm);
+#endif
+    char buf[24];
+    std::strftime(buf, sizeof(buf), "%Y-%m-%dT%H:%M:%S", &tm);
+
+    SQLite::Statement q(db_,
+        "SELECT COUNT(*) FROM runs "
+        "WHERE status = 'RUNNING' AND start_ts < ?");
+    q.bind(1, std::string(buf));
+    if (!q.executeStep()) return 0;
+    return q.getColumn(0).getInt64();
+}
+
 std::vector<QueryReader::AuditRow> QueryReader::query_audit_log(
     int limit) const
 {

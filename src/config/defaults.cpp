@@ -105,6 +105,15 @@ confy::Value build_kairos_defaults() {
                 {"read_timeout_s",     30},
             }},
 
+            // ─── Health / self-monitoring (Roadmap §15.5) ────────────
+            {"health", {
+                {"enabled",                 true},
+                {"check_interval_seconds",  60},
+                {"max_db_size_mb",          1024},
+                {"max_queue_depth",         100},
+                {"stale_run_timeout_seconds", 3600},
+            }},
+
             // ─── Vault / Secrets (§17) ────────────────────────────────
             {"vault", {
                 {"enabled",            false},

@@ -187,6 +187,10 @@ public:
     /// Query aggregate run statistics from the database.
     [[nodiscard]] RunStats query_run_stats() const;
 
+    /// Count RUNNING runs started more than `timeout_seconds` ago
+    /// (Roadmap §15.5 stale-run check).
+    [[nodiscard]] int64_t count_stale_runs(int timeout_seconds) const;
+
     /// Query the database file size in bytes.
     /// @param db_path  Path to the SQLite database file.
     [[nodiscard]] static int64_t query_db_size(

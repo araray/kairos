@@ -102,6 +102,7 @@ add_library(kairos_core STATIC
     src/persist/stale_recovery.cpp
     src/cli/dag_graph.cpp
     src/engine/explain.cpp
+    src/observability/health.cpp
 )
 
 # ── Platform-conditional sources in kairos_core ────────────────────────

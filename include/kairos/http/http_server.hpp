@@ -31,6 +31,7 @@
 #include <functional>
 #include <memory>
 #include <mutex>
+#include <nlohmann/json.hpp>
 #include <stop_token>
 #include <string>
 
@@ -109,6 +110,10 @@ struct HttpDependencies {
 
     /// Daemon uptime (seconds).
     std::function<double()> get_uptime;
+
+    /// §15.5: full health snapshot (checks + status). Null → /health
+    /// stays minimal (status + uptime only).
+    std::function<nlohmann::json()> get_health;
 };
 
 // ── HTTP Server ───────────────────────────────────────────────────────────

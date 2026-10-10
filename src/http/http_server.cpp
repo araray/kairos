@@ -676,8 +676,15 @@ struct HttpServer::Impl {
         svr.Get("/health", [this](const httplib::Request&,
                                    httplib::Response& res) {
             json j;
-            j["status"] = "ok";
             j["uptime_s"] = deps.get_uptime ? deps.get_uptime() : 0.0;
+            if (deps.get_health) {
+                // §15.5: full snapshot — status reflects the checks.
+                j = deps.get_health();
+                j["uptime_s"] = deps.get_uptime
+                    ? deps.get_uptime() : 0.0;
+            } else {
+                j["status"] = "ok";
+            }
             res.set_content(j.dump(), "application/json");
             set_cors(res);
         });

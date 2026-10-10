@@ -135,6 +135,8 @@ kairos_discover_tests(test_db_writer)
 # Metrics registry tests
 add_executable(test_metrics
     unit/observability/metrics_test.cpp
+    unit/observability/health_test.cpp
+    ${CMAKE_SOURCE_DIR}/src/observability/health.cpp
 )
 target_link_libraries(test_metrics PRIVATE kairos_test_helpers)
 kairos_discover_tests(test_metrics)

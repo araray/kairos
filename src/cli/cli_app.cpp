@@ -26,6 +26,7 @@
 #include "kairos/kel/value.hpp"
 #include "kairos/mcp/handler.hpp"
 #include "kairos/mcp/transport.hpp"
+#include "kairos/observability/health.hpp"
 #include "kairos/observability/logging.hpp"
 #include "kairos/persist/database.hpp"
 #include "kairos/persist/migration.hpp"
@@ -623,6 +624,9 @@ int run(int argc, char** argv) {
     bool show_history = false;
     cmd_status->add_flag("--history", show_history,
         "Include metric trends");
+    bool show_health = false;
+    cmd_status->add_flag("--health", show_health,
+        "Run self-monitoring checks (Roadmap \u00a715.5)");
 
     // ── config ───────────────────────────────────────────────────
     auto* cmd_config = app.add_subcommand("config",
@@ -1676,11 +1680,24 @@ int run(int argc, char** argv) {
         // Open DB for run stats.
         persist::QueryReader::RunStats stats;
         int64_t db_size = 0;
+        nlohmann::json health_json;
+        std::unique_ptr<SQLite::Database> health_db;
+        std::unique_ptr<persist::QueryReader> health_reader;
         try {
             auto db = persist::open_database(cfg->db_path);
             persist::QueryReader reader(*db);
             stats = reader.query_run_stats();
             db_size = persist::QueryReader::query_db_size(cfg->db_path);
+            if (show_health) {
+                // Keep a reader alive for the health computation.
+                health_db = std::move(db);
+                health_reader = std::make_unique<persist::QueryReader>(
+                    *health_db);
+                auto hcfg = observability::parse_health_config(
+                    cfg->global);
+                health_json = observability::compute_health(
+                    hcfg, cfg->db_path, health_reader.get(), -1);
+            }
         } catch (...) {
             // DB may not exist — show zeros.
         }
@@ -1725,6 +1742,11 @@ int run(int argc, char** argv) {
                     }
                 } catch (...) {}
                 result["metrics_history"] = metrics;
+            }
+
+            // §15.5 health snapshot with --health.
+            if (show_health && !health_json.is_null()) {
+                result["health"] = health_json;
             }
 
             std::cout << result.dump(2) << "\n";
@@ -1772,6 +1794,30 @@ int run(int argc, char** argv) {
                     "  Active Runs:  {}\n", stats.active_runs);
             }
             std::cout << "\n";
+
+            // §15.5 health checks with --health.
+            if (show_health) {
+                if (health_json.is_null()) {
+                    std::cout << "  Health: unavailable (no database)"
+                              << "\n\n";
+                } else {
+                    bool degraded =
+                        health_json["status"] == "degraded";
+                    std::cout << "  Health: "
+                              << (degraded ? "DEGRADED" : "OK") << "\n";
+                    for (const auto& check :
+                         health_json["checks"]) {
+                        std::cout << "    "
+                                  << (check["ok"].get<bool>()
+                                          ? "[ok]" : "[!!]")
+                                  << " " << check["name"].get<std::string>()
+                                  << " — "
+                                  << check["detail"].get<std::string>()
+                                  << "\n";
+                    }
+                    std::cout << "\n";
+                }
+            }
 
             // Display metric trends if --history is set (§23.4).
             if (show_history) {

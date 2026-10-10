@@ -30,6 +30,7 @@
 #include "kairos/mcp/handler.hpp"
 #include "kairos/mcp/transport.hpp"
 #include "kairos/observability/logging.hpp"
+#include "kairos/observability/health.hpp"
 #include "kairos/observability/metrics.hpp"
 #include "kairos/observability/tracer.hpp"
 #include "kairos/persist/database.hpp"
@@ -858,6 +859,14 @@ int run_daemon(std::shared_ptr<const kairos::config::ConfigState> config) {
             return std::chrono::duration<double>(
                 std::chrono::steady_clock::now() - uptime_start_http).count();
         };
+
+        // §15.5: full health snapshot for GET /health.
+        http_deps.get_health = [&config, &query_reader, &trigger_bus]() {
+            auto hcfg = observability::parse_health_config(config->global);
+            return observability::compute_health(
+                hcfg, config->db_path, &query_reader,
+                static_cast<int64_t>(trigger_bus.size()));
+        };
         http_deps.submit_run = [&trigger_bus, current_registry](
             const std::string& name) -> std::string {
             // Resolve the name (or raw ID) to a registry target first —
@@ -958,6 +967,20 @@ int run_daemon(std::shared_ptr<const kairos::config::ConfigState> config) {
         "kairos.telemetry.metrics_snapshot_interval_seconds", 60);
     auto last_snapshot = std::chrono::steady_clock::now();
 
+    // §15.5 periodic self-check: log degraded checks (health state is
+    // always available via GET /health and `status --health`).
+    auto health_cfg_daemon =
+        observability::parse_health_config(config->global);
+    auto last_health_check = std::chrono::steady_clock::now();
+    if (health_cfg_daemon.enabled) {
+        log->info("Health checks: every {}s (db {} MiB limit, "
+                  "queue depth {}, stale runs {}s)",
+                  health_cfg_daemon.check_interval_s,
+                  health_cfg_daemon.max_db_size_mb,
+                  health_cfg_daemon.max_queue_depth,
+                  health_cfg_daemon.stale_run_timeout_s);
+    }
+
     // Metrics snapshot pruning interval — prune old snapshots
     // periodically. Default: 7 days retention (§16.8).
     int metrics_retention_days = config->global.get<int>(
@@ -1048,6 +1071,27 @@ int run_daemon(std::shared_ptr<const kairos::config::ConfigState> config) {
                 last_snapshot = now;
                 log->trace("Metrics snapshot persisted ({} entries)",
                            entries.size());
+            }
+        }
+
+        // §15.5 periodic self-check: log degraded checks.
+        if (health_cfg_daemon.enabled &&
+            std::chrono::duration<double>(
+                now - last_health_check).count() >=
+                static_cast<double>(
+                    health_cfg_daemon.check_interval_s)) {
+            last_health_check = now;
+            auto snapshot = observability::compute_health(
+                health_cfg_daemon, config->db_path, &query_reader,
+                static_cast<int64_t>(trigger_bus.size()));
+            if (snapshot["status"] == "degraded") {
+                for (const auto& check : snapshot["checks"]) {
+                    if (!check["ok"].get<bool>()) {
+                        log->warn("Health: {} — {}",
+                                  check["name"].get<std::string>(),
+                                  check["detail"].get<std::string>());
+                    }
+                }
             }
         }
 
