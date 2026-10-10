@@ -4440,6 +4440,11 @@ _kairos() {
         'watches:Watch group management'
         'config:Configuration management'
         'completions:Generate shell completion scripts'
+        'dashboard:Live TUI dashboard'
+        'kel:KEL expression evaluation'
+        'triggers:Schedule triggers'
+        'migrate-config:Migrate legacy tool config'
+        'migrate-db:Migrate legacy tool database'
     )
 
     if (( CURRENT == 2 )); then
@@ -4447,10 +4452,39 @@ _kairos() {
         return
     fi
 
+    # Dynamic entity completions from the DB/YAML via the hidden
+    # __complete_* subcommands (empty output → fall through to static).
+    if (( CURRENT == 3 )) && [[ "${words[2]}" == logs ]]; then
+        local -a run_ids
+        run_ids=("${(@f)$(kairos __complete_runs 2>/dev/null)}")
+        if (( ${#run_ids} )); then
+            _describe 'run' run_ids
+            return
+        fi
+    fi
+    if (( CURRENT >= 4 )); then
+        local -a candidates
+        case "${words[2]}:${words[3]}" in
+            workflows:show|workflows:run|workflows:explain|workflows:graph)
+                candidates=("${(@f)$(kairos __complete_workflows 2>/dev/null)}") ;;
+            jobs:show|jobs:run)
+                candidates=("${(@f)$(kairos __complete_jobs 2>/dev/null)}") ;;
+            runs:show|runs:cancel)
+                candidates=("${(@f)$(kairos __complete_runs 2>/dev/null)}") ;;
+            watches:show|watches:scan-once)
+                candidates=("${(@f)$(kairos __complete_watches 2>/dev/null)}") ;;
+        esac
+        if (( ${#candidates} )); then
+            _describe 'entity' candidates
+            return
+        fi
+    fi
+
     case "${words[2]}" in
         workflows)
             local -a wf_cmds=('list:List all workflows' 'show:Show workflow detail'
-                               'run:Trigger a workflow' 'explain:Explain execution plan')
+                               'run:Trigger a workflow' 'explain:Explain execution plan'
+                               'graph:Render the DAG as ASCII art')
             _describe 'subcommand' wf_cmds ;;
         jobs)
             local -a j_cmds=('list:List standalone jobs' 'show:Show job detail'
@@ -4474,6 +4508,13 @@ _kairos() {
         completions)
             local -a sh_cmds=('bash' 'zsh' 'fish')
             _describe 'shell' sh_cmds ;;
+        kel)
+            local -a k_cmds=('eval:Evaluate one expression' 'repl:Interactive REPL')
+            _describe 'subcommand' k_cmds ;;
+        triggers)
+            local -a t_cmds=('list:List triggers' 'next:Next triggers to fire'
+                              'preview:Preview a cron schedule')
+            _describe 'subcommand' t_cmds ;;
         *)
             _arguments '*:options:(-c --config --json --log-level)' ;;
     esac
@@ -4486,7 +4527,14 @@ _kairos "$@"
 # Or:      kairos completions fish > ~/.config/fish/completions/kairos.fish
 
 # Top-level commands
-set -l cmds start stop status mcp version init-db prune workflows jobs runs logs events watches config completions
+set -l cmds start stop status mcp version init-db prune workflows jobs runs logs events watches config completions dashboard kel triggers migrate-config migrate-db
+
+# Dynamic entity candidates from the DB/YAML via hidden __complete_*
+# subcommands (empty output → no suggestions, no error).
+function __kairos_workflows; kairos __complete_workflows 2>/dev/null; end
+function __kairos_jobs;       kairos __complete_jobs 2>/dev/null; end
+function __kairos_runs;       kairos __complete_runs 2>/dev/null; end
+function __kairos_watches;    kairos __complete_watches 2>/dev/null; end
 
 # Disable file completion by default
 complete -c kairos -f
@@ -4514,13 +4562,22 @@ complete -c kairos -l json -d "JSON output"
 complete -c kairos -l log-level -d "Log level" -ra "trace debug info warn error"
 
 # Subcommands
-complete -c kairos -n "__fish_seen_subcommand_from workflows" -a "list show run explain" -f
+complete -c kairos -n "__fish_seen_subcommand_from workflows" -a "list show run explain graph" -f
 complete -c kairos -n "__fish_seen_subcommand_from jobs" -a "list show run" -f
 complete -c kairos -n "__fish_seen_subcommand_from runs" -a "list show cancel" -f
 complete -c kairos -n "__fish_seen_subcommand_from events" -a "list tail" -f
 complete -c kairos -n "__fish_seen_subcommand_from watches" -a "list show scan-once" -f
 complete -c kairos -n "__fish_seen_subcommand_from config" -a "show validate reload" -f
 complete -c kairos -n "__fish_seen_subcommand_from completions" -a "bash zsh fish" -f
+complete -c kairos -n "__fish_seen_subcommand_from kel" -a "eval repl" -f
+complete -c kairos -n "__fish_seen_subcommand_from triggers" -a "list next preview" -f
+
+# Dynamic entity arguments (3rd word)
+complete -c kairos -n "__fish_seen_subcommand_from workflows; and __fish_seen_subcommand_from show run explain graph" -a "(__kairos_workflows)" -f
+complete -c kairos -n "__fish_seen_subcommand_from jobs; and __fish_seen_subcommand_from show run" -a "(__kairos_jobs)" -f
+complete -c kairos -n "__fish_seen_subcommand_from runs; and __fish_seen_subcommand_from show cancel" -a "(__kairos_runs)" -f
+complete -c kairos -n "__fish_seen_subcommand_from watches; and __fish_seen_subcommand_from show scan-once" -a "(__kairos_watches)" -f
+complete -c kairos -n "__fish_seen_subcommand_from logs" -a "(__kairos_runs)" -f
 
 # Workflows run/explain flags
 complete -c kairos -n "__fish_seen_subcommand_from workflows; and __fish_seen_subcommand_from run" -s f -l follow -d "Follow log output"
