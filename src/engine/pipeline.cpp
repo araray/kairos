@@ -626,6 +626,34 @@ ConditionDecision Pipeline::evaluate_condition(const DagNode& node,
     kel_ctx.variables["trigger"] = kel::KelValue(ctx.trigger_type);
     kel_ctx.variables["run_id"] = kel::KelValue(ctx.run_id);
 
+    // §8: output('job', 'step', 'key') reads the current run's
+    // captured outputs (jobs in earlier DAG levels are done by now).
+    kel_ctx.functions["output"] =
+        [&ctx](const std::vector<kel::KelValue>& args) -> kel::KelValue {
+        if (args.size() != 3 || !args[0].is_string() ||
+            !args[1].is_string() || !args[2].is_string()) {
+            throw kel::KelEvalError(
+                "output() requires three string arguments "
+                "(job_name, step_name, key)");
+        }
+        const auto& job_name = args[0].as_string();
+        const auto& step_name = args[1].as_string();
+        const auto& key = args[2].as_string();
+        auto jit = ctx.outputs.find(job_name);
+        if (jit != ctx.outputs.end()) {
+            auto sit = jit->second.find(step_name);
+            if (sit != jit->second.end()) {
+                auto kit = sit->second.find(key);
+                if (kit != sit->second.end()) {
+                    return kel::KelValue(kit->second);
+                }
+            }
+        }
+        throw kel::KelEvalError(
+            "output('" + job_name + "', '" + step_name + "', '" + key +
+            "') is not available in this run (yet)");
+    };
+
     if (deps_.query_reader)
         deps_.query_reader->register_kel_bindings(kel_ctx, ctx.now);
 
@@ -757,11 +785,64 @@ void Pipeline::capture_step_outputs(
     }
 }
 
+/// §8.3: substitute ${{ steps.<step>.KEY }} (job scope) and
+/// ${{ jobs.<job>.<step>.KEY }} (workflow scope) from the run context.
+/// Unresolvable references fail the job with a clear message.
+std::string Pipeline::resolve_output_refs(
+    const std::string& text, const JobDef& current_job,
+    const RunContext& ctx) const
+{
+    // ${{ steps.<step>.KEY }} or ${{ jobs.<job>.<step>.KEY }}
+    static const std::regex re(
+        R"regex(\$\{\{\s*(?:steps\.([A-Za-z0-9_.\-]+)|jobs\.([A-Za-z0-9_.\-]+)\.([A-Za-z0-9_.\-]+))\.([A-Za-z_][A-Za-z0-9_]*)\s*\}\})regex");
+    std::string result;
+    auto begin = std::sregex_iterator(text.begin(), text.end(), re);
+    auto end = std::sregex_iterator();
+    size_t last = 0;
+    for (auto it = begin; it != end; ++it) {
+        const auto& m = *it;
+        result.append(text, last, static_cast<size_t>(m.position()) - last);
+
+        std::string job_name = current_job.job_name;
+        std::string step_name;
+        if (m[1].matched) {
+            step_name = m[1].str();                 // steps.<step>.KEY
+        } else {
+            job_name = m[2].str();                  // jobs.<job>.<step>.KEY
+            step_name = m[3].str();
+        }
+        const std::string key = m[4].str();
+
+        auto jit = ctx.outputs.find(job_name);
+        if (jit == ctx.outputs.end()) {
+            throw std::runtime_error(
+                "unknown output reference '" + m.str() +
+                "': job '" + job_name + "' has no captured outputs");
+        }
+        auto sit = jit->second.find(step_name);
+        if (sit == jit->second.end()) {
+            throw std::runtime_error(
+                "unknown output reference '" + m.str() +
+                "': step '" + step_name + "' has no captured outputs");
+        }
+        auto kit = sit->second.find(key);
+        if (kit == sit->second.end()) {
+            throw std::runtime_error(
+                "unknown output reference '" + m.str() + "': key '" +
+                key + "' was not set");
+        }
+        result += kit->second;
+        last = static_cast<size_t>(m.position() + m.length());
+    }
+    result.append(text, last, text.size() - last);
+    return result;
+}
+
 exec::ProcessSpec Pipeline::build_process_spec(
     const StepDef& step, const JobDef& job, const RunContext& ctx)
 {
     exec::ProcessSpec spec;
-    spec.command_line = step.command;
+    spec.command_line = resolve_output_refs(step.command, job, ctx);
     spec.use_shell = step.use_shell;
     if (!step.working_dir.empty()) spec.working_dir = step.working_dir;
     else if (!job.working_dir.empty()) spec.working_dir = job.working_dir;

@@ -2737,6 +2737,42 @@ struct HttpServer::Impl {
                 set_cors(res);
             });
 
+        // ── Run outputs (§8) ────────────────────────────────────────
+        svr.Get(R"(/api/v1/runs/([^/]+)/outputs)",
+            [this](const httplib::Request& req, httplib::Response& res) {
+                if (!check_auth(req, res)) return;
+                if (!deps.reader) {
+                    res.status = 503;
+                    res.set_content(R"({"error":"No database reader"})",
+                                    "application/json");
+                    return;
+                }
+                auto input = req.matches[1].str();
+                std::vector<std::string> candidates;
+                auto run_id = resolve_run_id(input, candidates);
+                if (run_id.empty()) {
+                    res.status = 404;
+                    res.set_content(R"({"error":"Run not found"})",
+                                    "application/json");
+                    return;
+                }
+                json j;
+                j["run_id"] = run_id;
+                json arr = json::array();
+                for (const auto& row :
+                     deps.reader->get_run_outputs(run_id)) {
+                    arr.push_back({
+                        {"job_id", row.job_id},
+                        {"step_id", row.step_id},
+                        {"key", row.key},
+                        {"value", row.value},
+                    });
+                }
+                j["outputs"] = std::move(arr);
+                res.set_content(j.dump(2), "application/json");
+                set_cors(res);
+            });
+
         // ── KEL playground eval (§3.8.7) ───────────────────────────
         // Body: {"expr": "<expression>"} (JSON).
         svr.Post("/api/v1/kel/eval",

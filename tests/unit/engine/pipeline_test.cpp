@@ -732,3 +732,168 @@ TEST_F(PipelineTest, InvalidOutputKeysAreDropped) {
     kairos::persist::QueryReader reader(*db);
     EXPECT_TRUE(reader.get_run_outputs(run_id).empty());
 }
+
+// ── §8 substitution + output() conditions ───────────────────────────────
+
+class RunContextTest : public PipelineTest {
+protected:
+    void SetUp() override {
+        PipelineTest::SetUp();
+        data_dir_ = std::make_unique<kairos::testing::TempDir>();
+        pool_ = std::make_unique<exec::RunnerPool>(
+            exec::RunnerPoolConfig{.worker_count = 1,
+                                   .queue_capacity = 8});
+        pool_->set_process_handle_factory([](const exec::ProcessSpec&) {
+            return exec::create_process_handle();
+        });
+        pool_->start(stop_source_.get_token());
+
+        db_ = kairos::persist::open_database(":memory:");
+        kairos::persist::apply_migrations(
+            *db_, kairos::persist::get_migrations());
+        writer_ = std::make_unique<kairos::persist::DBWriter>(
+            *db_, kairos::persist::DBWriterConfig{});
+        writer_stop_ = std::stop_source{};
+        writer_->start(writer_stop_.get_token());
+    }
+    void TearDown() override {
+        if (writer_) {
+            writer_stop_.request_stop();
+            writer_->flush();
+            writer_.reset();
+        }
+        PipelineTest::TearDown();
+    }
+
+    /// Run a workflow and return the concatenated log chunks.
+    std::string run_and_collect(WorkflowDef wf,
+                                const std::string& target_id,
+                                RunStatus& status_out) {
+        auto registry = std::make_shared<WorkflowRegistry>(
+            std::vector<WorkflowDef>{std::move(wf)},
+            std::vector<TimerEntry>{});
+        TriggerBus bus(64);
+        Pipeline pipeline(PipelineConfig{}, Pipeline::Dependencies{
+            .clock = &clock_,
+            .trigger_bus = &bus,
+            .runner_pool = pool_.get(),
+            .registry = registry,
+            .active_runs = &active_runs_,
+            .db_writer = writer_.get(),
+            .data_dir = data_dir_->path(),
+        });
+        status_out = pipeline.process_event(
+            make_manual_trigger(target_id), stop_source_.get_token());
+        writer_stop_.request_stop();
+        writer_->flush();
+
+        std::string run_id;
+        SQLite::Statement q(*db_, "SELECT run_id FROM runs LIMIT 1");
+        if (q.executeStep()) run_id = q.getColumn(0).getString();
+        std::string logs;
+        SQLite::Statement l(*db_,
+            "SELECT content FROM log_chunks WHERE run_id = ? "
+            "ORDER BY id");
+        l.bind(1, run_id);
+        while (l.executeStep()) logs += l.getColumn(0).getString();
+        return logs;
+    }
+
+    std::unique_ptr<kairos::testing::TempDir> data_dir_;
+    std::unique_ptr<SQLite::Database> db_;
+    std::unique_ptr<kairos::persist::DBWriter> writer_;
+    std::stop_source writer_stop_;
+};
+
+TEST_F(RunContextTest, StepsScopeSubstitutionWithinJob) {
+    StepDef produce;
+    produce.step_id = "stp-p";
+    produce.step_name = "produce";
+    produce.command = "echo VERSION=7.7.7 >> \"$KAIROS_OUTPUT\"";
+
+    StepDef consume;
+    consume.step_id = "stp-c";
+    consume.step_name = "consume";
+    consume.command = "echo deploying-${{ steps.produce.VERSION }}";
+
+    JobDef job;
+    job.job_id = "job-1";
+    job.job_name = "one";
+    job.steps = {produce, consume};
+    DagNode node{.job_id = "job-1", .job_name = "one"};
+    auto wf = build_workflow_def("wfl-s", "Sub", {job}, {node});
+
+    RunStatus st;
+    auto logs = run_and_collect(std::move(wf), "wfl-s", st);
+    EXPECT_EQ(st, RunStatus::Success);
+    EXPECT_NE(logs.find("deploying-7.7.7"), std::string::npos)
+        << "logs: " << logs;
+}
+
+TEST_F(RunContextTest, JobsScopeSubstitutionAcrossJobs) {
+    StepDef produce;
+    produce.step_id = "stp-p";
+    produce.step_name = "produce";
+    produce.command = "echo SHA=deadbeef >> \"$KAIROS_OUTPUT\"";
+
+    JobDef j1;
+    j1.job_id = "job-a";
+    j1.job_name = "build";
+    j1.steps = {produce};
+
+    StepDef deploy_step;
+    deploy_step.step_id = "stp-d";
+    deploy_step.step_name = "deploy";
+    deploy_step.command = "echo at-${{ jobs.build.produce.SHA }}";
+
+    JobDef j2;
+    j2.job_id = "job-b";
+    j2.job_name = "deploy";
+    j2.steps = {deploy_step};
+
+    DagNode n1{.job_id = "job-a", .job_name = "build"};
+    DagNode n2{.job_id = "job-b", .job_name = "deploy"};
+    n2.needs = {"job-a"};
+    auto wf = build_workflow_def(
+        "wfl-x", "Cross", {j1, j2}, {n1, n2});
+
+    RunStatus st;
+    auto logs = run_and_collect(std::move(wf), "wfl-x", st);
+    EXPECT_EQ(st, RunStatus::Success);
+    EXPECT_NE(logs.find("at-deadbeef"), std::string::npos)
+        << "logs: " << logs;
+}
+
+TEST_F(RunContextTest, OutputGatedCondition) {
+    StepDef produce;
+    produce.step_id = "stp-p";
+    produce.step_name = "produce";
+    produce.command = "echo VERSION=42 >> \"$KAIROS_OUTPUT\"";
+    JobDef j1;
+    j1.job_id = "job-a";
+    j1.job_name = "producer";
+    j1.steps = {produce};
+
+    StepDef check;
+    check.step_id = "stp-c";
+    check.step_name = "check";
+    check.command = "echo condition-passed";
+    JobDef j2;
+    j2.job_id = "job-b";
+    j2.job_name = "checker";
+    j2.steps = {check};
+    j2.condition_expr =
+        R"(output("producer", "produce", "VERSION") == "42")";
+
+    DagNode n1{.job_id = "job-a", .job_name = "producer"};
+    DagNode n2{.job_id = "job-b", .job_name = "checker", .needs = {"job-a"}};
+    n2.condition_expr = j2.condition_expr;
+    auto wf = build_workflow_def(
+        "wfl-c", "Cond", {j1, j2}, {n1, n2});
+
+    RunStatus st;
+    auto logs = run_and_collect(std::move(wf), "wfl-c", st);
+    EXPECT_EQ(st, RunStatus::Success);
+    EXPECT_NE(logs.find("condition-passed"), std::string::npos)
+        << "logs: " << logs;
+}

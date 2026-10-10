@@ -209,6 +209,11 @@ private:
         const std::unordered_map<std::string, std::string>& outputs,
         std::size_t existing_bytes) const;
 
+    /// §8.3: resolve ${{ steps.* }} / ${{ jobs.*.* }} references.
+    [[nodiscard]] std::string resolve_output_refs(
+        const std::string& text, const JobDef& current_job,
+        const RunContext& ctx) const;
+
     /// §8: capture + persist + publish one step's outputs.
     void capture_step_outputs(RunContext& ctx, const JobDef& job,
                               const StepDef& step,
