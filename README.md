@@ -102,11 +102,14 @@ kairos.reloadConfig     kairos.watchScanOnce
 
 A server-rendered web UI ships embedded in the binary (build with `KAIROS_HTTP=ON`, enable `kairos.http.enabled`):
 
-- **Full read console** — dashboard, workflows (with dry-run plan + YAML source), jobs, runs (SSE live logs), events (affected files), watches, triggers.
+- **Full read console** — dashboard, workflows (with DAG view + dry-run plan + YAML source), jobs, runs (SSE live logs), events (affected files), watches, triggers.
+- **Real-time** — dashboard updates live over SSE; toasts announce run completions and critical events; run comparison side-by-side.
+- **Management** — YAML editors with live validation for workflows/watches, run/cancel/re-run buttons, audit trail.
+- **KEL playground** — evaluate expressions with `job()`/`has_tag()` bindings in the browser.
 - **Three themes** — blue / dark / light via CSS custom properties, persisted per browser.
 - **Instant search** — one filter bar searches every table (plain text or `/regex/`).
 - **Hot-editable** — set `kairos.http.web_root` to override the embedded templates without rebuilding.
-- **REST API** — token-authenticated read endpoints for every entity plus run triggering and live SSE logs.
+- **REST API** — token-authenticated read/write endpoints for every entity plus triggering, cancellation, and live SSE streams.
 
 ### Observability
 

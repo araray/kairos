@@ -1134,6 +1134,17 @@ Pages (all server-rendered, no client framework):
 - **Search** — the navbar search box filters every table on the current
   page. Plain text matches case-insensitively; `/regex/` switches to
   regex mode. Press `/` to focus, `Esc` to clear.
+- **Real-time** — the dashboard updates live over SSE (`/sse/runs`,
+  `/sse/events`): new runs and status changes appear without refresh,
+  and toasts announce completions and warning/critical events.
+- **DAG view** — workflow and run pages render the job DAG as an SVG
+  (levels left-to-right, need edges, nodes linked to job pages); on run
+  pages nodes are colored by status.
+- **KEL playground** — `/kel` evaluates expressions against the daemon
+  (job()/has_tag() bindings) with a history and cheat sheet.
+- **Run comparison** — `/runs/{a}/vs/{b}` shows two runs side by side
+  with per-job status/exit/duration diffs (rows that differ are
+  highlighted).
 - **Editing** — `/workflows/new`, `/workflows/{name}/edit` and the
   watches equivalents are YAML editors with live validation, atomic
   saves (with `.bak` backups) and automatic daemon reload; `Ctrl+S`
@@ -1181,9 +1192,12 @@ POST   /api/v1/jobs/{id}/run               # trigger a standalone job
 POST   /api/v1/runs/{id}/cancel            # cancel a running run
 POST   /api/v1/config/reload               # reload configuration
 GET    /api/v1/audit                       # audit trail (who changed what)
+POST   /api/v1/kel/eval                    # {"expr": "..."} → {value, type}
 
 # Streaming
 GET  /sse/logs/{run_id}                    # live log stream (SSE)
+GET  /sse/runs                             # run started/finished events (SSE)
+GET  /sse/events                           # watch event stream (SSE)
 ```
 
 Every write endpoint follows the safety contract (Roadmap §3.8.2):
