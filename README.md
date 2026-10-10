@@ -2,8 +2,6 @@
   <img src="assets/brand/kairos-logo.svg" alt="Kairos" width="420"/>
 </p>
 
-<h1 align="center">Kairos</h1>
-
 <p align="center">
   <strong>Unified local orchestration daemon — scheduling, workflows, and filesystem monitoring in a single C++20 binary.</strong>
 </p>
@@ -24,12 +22,7 @@
   <img src="https://img.shields.io/badge/tests-1100+-brightgreen" alt="Tests"/>
 </p>
 
----
-
 > *"Καιρός (Kairos) — the ancient Greek concept of the opportune, decisive moment."*
-
-Kairos replaces three legacy Python tools — **LocalFlow** (workflow/DAG execution), **AVScheduler** (job scheduling), and **EventWatcher** (filesystem monitoring) — with a single, production-grade C++20 daemon. It runs on developer machines like a production service: deterministic, observable, secure, and agent-ready.
-
 ---
 
 ## Features
