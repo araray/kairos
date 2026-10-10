@@ -1134,6 +1134,12 @@ Pages (all server-rendered, no client framework):
 - **Search** — the navbar search box filters every table on the current
   page. Plain text matches case-insensitively; `/regex/` switches to
   regex mode. Press `/` to focus, `Esc` to clear.
+- **Editing** — `/workflows/new`, `/workflows/{name}/edit` and the
+  watches equivalents are YAML editors with live validation, atomic
+  saves (with `.bak` backups) and automatic daemon reload; `Ctrl+S`
+  saves.
+- **Run management** — Run now / Re-run / Cancel buttons on the workflow
+  and run pages; tag pills on the runs list filter by tag.
 - Run IDs in URLs accept unique prefixes, matching the CLI (`/runs/run-abc123`).
 
 ### 18.3 REST API
@@ -1163,19 +1169,48 @@ GET  /health                               # liveness (no auth)
 GET  /metrics                              # Prometheus text (no auth)
 
 # Write
-POST /api/v1/workflows/{name}/run          # trigger a run (resolves real run_id)
-POST /api/v1/config/reload                 # reload configuration
+POST   /api/v1/workflows                   # create (YAML body) → 201
+PUT    /api/v1/workflows/{name}            # update (backs up to .yaml.bak)
+DELETE /api/v1/workflows/{name}            # delete (backs up to .yaml.bak)
+POST   /api/v1/watches                     # create watch group (YAML body)
+PUT    /api/v1/watches/{name}              # update (backs up)
+DELETE /api/v1/watches/{name}              # delete (backs up)
+POST   /api/v1/config/validate?kind=workflow|watch   # validate YAML, no writes
+POST   /api/v1/workflows/{name}/run        # trigger a run (resolves real run_id)
+POST   /api/v1/jobs/{id}/run               # trigger a standalone job
+POST   /api/v1/runs/{id}/cancel            # cancel a running run
+POST   /api/v1/config/reload               # reload configuration
+GET    /api/v1/audit                       # audit trail (who changed what)
 
 # Streaming
 GET  /sse/logs/{run_id}                    # live log stream (SSE)
 ```
 
+Every write endpoint follows the safety contract (Roadmap §3.8.2):
+schema-validate the YAML first (structured errors with locations on 400),
+back the target file up to `<name>.yaml.bak`, write atomically, trigger a
+config reload, and append an `audit_log` entry with actor `http`.
+
 Example — trigger a run and wait for it:
 
 ```bash
 RUN=$(curl -s -X POST http://127.0.0.1:8420/api/v1/workflows/backup/run \
-      | jq -r .run_id)
+      -d '' | jq -r .run_id)
 curl -s "http://127.0.0.1:8420/api/v1/runs/$RUN" | jq .status
+```
+
+> **curl note:** always pass `-d ''` on bodiless POSTs. Plain
+> `curl -X POST` sends no `Content-Length` header, and the server then
+> waits for the read timeout before treating the body as empty. Browsers
+> and HTTP libraries send `Content-Length: 0` automatically.
+
+Example — create a workflow from a file, then edit it in the browser:
+
+```bash
+curl -s -X POST http://127.0.0.1:8420/api/v1/workflows \
+     -H "Content-Type: text/yaml" --data-binary @backup.yaml
+# → {"name":"backup","file":"…/workflows/backup.yaml","reloaded":true}
+# Then open http://127.0.0.1:8420/workflows/backup/edit
 ```
 
 The `tag` filter uses AND semantics for comma-separated tags, mirroring
