@@ -633,6 +633,7 @@ int run_daemon(std::shared_ptr<const kairos::config::ConfigState> config) {
             .db_writer = &db_writer,
             .native_watcher = native_watcher.get(),
             .tracer = tracer.get(),
+            .tag_store = &tag_store,
         },
         registry->watch_groups());
 

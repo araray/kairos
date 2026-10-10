@@ -21,6 +21,7 @@
 #include "kairos/engine/trigger_event.hpp"
 #include "kairos/observability/tracer.hpp"
 #include "kairos/persist/db_writer.hpp"
+#include "kairos/persist/tag_store.hpp"
 #include "kairos/testing/fake_clock.hpp"
 #include "kairos/watch/debounce_buffer.hpp"
 #include "kairos/watch/file_watcher.hpp"
@@ -72,6 +73,9 @@ public:
         persist::DBWriter* db_writer = nullptr;
         IFileWatcher* native_watcher = nullptr;       ///< Optional: native backend.
         observability::Tracer* tracer = nullptr;       ///< Optional: OTel tracing.
+        /// Optional: tag store — enables has_tag() in watch rule
+        /// conditions (registered only when non-null).
+        persist::TagStore* tag_store = nullptr;
     };
 
     explicit WatchEngine(

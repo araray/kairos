@@ -89,13 +89,16 @@ bool glob_match_simple(const std::string& pattern, const std::string& str) {
 ///   data, event, watch_group, file, prev_file
 ///
 /// Also registers aggregate(data, glob, metric, func) which operates on
-/// the sample passed by reference through the closure.
+/// the sample passed by reference through the closure, and — when a tag
+/// store is available — has_tag(entity_id, tag) for tag-gated rules
+/// (Roadmap §6; same semantics as the pipeline condition context).
 kel::EvalContext build_watch_kel_context(
     const std::string& group_name,
     const std::string& event_type,
     const FileMetrics& file_metrics,
     const FileMetrics* prev_metrics,
-    const Sample* current_sample = nullptr)
+    const Sample* current_sample = nullptr,
+    persist::TagStore* tag_store = nullptr)
 {
     auto ctx = kel::make_default_context();
 
@@ -228,6 +231,32 @@ kel::EvalContext build_watch_kel_context(
                 return kel::KelValue(static_cast<int64_t>(result));
             }
             return kel::KelValue(result);
+        };
+    }
+
+    // has_tag(entity_id, tag) → bool — tag-gated watch rules (§6).
+    // Same semantics as the pipeline condition context: checks all
+    // entity types sequentially, first match wins.
+    if (tag_store) {
+        auto* ts = tag_store;
+        ctx.functions["has_tag"] = [ts](
+            const std::vector<kel::KelValue>& args) -> kel::KelValue
+        {
+            if (args.size() != 2 || !args[0].is_string() ||
+                !args[1].is_string()) {
+                throw kel::KelEvalError(
+                    "has_tag() requires two string arguments "
+                    "(entity_id, tag)");
+            }
+            const auto& entity_id = args[0].as_string();
+            const auto& tag = args[1].as_string();
+            static const std::string types[] = {
+                "workflow", "job", "watch_group", "trigger"};
+            for (const auto& t : types) {
+                if (ts->has_tag(t, entity_id, tag))
+                    return kel::KelValue(true);
+            }
+            return kel::KelValue(false);
         };
     }
 
@@ -889,7 +918,7 @@ std::vector<WatchTriggerResult> WatchEngine::evaluate_rules(
 
         auto ctx = build_watch_kel_context(
             group.group_name, event_str, file_metrics, prev_metrics,
-            &current);
+            &current, deps_.tag_store);
 
         // Evaluate the KEL expression.
         try {

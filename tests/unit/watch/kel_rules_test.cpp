@@ -18,6 +18,9 @@
 #include "kairos/watch/watch_engine.hpp"
 #include "kairos/testing/fake_clock.hpp"
 #include "kairos/testing/fake_fs_scanner.hpp"
+#include "kairos/persist/database.hpp"
+#include "kairos/persist/migration.hpp"
+#include "kairos/persist/tag_store.hpp"
 
 #include <gtest/gtest.h>
 
@@ -427,6 +430,93 @@ TEST_F(KelRulesTest, MultipleRules_OnlyMatchingFire) {
     EXPECT_TRUE(found_always);
     EXPECT_FALSE(found_never);
     EXPECT_FALSE(found_size);
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+//  KEL CONDITION: has_tag() — tag-gated watch rules (Roadmap §6)
+// ═══════════════════════════════════════════════════════════════════════
+
+class KelHasTagTest : public KelRulesTest {
+protected:
+    void SetUp() override {
+        db_ = kairos::persist::open_database(":memory:");
+        kairos::persist::get_schema_version(*db_);
+        tag_store_ =
+            std::make_unique<kairos::persist::TagStore>(*db_);
+    }
+
+    /// Seed one watch group tag set.
+    void seed_tags(const std::string& entity_id,
+                   std::vector<std::string> tags) {
+        std::vector<kairos::persist::EntityTagSet> sets;
+        sets.push_back({kairos::persist::TagEntityType::WatchGroup,
+                        entity_id, std::move(tags)});
+        tag_store_->sync_all_tags(
+            kairos::persist::TagEntityType::WatchGroup, sets);
+    }
+
+    WatchGroupDef tagged_group(const std::string& condition) {
+        return make_group("tags", {"/watched"}, {
+            make_rule("tag_gate", condition),
+        });
+    }
+
+    /// Run a baseline + mutation scan; returns whether the rule fired.
+    bool rule_fires(WatchGroupDef group) {
+        FakeFilesystemScanner scanner(fs_);
+        WatchEngine engine(WatchEngineConfig{},
+            WatchEngine::Dependencies{
+                .clock = &clock_, .scanner = &scanner,
+                .tag_store = tag_store_.get()},
+            {group});
+        TriggerSink sink = [](TriggerEvent) { return true; };
+
+        fs_.add_file("/watched/a.txt", FakeFileEntry{
+            .size = 100, .mtime = clock_.now()});
+        engine.scan_once(sink);
+        clock_.advance(60s);
+        fs_.add_file("/watched/new.txt", FakeFileEntry{
+            .size = 50, .mtime = clock_.now()});
+        auto results = engine.scan_once(sink);
+        return !results.empty() && !results[0].triggered.empty();
+    }
+
+    std::unique_ptr<SQLite::Database> db_;
+    std::unique_ptr<kairos::persist::TagStore> tag_store_;
+};
+
+TEST_F(KelHasTagTest, MatchingTag_Fires) {
+    seed_tags("wgr-test-tags", {"prod", "critical"});
+    EXPECT_TRUE(rule_fires(tagged_group(
+        R"(has_tag("wgr-test-tags", "prod"))")));
+}
+
+TEST_F(KelHasTagTest, NonMatchingTag_DoesNotFire) {
+    seed_tags("wgr-test-tags", {"prod"});
+    EXPECT_FALSE(rule_fires(tagged_group(
+        R"(has_tag("wgr-test-tags", "dev"))")));
+}
+
+TEST_F(KelHasTagTest, NoTagStore_GracefulDegradation) {
+    // Without a tag store the function is unregistered — the rule
+    // evaluation errors, which the engine treats as "does not fire".
+    FakeFilesystemScanner scanner(fs_);
+    auto group = tagged_group(R"(has_tag("wgr-test-tags", "prod"))");
+    WatchEngine engine(WatchEngineConfig{},
+        WatchEngine::Dependencies{
+            .clock = &clock_, .scanner = &scanner},
+        {group});
+    TriggerSink sink = [](TriggerEvent) { return true; };
+
+    fs_.add_file("/watched/a.txt", FakeFileEntry{
+        .size = 100, .mtime = clock_.now()});
+    engine.scan_once(sink);
+    clock_.advance(60s);
+    fs_.add_file("/watched/new.txt", FakeFileEntry{
+        .size = 50, .mtime = clock_.now()});
+    auto results = engine.scan_once(sink);
+    ASSERT_EQ(results.size(), 1u);
+    EXPECT_TRUE(results[0].triggered.empty());
 }
 
 }  // anonymous namespace
