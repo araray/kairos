@@ -191,6 +191,15 @@ struct PruneMetricsSnapshots {
     int retention_days = 7;              ///< Delete snapshots older than this many days.
 };
 
+/// Persist one step's outputs (Roadmap §8): all key→value pairs the
+/// step wrote to $KAIROS_OUTPUT, in one batch.
+struct BatchInsertRunOutputs {
+    std::string run_id;
+    std::string job_id;
+    std::string step_id;
+    std::vector<std::pair<std::string, std::string>> entries;
+};
+
 /// Append an audit-log entry — records every mutation (config writes,
 /// run triggers/cancels, reloads) with its actor.
 /// Spec reference: Roadmap §15.14 (audit log), §3.8.2 (write API safety).
@@ -213,7 +222,8 @@ using DBWriteRequest = std::variant<
     PruneOlderThan,
     InsertMetricsSnapshot, BatchInsertMetricsSnapshots,
     PruneMetricsSnapshots,
-    InsertAuditEntry
+    InsertAuditEntry,
+    BatchInsertRunOutputs
 >;
 
 // ── DB Writer ────────────────────────────────────────────────────────────

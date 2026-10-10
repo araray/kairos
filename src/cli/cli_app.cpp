@@ -3198,6 +3198,7 @@ int run(int argc, char** argv) {
             .active_runs = &active_runs,
             .db_writer = &db_writer,
             .query_reader = &query_reader,
+            .data_dir = cfg->data_dir,
         });
 
         // Create a manual trigger event for this workflow.
@@ -3810,6 +3811,7 @@ int run(int argc, char** argv) {
             .active_runs = &active_runs,
             .db_writer = &db_writer,
             .query_reader = &query_reader,
+            .data_dir = cfg->data_dir,
         });
 
         // Create a manual trigger event for this standalone job.

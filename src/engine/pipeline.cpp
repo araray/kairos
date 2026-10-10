@@ -12,6 +12,9 @@
 #include <spdlog/spdlog.h>
 
 #include <algorithm>
+#include <iterator>
+#include <regex>
+#include <fstream>
 #include <condition_variable>
 #include <filesystem>
 #include <future>
@@ -497,6 +500,15 @@ RunStatus Pipeline::execute_job(const std::string& job_id, RunContext& ctx,
             continue;  // Next step — nothing failed, nothing ran.
         }
 
+        // §8: ensure the output directory exists before the step runs.
+        if (!deps_.data_dir.empty()) {
+            std::error_code ec;
+            std::filesystem::create_directories(
+                output_file_path(ctx.run_id, job_id, step.step_id)
+                    .parent_path(),
+                ec);
+        }
+
         // Submit to runner pool and wait for completion, retrying per
         // the step's §15.2 policy. Each attempt gets a fresh WorkItem
         // and its own step_runs row (attempt 1-based).
@@ -584,6 +596,12 @@ RunStatus Pipeline::execute_job(const std::string& job_id, RunContext& ctx,
             }
         }
 
+        // §8: capture outputs the step wrote (final state, after any
+        // retries appended to the same file).
+        if (step_result.success() && !ctx.dry_run) {
+            capture_step_outputs(ctx, *job_def, step, job_id);
+        }
+
         if (!step_result.success()) {
             spdlog::info("Run {}: step '{}' failed (exit {})",
                          ctx.run_id, step.step_name, step_result.exit_code);
@@ -662,6 +680,83 @@ ConditionDecision Pipeline::check_needs(const DagNode& node,
     return ConditionDecision::run();
 }
 
+/// §8: per-step output file location.
+std::filesystem::path Pipeline::output_file_path(
+    const std::string& run_id, const std::string& job_id,
+    const std::string& step_id) const
+{
+    return deps_.data_dir / "runs" / run_id / "outputs" / job_id /
+           (step_id + ".env");
+}
+
+/// §8.4 safety: validate captured outputs. Throws on violation.
+void Pipeline::validate_step_outputs(
+    const std::unordered_map<std::string, std::string>& outputs,
+    std::size_t existing_bytes) const
+{
+    constexpr std::size_t kMaxValueBytes = 64 * 1024;
+    constexpr std::size_t kMaxRunBytes = 1024 * 1024;
+    std::size_t total = existing_bytes;
+    static const std::regex key_re("^[A-Za-z_][A-Za-z0-9_]*$");
+    for (const auto& [k, v] : outputs) {
+        if (!std::regex_match(k, key_re)) {
+            throw std::runtime_error(
+                "invalid output key '" + k +
+                "' (allowed: letters, digits, _, no leading digit)");
+        }
+        if (v.size() > kMaxValueBytes) {
+            throw std::runtime_error(
+                "output value for '" + k + "' exceeds 64 KiB");
+        }
+        total += k.size() + v.size();
+    }
+    if (total > kMaxRunBytes) {
+        throw std::runtime_error(
+            "run outputs exceed the 1 MiB per-run budget");
+    }
+}
+
+/// §8: read the step's output file, validate, persist, and update the
+/// in-run context. Missing file = no outputs (normal case).
+void Pipeline::capture_step_outputs(
+    RunContext& ctx, const JobDef& job, const StepDef& step,
+    const std::string& job_id)
+{
+    auto path = output_file_path(ctx.run_id, job_id, step.step_id);
+    std::error_code ec;
+    if (!std::filesystem::is_regular_file(path, ec) || ec) return;
+
+    std::ifstream in(path, std::ios::binary);
+    if (!in) return;
+    std::string content((std::istreambuf_iterator<char>(in)),
+                        std::istreambuf_iterator<char>());
+    auto parsed = exec::parse_env_file_content(content);
+
+    try {
+        validate_step_outputs(parsed, ctx.outputs_bytes);
+    } catch (const std::exception& e) {
+        spdlog::error("Run {}: step '{}' outputs rejected: {}",
+                      ctx.run_id, step.step_name, e.what());
+        return;  // Invalid outputs are dropped, not fatal.
+    }
+
+    if (parsed.empty()) return;
+
+    for (const auto& [k, v] : parsed) {
+        ctx.outputs_bytes += k.size() + v.size();
+        ctx.outputs[job.job_name][step.step_name][k] = v;
+    }
+
+    if (deps_.db_writer) {
+        persist::BatchInsertRunOutputs batch;
+        batch.run_id = ctx.run_id;
+        batch.job_id = job_id;
+        batch.step_id = step.step_id;
+        batch.entries.assign(parsed.begin(), parsed.end());
+        deps_.db_writer->enqueue(std::move(batch));
+    }
+}
+
 exec::ProcessSpec Pipeline::build_process_spec(
     const StepDef& step, const JobDef& job, const RunContext& ctx)
 {
@@ -708,9 +803,17 @@ exec::ProcessSpec Pipeline::build_process_spec(
         ctx.run_id, job.job_id, step.step_id,
         ctx.workflow_id, ctx.trigger_type,
         ctx.correlation_id,
-        "", "");  // data_dir and db_path filled by config
+        deps_.data_dir.string(), "");
 
     spec.environment = builder.build();
+
+    // §8 shared context: the step appends "KEY=VALUE" lines here;
+    // the pipeline captures the file after the step completes.
+    if (!deps_.data_dir.empty()) {
+        spec.environment["KAIROS_OUTPUT"] =
+            output_file_path(ctx.run_id, job.job_id, step.step_id)
+                .string();
+    }
     return spec;
 }
 

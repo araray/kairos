@@ -327,6 +327,23 @@ void DBWriter::execute_request(const DBWriteRequest& req) {
             stmt_insert_audit_->bind(4, r.detail_json);
             stmt_insert_audit_->exec();
 
+        } else if constexpr (std::is_same_v<T, BatchInsertRunOutputs>) {
+            if (!r.entries.empty()) {
+                SQLite::Statement insert(db_,
+                    "INSERT OR REPLACE INTO run_outputs "
+                    "(run_id, job_id, step_id, key, value) "
+                    "VALUES (?, ?, ?, ?, ?)");
+                for (const auto& [k, v] : r.entries) {
+                    insert.reset();
+                    insert.bind(1, r.run_id);
+                    insert.bind(2, r.job_id);
+                    insert.bind(3, r.step_id);
+                    insert.bind(4, k);
+                    insert.bind(5, v);
+                    insert.exec();
+                }
+            }
+
         } else if constexpr (std::is_same_v<T, PruneOlderThan>) {
             // Prune runs older than cutoff.
             SQLite::Statement prune_runs(db_,

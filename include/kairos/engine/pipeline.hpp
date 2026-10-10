@@ -26,7 +26,9 @@
 #include "kairos/testing/fake_clock.hpp"
 
 #include <atomic>
+#include <filesystem>
 #include <functional>
+#include <map>
 #include <memory>
 #include <stop_token>
 #include <string>
@@ -85,6 +87,16 @@ struct RunContext {
     /// §15.1 dry-run: full pipeline execution, but every step logs what
     /// would run and succeeds immediately — no processes are spawned.
     bool dry_run = false;
+
+    /// §8 shared context: outputs written by completed steps via
+    /// $KAIROS_OUTPUT, keyed job_name → step_name → key → value.
+    /// Filled as jobs finish, so later DAG levels read earlier ones.
+    std::map<std::string,
+             std::map<std::string,
+                      std::map<std::string, std::string>>> outputs;
+
+    /// Total size of captured outputs (§8.4: 1 MiB per-run cap).
+    std::size_t outputs_bytes = 0;
 
     /// Status of each job in this run.
     struct JobStatus {
@@ -156,6 +168,10 @@ public:
         /// If null, secret references are left unresolved.
         exec::EnvBuilder::SecretResolver secret_resolver;
 
+        /// Data directory — base for §8 per-run output files
+        /// (<data_dir>/runs/<run_id>/outputs/…). Empty disables capture.
+        std::filesystem::path data_dir;
+
         /// Pre-sorted secret values for output masking (§17.3).
         /// Populated from SecretStore::values(), sorted longest-first.
         std::vector<std::string> secret_values;
@@ -183,6 +199,21 @@ public:
     void stop();
 
 private:
+    /// §8: per-step output file path.
+    [[nodiscard]] std::filesystem::path output_file_path(
+        const std::string& run_id, const std::string& job_id,
+        const std::string& step_id) const;
+
+    /// §8.4: validate output keys/sizes (throws with reason).
+    void validate_step_outputs(
+        const std::unordered_map<std::string, std::string>& outputs,
+        std::size_t existing_bytes) const;
+
+    /// §8: capture + persist + publish one step's outputs.
+    void capture_step_outputs(RunContext& ctx, const JobDef& job,
+                              const StepDef& step,
+                              const std::string& job_id);
+
     /// Execute a complete workflow run.
     RunStatus execute_run(const WorkflowDag& dag,
                           RunContext& ctx,

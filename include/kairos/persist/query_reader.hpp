@@ -160,6 +160,20 @@ public:
     [[nodiscard]] std::optional<WatchEventRow> get_watch_event(
         const std::string& event_uid) const;
 
+    // ── Run outputs (Roadmap §8) ──────────────────────────────────
+
+    /// One captured step output.
+    struct RunOutputRow {
+        std::string job_id;
+        std::string step_id;
+        std::string key;
+        std::string value;
+    };
+
+    /// All outputs captured for a run, ordered by job then key.
+    [[nodiscard]] std::vector<RunOutputRow> get_run_outputs(
+        const std::string& run_id) const;
+
     // ── Run summary stats (for CLI status) ───────────────────────
 
     /// Summary statistics for `kairos status` display.

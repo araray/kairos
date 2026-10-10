@@ -578,6 +578,7 @@ int run_daemon(std::shared_ptr<const kairos::config::ConfigState> config) {
         .cancel_registry = &cancel_registry,
         .tag_store = &tag_store,
         .secret_resolver = secret_resolver,
+        .data_dir = config->data_dir,
         .secret_values = secret_values,
     });
     pipeline.start(stop_token);

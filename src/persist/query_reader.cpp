@@ -509,6 +509,25 @@ void QueryReader::register_watch_kel_bindings(
     };
 }
 
+std::vector<QueryReader::RunOutputRow> QueryReader::get_run_outputs(
+    const std::string& run_id) const
+{
+    std::vector<RunOutputRow> results;
+    SQLite::Statement q(db_,
+        "SELECT job_id, step_id, key, value FROM run_outputs "
+        "WHERE run_id = ? ORDER BY job_id, step_id, key");
+    q.bind(1, run_id);
+    while (q.executeStep()) {
+        results.push_back(RunOutputRow{
+            q.getColumn(0).getString(),
+            q.getColumn(1).getString(),
+            q.getColumn(2).getString(),
+            q.getColumn(3).getString(),
+        });
+    }
+    return results;
+}
+
 std::optional<QueryReader::WatchEventRow> QueryReader::get_watch_event(
     const std::string& event_uid) const
 {

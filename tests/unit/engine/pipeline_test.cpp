@@ -12,6 +12,14 @@
 #include "kairos/exec/runner_pool.hpp"
 #include "kairos/testing/fake_clock.hpp"
 #include "kairos/testing/fake_process.hpp"
+#include "kairos/persist/database.hpp"
+#include "kairos/persist/db_writer.hpp"
+#include "kairos/persist/migration.hpp"
+#include "kairos/persist/query_reader.hpp"
+#include "kairos/testing/fake_process.hpp"
+#include "test_helpers.hpp"
+
+#include <filesystem>
 
 #include <gtest/gtest.h>
 
@@ -567,4 +575,160 @@ TEST_F(PipelineTest, StepFailsAfterExhaustedRetries) {
         make_manual_trigger("wfl-noretry"), stop_source_.get_token());
     EXPECT_EQ(status, RunStatus::Failure);
     EXPECT_EQ(*counter, 1);  // retry_on filtered the 9
+}
+
+// ── §8 shared context: KAIROS_OUTPUT capture ────────────────────────────
+
+TEST_F(PipelineTest, StepOutputsCapturedAndPersisted) {
+    kairos::testing::TempDir data_dir;
+    kairos::testing::TempDir scratch;
+
+    // REAL processes (shell) — the capture contract involves the
+    // filesystem, so fakes can't exercise it.
+    pool_ = std::make_unique<exec::RunnerPool>(
+        exec::RunnerPoolConfig{.worker_count = 1, .queue_capacity = 8});
+    pool_->set_process_handle_factory([](const exec::ProcessSpec&) {
+        return exec::create_process_handle();
+    });
+    pool_->start(stop_source_.get_token());
+
+    StepDef produce;
+    produce.step_id = "stp-produce";
+    produce.step_name = "produce";
+    produce.command =
+        "echo VERSION=9.9.9 >> \"$KAIROS_OUTPUT\"\n"
+        "echo COMMIT_SHA=abc123 >> \"$KAIROS_OUTPUT\"";
+
+    StepDef consume;
+    consume.step_id = "stp-consume";
+    consume.step_name = "consume";
+    consume.command = "echo got-$KAIROS_OUTPUT";
+
+    JobDef job;
+    job.job_id = "job-out";
+    job.job_name = "producer";
+    job.steps = {produce, consume};
+    DagNode node;
+    node.job_id = "job-out";
+    node.job_name = "producer";
+    auto wf = build_workflow_def(
+        "wfl-out", "Outputs", {job}, {node});
+
+    auto registry = std::make_shared<WorkflowRegistry>(
+        std::vector<WorkflowDef>{std::move(wf)},
+        std::vector<TimerEntry>{});
+
+    // In-memory DB to observe persistence.
+    auto db = kairos::persist::open_database(":memory:");
+    kairos::persist::apply_migrations(
+        *db, kairos::persist::get_migrations());
+    kairos::persist::DBWriterConfig wcfg;
+    kairos::persist::DBWriter writer(*db, wcfg);
+    std::stop_source writer_stop;
+    writer.start(writer_stop.get_token());
+
+    TriggerBus bus(64);
+    Pipeline pipeline(PipelineConfig{}, Pipeline::Dependencies{
+        .clock = &clock_,
+        .trigger_bus = &bus,
+        .runner_pool = pool_.get(),
+        .registry = registry,
+        .active_runs = &active_runs_,
+        .db_writer = &writer,
+        .data_dir = data_dir.path(),
+    });
+
+    auto status = pipeline.process_event(
+        make_manual_trigger("wfl-out"), stop_source_.get_token());
+    EXPECT_EQ(status, RunStatus::Success);
+
+    writer_stop.request_stop();
+    writer.flush();
+
+    // Find the run id from the DB.
+    std::string run_id;
+    {
+        SQLite::Statement q(*db, "SELECT run_id FROM runs LIMIT 1");
+        ASSERT_TRUE(q.executeStep());
+        run_id = q.getColumn(0).getString();
+    }
+
+    // Outputs persisted.
+    kairos::persist::QueryReader reader(*db);
+    auto outs = reader.get_run_outputs(run_id);
+    ASSERT_EQ(outs.size(), 2u);
+    EXPECT_EQ(outs[0].key, "COMMIT_SHA");
+    EXPECT_EQ(outs[0].value, "abc123");
+    EXPECT_EQ(outs[1].key, "VERSION");
+    EXPECT_EQ(outs[1].value, "9.9.9");
+
+    // The output file itself exists on disk.
+    EXPECT_TRUE(std::filesystem::exists(
+        data_dir.path() / "runs" / run_id / "outputs" / "job-out" /
+        "stp-produce.env"));
+}
+
+TEST_F(PipelineTest, InvalidOutputKeysAreDropped) {
+    kairos::testing::TempDir data_dir;
+    pool_ = std::make_unique<exec::RunnerPool>(
+        exec::RunnerPoolConfig{.worker_count = 1, .queue_capacity = 8});
+    pool_->set_process_handle_factory([](const exec::ProcessSpec&) {
+        return exec::create_process_handle();
+    });
+    pool_->start(stop_source_.get_token());
+
+    StepDef produce;
+    produce.step_id = "stp-bad";
+    produce.step_name = "bad";
+    produce.command =
+        "echo GOOD=1 >> \"$KAIROS_OUTPUT\"; "
+        "echo bad-key!!=2 >> \"$KAIROS_OUTPUT\"";
+    // (bad-key!! isn't KEY=VALUE — the .env parser drops the line, so
+    // this also covers parse-level leniency; run stays green.)
+
+    JobDef job;
+    job.job_id = "job-bad";
+    job.job_name = "badjob";
+    job.steps = {produce};
+    DagNode node;
+    node.job_id = "job-bad";
+    node.job_name = "badjob";
+    auto wf = build_workflow_def(
+        "wfl-bad", "BadOut", {job}, {node});
+    auto registry = std::make_shared<WorkflowRegistry>(
+        std::vector<WorkflowDef>{std::move(wf)},
+        std::vector<TimerEntry>{});
+
+    auto db = kairos::persist::open_database(":memory:");
+    kairos::persist::apply_migrations(
+        *db, kairos::persist::get_migrations());
+    kairos::persist::DBWriter writer(*db, {});
+    std::stop_source writer_stop;
+    writer.start(writer_stop.get_token());
+
+    TriggerBus bus(64);
+    Pipeline pipeline(PipelineConfig{}, Pipeline::Dependencies{
+        .clock = &clock_,
+        .trigger_bus = &bus,
+        .runner_pool = pool_.get(),
+        .registry = registry,
+        .active_runs = &active_runs_,
+        .db_writer = &writer,
+        .data_dir = data_dir.path(),
+    });
+
+    auto status = pipeline.process_event(
+        make_manual_trigger("wfl-bad"), stop_source_.get_token());
+    EXPECT_EQ(status, RunStatus::Success);
+
+    writer_stop.request_stop();
+    writer.flush();
+    std::string run_id;
+    {
+        SQLite::Statement q(*db, "SELECT run_id FROM runs LIMIT 1");
+        ASSERT_TRUE(q.executeStep());
+        run_id = q.getColumn(0).getString();
+    }
+    kairos::persist::QueryReader reader(*db);
+    EXPECT_TRUE(reader.get_run_outputs(run_id).empty());
 }

@@ -277,6 +277,29 @@ CREATE INDEX IF NOT EXISTS idx_audit_timestamp
 -- the first try. Existing rows predate the column → default 1.
 ALTER TABLE step_runs ADD COLUMN attempt INTEGER NOT NULL DEFAULT 1;
         )SQL"
+    },
+    {
+        5,
+        "Run context — run_outputs table (Roadmap §8)",
+        R"SQL(
+-- ╔════════════════════════════════════════════════════════════════╗
+-- ║  RUN_OUTPUTS — step variables written via $KAIROS_OUTPUT      ║
+-- ║  (Roadmap §8 shared context & variable passing)               ║
+-- ╚════════════════════════════════════════════════════════════════╝
+
+CREATE TABLE IF NOT EXISTS run_outputs (
+    run_id     TEXT NOT NULL,
+    job_id     TEXT NOT NULL,
+    step_id    TEXT NOT NULL,
+    key        TEXT NOT NULL,
+    value      TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    PRIMARY KEY (run_id, job_id, step_id, key)
+);
+
+CREATE INDEX IF NOT EXISTS idx_run_outputs_run
+    ON run_outputs (run_id);
+        )SQL"
     }
 };
 
