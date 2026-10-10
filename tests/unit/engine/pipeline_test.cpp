@@ -459,3 +459,112 @@ TEST_F(PipelineTest, DryRunExecutesWithoutSpawningProcesses) {
     // No process ran (exit-77 trap) → the dry-run path succeeded.
     EXPECT_EQ(status, RunStatus::Success);
 }
+
+// ── §15.2 step retries ──────────────────────────────────────────────────
+
+TEST_F(PipelineTest, StepRetriesUntilSuccess) {
+    // Fails the first two spawns, succeeds on the third.
+    auto counter = std::make_shared<int>(0);
+    pool_ = std::make_unique<exec::RunnerPool>(
+        exec::RunnerPoolConfig{.worker_count = 1, .queue_capacity = 8});
+    pool_->set_process_handle_factory(
+        [counter](const exec::ProcessSpec&) {
+            auto p =
+                std::make_unique<kairos::testing::FakeProcessHandle>();
+            if (++(*counter) < 3) {
+                p->set_exit_code(1);
+                p->set_stderr_data("flaky\n");
+            } else {
+                p->set_exit_code(0);
+                p->set_stdout_data("finally\n");
+            }
+            return p;
+        });
+    pool_->start(stop_source_.get_token());
+
+    StepDef step;
+    step.step_id = "stp-r";
+    step.step_name = "flaky-call";
+    step.command = "curl api";
+    RetryPolicy policy;
+    policy.max_attempts = 3;  // delay 0 → fast test
+    step.retry = policy;
+
+    JobDef job;
+    job.job_id = "job-r";
+    job.job_name = "flaky";
+    job.steps = {step};
+    DagNode node;
+    node.job_id = "job-r";
+    node.job_name = "flaky";
+    auto wf = build_workflow_def(
+        "wfl-retry", "Retry", {job}, {node});
+
+    auto registry = std::make_shared<WorkflowRegistry>(
+        std::vector<WorkflowDef>{std::move(wf)},
+        std::vector<TimerEntry>{});
+    TriggerBus bus(64);
+    Pipeline pipeline(PipelineConfig{}, Pipeline::Dependencies{
+        .clock = &clock_,
+        .trigger_bus = &bus,
+        .runner_pool = pool_.get(),
+        .registry = registry,
+        .active_runs = &active_runs_,
+    });
+
+    auto status = pipeline.process_event(
+        make_manual_trigger("wfl-retry"), stop_source_.get_token());
+    EXPECT_EQ(status, RunStatus::Success);
+    EXPECT_EQ(*counter, 3);
+}
+
+TEST_F(PipelineTest, StepFailsAfterExhaustedRetries) {
+    auto counter = std::make_shared<int>(0);
+    pool_ = std::make_unique<exec::RunnerPool>(
+        exec::RunnerPoolConfig{.worker_count = 1, .queue_capacity = 8});
+    pool_->set_process_handle_factory(
+        [counter](const exec::ProcessSpec&) {
+            auto p =
+                std::make_unique<kairos::testing::FakeProcessHandle>();
+            ++(*counter);
+            p->set_exit_code(9);
+            return p;
+        });
+    pool_->start(stop_source_.get_token());
+
+    StepDef step;
+    step.step_id = "stp-x";
+    step.step_name = "always-fails";
+    step.command = "false";
+    RetryPolicy policy;
+    policy.max_attempts = 3;
+    policy.retry_on = {7};  // 9 not retryable → exactly 1 attempt
+    step.retry = policy;
+
+    JobDef job;
+    job.job_id = "job-x";
+    job.job_name = "xfail";
+    job.steps = {step};
+    DagNode node;
+    node.job_id = "job-x";
+    node.job_name = "xfail";
+    auto wf = build_workflow_def(
+        "wfl-noretry", "NoRetry", {job}, {node});
+
+    auto registry = std::make_shared<WorkflowRegistry>(
+        std::vector<WorkflowDef>{std::move(wf)},
+        std::vector<TimerEntry>{});
+    TriggerBus bus(64);
+    Pipeline pipeline(PipelineConfig{}, Pipeline::Dependencies{
+        .clock = &clock_,
+        .trigger_bus = &bus,
+        .runner_pool = pool_.get(),
+        .registry = registry,
+        .active_runs = &active_runs_,
+    });
+
+    auto status = pipeline.process_event(
+        make_manual_trigger("wfl-noretry"), stop_source_.get_token());
+    EXPECT_EQ(status, RunStatus::Failure);
+    EXPECT_EQ(*counter, 1);  // retry_on filtered the 9
+}

@@ -32,7 +32,8 @@ TEST_F(AuditLogTest, MigrationCreatesTable) {
         "AND name='audit_log'");
     ASSERT_TRUE(q.executeStep());
     EXPECT_EQ(q.getColumn(0).getInt(), 1);
-    EXPECT_EQ(get_schema_version(*db_), 3);
+    EXPECT_EQ(get_schema_version(*db_),
+              static_cast<int>(get_migrations().size()));
 }
 
 TEST_F(AuditLogTest, WriterInsertsAndReaderReturnsNewestFirst) {

@@ -11,6 +11,7 @@
 
 #include <spdlog/spdlog.h>
 
+#include <algorithm>
 #include <condition_variable>
 #include <filesystem>
 #include <future>
@@ -496,54 +497,91 @@ RunStatus Pipeline::execute_job(const std::string& job_id, RunContext& ctx,
             continue;  // Next step — nothing failed, nothing ran.
         }
 
-        // Submit to runner pool and wait for completion.
-        // Uses promise/future instead of CV+atomic: the shared state is
-        // heap-allocated, so it's safe even if the worker thread is still
-        // unwinding from set_value() when we destroy locals here.
-        // Wrapped in shared_ptr because std::function requires copyable callables.
-        auto step_promise = std::make_shared<std::promise<exec::ProcessResult>>();
-        auto step_future = step_promise->get_future();
+        // Submit to runner pool and wait for completion, retrying per
+        // the step's §15.2 policy. Each attempt gets a fresh WorkItem
+        // and its own step_runs row (attempt 1-based).
+        const int max_attempts =
+            (step.retry && step.retry->enabled())
+                ? step.retry->max_attempts : 1;
+        exec::ProcessResult step_result{};
+        bool submitted_ok = false;
 
-        exec::WorkItem item;
-        item.run_id = ctx.run_id;
-        item.job_id = job_id;
-        item.step_id = step.step_id;
-        item.correlation_id = ctx.correlation_id;
-        item.process_spec = std::move(proc_spec);
-        item.output_callback = exec::make_output_callback(output_mux);
-        // Per-run cancel token (§23.10): the runner pool will merge
-        // this with the global stop token so that cancelling a single
-        // run kills only that run's processes.
-        if (ctx.cancel_token.stop_possible()) {
-            item.cancel_token = ctx.cancel_token;
-        }
-        item.on_complete = [step_promise](
-            const std::string&, exec::ProcessResult result) {
-            step_promise->set_value(std::move(result));
-        };
+        for (int attempt = 1; attempt <= max_attempts; ++attempt) {
+            // Uses promise/future instead of CV+atomic: the shared state
+            // is heap-allocated, so it's safe even if the worker thread
+            // is still unwinding from set_value() when we destroy locals.
+            // Wrapped in shared_ptr: std::function needs copyables.
+            auto step_promise =
+                std::make_shared<std::promise<exec::ProcessResult>>();
+            auto step_future = step_promise->get_future();
 
-        bool submitted = deps_.runner_pool ?
-            deps_.runner_pool->submit(std::move(item)) : false;
+            exec::WorkItem item;
+            item.run_id = ctx.run_id;
+            item.job_id = job_id;
+            item.step_id = step.step_id;
+            item.correlation_id = ctx.correlation_id;
+            item.process_spec = proc_spec;  // copy — retries reuse it
+            item.output_callback = exec::make_output_callback(output_mux);
+            // Per-run cancel token (§23.10): the runner pool will merge
+            // this with the global stop token so that cancelling a
+            // single run kills only that run's processes.
+            if (ctx.cancel_token.stop_possible()) {
+                item.cancel_token = ctx.cancel_token;
+            }
+            item.on_complete = [step_promise](
+                const std::string&, exec::ProcessResult result) {
+                step_promise->set_value(std::move(result));
+            };
 
-        if (!submitted) {
-            spdlog::error("Run {}: failed to submit step '{}' to runner pool",
-                          ctx.run_id, step.step_name);
-            ctx.job_statuses[job_id].exit_code = 202;
-            return RunStatus::Failure;
-        }
+            submitted_ok = deps_.runner_pool ?
+                deps_.runner_pool->submit(std::move(item)) : false;
 
-        // Block until the worker completes the step.
-        auto step_result = step_future.get();
+            if (!submitted_ok) {
+                spdlog::error("Run {}: failed to submit step '{}' "
+                              "to runner pool",
+                              ctx.run_id, step.step_name);
+                ctx.job_statuses[job_id].exit_code = 202;
+                return RunStatus::Failure;
+            }
 
-        // Persist step.
-        if (deps_.db_writer) {
-            deps_.db_writer->enqueue(persist::InsertStepRun{
-                .run_id = ctx.run_id, .job_id = job_id,
-                .step_id = step.step_id, .step_name = step.step_name,
-                .command = step.command,
-                .status = step_result.success() ? "SUCCESS" : "FAILURE",
-                .start_ts = format_iso8601(deps_.clock->now()),
-            });
+            // Block until the worker completes the attempt.
+            step_result = step_future.get();
+
+            // Persist this attempt (§15.2: one row per attempt).
+            if (deps_.db_writer) {
+                deps_.db_writer->enqueue(persist::InsertStepRun{
+                    .run_id = ctx.run_id, .job_id = job_id,
+                    .step_id = step.step_id,
+                    .step_name = step.step_name,
+                    .command = step.command,
+                    .status = step_result.success() ? "SUCCESS"
+                                                    : "FAILURE",
+                    .start_ts = format_iso8601(deps_.clock->now()),
+                    .attempt = attempt,
+                });
+            }
+
+            if (step_result.success()) break;
+
+            // Retryable? (last attempt, not enabled, or filtered code.)
+            bool retryable_code =
+                !step.retry || step.retry->retry_on.empty()
+                    ? true
+                    : std::find(step.retry->retry_on.begin(),
+                                step.retry->retry_on.end(),
+                                step_result.exit_code) !=
+                          step.retry->retry_on.end();
+            if (attempt >= max_attempts || !retryable_code) break;
+
+            auto wait = step.retry->delay_for(attempt);
+            spdlog::info("Run {}: step '{}' failed (exit {}) — retry "
+                         "{}/{} in {}ms",
+                         ctx.run_id, step.step_name,
+                         step_result.exit_code, attempt,
+                         max_attempts, wait.count());
+            if (wait.count() > 0) {
+                std::this_thread::sleep_for(wait);
+            }
         }
 
         if (!step_result.success()) {

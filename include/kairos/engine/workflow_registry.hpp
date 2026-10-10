@@ -14,6 +14,7 @@
 #include "kairos/engine/trigger_types.hpp"
 #include "kairos/watch/watch_group_def.hpp"
 
+#include <algorithm>
 #include <chrono>
 #include <filesystem>
 #include <memory>
@@ -26,6 +27,35 @@ namespace kairos::engine {
 
 // ── Step definition (parsed from YAML) ──────────────────────────────────
 
+/// Per-step retry policy (Roadmap §15.2).
+struct RetryPolicy {
+    int max_attempts = 1;   ///< Total attempts (1 = no retry).
+    std::chrono::milliseconds delay{0};  ///< Delay before retry #1.
+    enum class Backoff { Fixed, Linear, Exponential };
+    Backoff backoff = Backoff::Fixed;
+    /// Exit codes that trigger a retry. Empty = any non-zero code.
+    std::vector<int> retry_on;
+
+    [[nodiscard]] bool enabled() const { return max_attempts > 1; }
+
+    /// Delay before the given attempt (1-based) under the backoff mode.
+    /// Fixed: `delay` every time. Linear: delay × attempt.
+    /// Exponential: delay × 2^(attempt-1).
+    [[nodiscard]] std::chrono::milliseconds delay_for(
+        int attempt) const {
+        if (attempt < 1) return delay;
+        switch (backoff) {
+            case Backoff::Linear:
+                return delay * attempt;
+            case Backoff::Exponential:
+                return delay * (1 << std::min(attempt - 1, 10));
+            case Backoff::Fixed:
+            default:
+                return delay;
+        }
+    }
+};
+
 /// A single step within a job. Maps to a ProcessSpec at execution time.
 struct StepDef {
     std::string step_id;         ///< Content-addressable ID (stp-xxx)
@@ -35,6 +65,7 @@ struct StepDef {
     std::unordered_map<std::string, std::string> env;  ///< Extra env vars
     std::optional<std::chrono::seconds> timeout;  ///< Per-step timeout
     bool use_shell = true;       ///< Execute via shell (default)
+    std::optional<RetryPolicy> retry;  ///< §15.2 retries
 };
 
 // ── Job definition (parsed from YAML) ───────────────────────────────────

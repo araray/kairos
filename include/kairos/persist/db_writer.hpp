@@ -81,6 +81,7 @@ struct InsertStepRun {
     std::string command;
     std::string status;             ///< "RUNNING"
     std::string start_ts;
+    int attempt = 1;              ///< §15.2 retry attempt (1-based).
 };
 
 /// Update a completed step record.

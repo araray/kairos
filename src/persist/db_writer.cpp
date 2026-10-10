@@ -85,8 +85,8 @@ void DBWriter::prepare_statements() {
 
     stmt_insert_step_run_ = std::make_unique<SQLite::Statement>(db_,
         "INSERT INTO step_runs (run_id, job_id, step_id, step_name, "
-        "command, status, start_ts) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?)");
+        "command, status, start_ts, attempt) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)");
 
     stmt_update_step_ = std::make_unique<SQLite::Statement>(db_,
         "UPDATE step_runs SET status = ?, end_ts = ?, exit_code = ?, "
@@ -264,6 +264,7 @@ void DBWriter::execute_request(const DBWriteRequest& req) {
             stmt_insert_step_run_->bind(5, r.command);
             stmt_insert_step_run_->bind(6, r.status);
             stmt_insert_step_run_->bind(7, r.start_ts);
+            stmt_insert_step_run_->bind(8, r.attempt);
             stmt_insert_step_run_->exec();
 
         } else if constexpr (std::is_same_v<T, UpdateStepComplete>) {

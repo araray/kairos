@@ -159,6 +159,10 @@ std::string step_hash_input(const StepDef& step, const std::string& job_id) {
     buf += step.command;
     buf += '\0';
     buf += step.working_dir.string();
+    if (step.retry && step.retry->enabled()) {
+        buf += '\0';
+        buf += "retry:" + std::to_string(step.retry->max_attempts);
+    }
     return buf;
 }
 
@@ -236,6 +240,32 @@ StepDef parse_step(const YAML::Node& node, const std::string& job_id,
 
     // Shell mode (default true per spec §14.4).
     step.use_shell = opt_bool(node, "use_shell", true);
+
+    // §15.2 retry policy.
+    if (node["retry"] && node["retry"].IsMap()) {
+        const auto& r = node["retry"];
+        RetryPolicy policy;
+        policy.max_attempts = r["max_attempts"]
+            ? r["max_attempts"].as<int>(1) : 1;
+        if (r["delay"]) {
+            auto d = parse_timeout(r, "delay");
+            if (d) policy.delay = std::chrono::milliseconds(*d);
+        }
+        if (r["backoff"] && r["backoff"].IsScalar()) {
+            auto b = r["backoff"].as<std::string>("fixed");
+            if (b == "linear") policy.backoff =
+                RetryPolicy::Backoff::Linear;
+            else if (b == "exponential") policy.backoff =
+                RetryPolicy::Backoff::Exponential;
+        }
+        if (r["retry_on"] && r["retry_on"].IsSequence()) {
+            for (const auto& code : r["retry_on"]) {
+                if (code.IsScalar())
+                    policy.retry_on.push_back(code.as<int>(-1));
+            }
+        }
+        if (policy.max_attempts >= 1) step.retry = policy;
+    }
 
     // Generate content-addressable ID.
     step.step_id = generate_content_id(

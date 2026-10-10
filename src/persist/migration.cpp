@@ -268,6 +268,15 @@ CREATE TABLE IF NOT EXISTS audit_log (
 CREATE INDEX IF NOT EXISTS idx_audit_timestamp
     ON audit_log (timestamp);
         )SQL"
+    },
+    {
+        4,
+        "Step retries — attempt column on step_runs (Roadmap §15.2)",
+        R"SQL(
+-- Each retry attempt persists as its own step_runs row; attempt 1 is
+-- the first try. Existing rows predate the column → default 1.
+ALTER TABLE step_runs ADD COLUMN attempt INTEGER NOT NULL DEFAULT 1;
+        )SQL"
     }
 };
 

@@ -149,6 +149,7 @@ static std::unique_ptr<SQLite::Database> make_test_db() {
             end_ts TEXT NOT NULL DEFAULT '',
             duration_ms INTEGER NOT NULL DEFAULT 0,
             command TEXT NOT NULL DEFAULT '',
+            attempt INTEGER NOT NULL DEFAULT 1,
             created_at TEXT NOT NULL DEFAULT (datetime('now')),
             FOREIGN KEY(run_id) REFERENCES runs(run_id)
         );

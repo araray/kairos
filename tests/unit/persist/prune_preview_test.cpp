@@ -113,6 +113,7 @@ protected:
                 start_ts TEXT DEFAULT '',
                 end_ts TEXT DEFAULT '',
                 duration_ms INTEGER DEFAULT 0,
+                attempt INTEGER NOT NULL DEFAULT 1,
                 PRIMARY KEY (run_id, job_id, step_id)
             )
         )");

@@ -17,6 +17,7 @@ namespace kairos::config {
 namespace {
 
 namespace fs = std::filesystem;
+using kairos::engine::RetryPolicy;
 
 // ── Helpers ─────────────────────────────────────────────────────────────
 
@@ -1045,6 +1046,71 @@ jobs:
     ASSERT_TRUE(with_file.ok());
     EXPECT_NE(base.workflows[0].jobs[0].job_id,
               with_file.workflows[0].jobs[0].job_id);
+}
+
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  §15.2 step retry policies (Roadmap Phase 12)
+// ═══════════════════════════════════════════════════════════════════════════
+
+TEST(YamlLoaderTest, ParsesRetryPolicy) {
+    auto r = load_workflow_string(R"(
+name: retry-flow
+jobs:
+  flaky:
+    steps:
+      - name: call
+        run: curl https://api
+        retry:
+          max_attempts: 3
+          delay: 5s
+          backoff: exponential
+          retry_on: [1, 2]
+)");
+    ASSERT_TRUE(r.ok()) << (r.errors.empty() ? "?" : r.errors[0].message);
+    const auto& step = r.workflows[0].jobs[0].steps[0];
+    ASSERT_TRUE(step.retry.has_value());
+    EXPECT_EQ(step.retry->max_attempts, 3);
+    EXPECT_EQ(step.retry->delay, std::chrono::seconds(5));
+    EXPECT_EQ(step.retry->backoff, RetryPolicy::Backoff::Exponential);
+    ASSERT_EQ(step.retry->retry_on.size(), 2u);
+    EXPECT_EQ(step.retry->retry_on[0], 1);
+    EXPECT_EQ(step.retry->retry_on[1], 2);
+}
+
+TEST(YamlLoaderTest, RetryDefaultsWhenPartial) {
+    auto r = load_workflow_string(R"(
+name: retry-defaults
+jobs:
+  a:
+    steps:
+      - run: "true"
+        retry:
+          max_attempts: 2
+)");
+    ASSERT_TRUE(r.ok());
+    const auto& step = r.workflows[0].jobs[0].steps[0];
+    ASSERT_TRUE(step.retry.has_value());
+    EXPECT_EQ(step.retry->max_attempts, 2);
+    EXPECT_EQ(step.retry->backoff, RetryPolicy::Backoff::Fixed);
+    EXPECT_TRUE(step.retry->retry_on.empty());
+    EXPECT_EQ(step.retry->delay_for(1), std::chrono::milliseconds(0));
+}
+
+TEST(RetryPolicyTest, BackoffDelayMath) {
+    RetryPolicy p;
+    p.delay = std::chrono::milliseconds(100);
+    p.backoff = RetryPolicy::Backoff::Exponential;
+    EXPECT_EQ(p.delay_for(1), std::chrono::milliseconds(100));
+    EXPECT_EQ(p.delay_for(2), std::chrono::milliseconds(200));
+    EXPECT_EQ(p.delay_for(3), std::chrono::milliseconds(400));
+
+    p.backoff = RetryPolicy::Backoff::Linear;
+    EXPECT_EQ(p.delay_for(1), std::chrono::milliseconds(100));
+    EXPECT_EQ(p.delay_for(3), std::chrono::milliseconds(300));
+
+    p.backoff = RetryPolicy::Backoff::Fixed;
+    EXPECT_EQ(p.delay_for(4), std::chrono::milliseconds(100));
 }
 
 }  // namespace kairos::config
