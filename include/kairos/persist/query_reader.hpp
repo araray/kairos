@@ -345,6 +345,22 @@ public:
     /// Returns 0 if no events exist.
     [[nodiscard]] int64_t query_max_event_id() const;
 
+    // ── Audit log queries (Roadmap §15.14) ────────────────────────
+
+    /// An audit-log row.
+    struct AuditRow {
+        int64_t id = 0;
+        std::string timestamp;
+        std::string actor;       ///< "cli" | "mcp" | "http" | …
+        std::string action;      ///< "create_workflow" | "cancel_run" | …
+        std::string target;      ///< Entity name/ID (may be empty).
+        std::string detail_json;
+    };
+
+    /// Query recent audit entries, newest first.
+    [[nodiscard]] std::vector<AuditRow> query_audit_log(
+        int limit = 50) const;
+
 private:
     SQLite::Database& db_;
 };

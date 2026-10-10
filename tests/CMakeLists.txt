@@ -125,6 +125,7 @@ kairos_discover_tests(test_runner_pool)
 # DBWriter + QueryReader tests
 add_executable(test_db_writer
     unit/persist/db_writer_test.cpp
+    unit/persist/audit_log_test.cpp
 )
 target_link_libraries(test_db_writer PRIVATE kairos_test_helpers)
 kairos_discover_tests(test_db_writer)

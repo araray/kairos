@@ -62,6 +62,7 @@ void DBWriter::release_statements() {
     stmt_insert_watch_sample_.reset();
     stmt_insert_watch_event_.reset();
     stmt_insert_metrics_snapshot_.reset();
+    stmt_insert_audit_.reset();
 }
 
 void DBWriter::prepare_statements() {
@@ -113,6 +114,10 @@ void DBWriter::prepare_statements() {
     stmt_insert_metrics_snapshot_ = std::make_unique<SQLite::Statement>(db_,
         "INSERT INTO metrics_snapshots (metric_name, metric_type, value, "
         "labels_json) VALUES (?, ?, ?, ?)");
+
+    stmt_insert_audit_ = std::make_unique<SQLite::Statement>(db_,
+        "INSERT INTO audit_log (actor, action, target, detail_json) "
+        "VALUES (?, ?, ?, ?)");
 }
 
 void DBWriter::start(std::stop_token stop) {
@@ -312,6 +317,14 @@ void DBWriter::execute_request(const DBWriteRequest& req) {
             stmt_insert_watch_event_->bind(5, r.details_json);
             stmt_insert_watch_event_->bind(6, r.severity);
             stmt_insert_watch_event_->exec();
+
+        } else if constexpr (std::is_same_v<T, InsertAuditEntry>) {
+            stmt_insert_audit_->reset();
+            stmt_insert_audit_->bind(1, r.actor);
+            stmt_insert_audit_->bind(2, r.action);
+            stmt_insert_audit_->bind(3, r.target);
+            stmt_insert_audit_->bind(4, r.detail_json);
+            stmt_insert_audit_->exec();
 
         } else if constexpr (std::is_same_v<T, PruneOlderThan>) {
             // Prune runs older than cutoff.

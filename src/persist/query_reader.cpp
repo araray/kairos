@@ -1045,6 +1045,27 @@ std::vector<QueryReader::WatchEventRow> QueryReader::query_watch_events_since(
     return results;
 }
 
+std::vector<QueryReader::AuditRow> QueryReader::query_audit_log(
+    int limit) const
+{
+    std::vector<AuditRow> results;
+    SQLite::Statement q(db_,
+        "SELECT id, timestamp, actor, action, target, detail_json "
+        "FROM audit_log ORDER BY id DESC LIMIT ?");
+    q.bind(1, limit);
+    while (q.executeStep()) {
+        AuditRow row;
+        row.id           = q.getColumn(0).getInt64();
+        row.timestamp    = q.getColumn(1).getString();
+        row.actor        = q.getColumn(2).getString();
+        row.action       = q.getColumn(3).getString();
+        row.target       = q.getColumn(4).getString();
+        row.detail_json  = q.getColumn(5).getString();
+        results.push_back(std::move(row));
+    }
+    return results;
+}
+
 int64_t QueryReader::query_max_event_id() const {
     try {
         SQLite::Statement q(db_,

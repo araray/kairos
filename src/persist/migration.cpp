@@ -247,6 +247,27 @@ CREATE INDEX IF NOT EXISTS idx_tags_entity
 -- NULL for runs created before this migration.
 ALTER TABLE runs ADD COLUMN tags_json TEXT;
         )SQL"
+    },
+    {
+        3,
+        "Audit log — audit_log table for all mutations (Roadmap §15.14)",
+        R"SQL(
+-- ╔════════════════════════════════════════════════════════════════╗
+-- ║  AUDIT_LOG — who changed what, when (write API safety §3.8.2) ║
+-- ╚════════════════════════════════════════════════════════════════╝
+
+CREATE TABLE IF NOT EXISTS audit_log (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    timestamp   TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    actor       TEXT NOT NULL,    -- 'cli' | 'mcp' | 'http' | 'watch_engine' …
+    action      TEXT NOT NULL,    -- 'create_workflow' | 'cancel_run' …
+    target      TEXT,             -- entity name/ID
+    detail_json TEXT              -- additional context
+);
+
+CREATE INDEX IF NOT EXISTS idx_audit_timestamp
+    ON audit_log (timestamp);
+        )SQL"
     }
 };
 

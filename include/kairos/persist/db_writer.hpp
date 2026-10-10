@@ -190,6 +190,16 @@ struct PruneMetricsSnapshots {
     int retention_days = 7;              ///< Delete snapshots older than this many days.
 };
 
+/// Append an audit-log entry — records every mutation (config writes,
+/// run triggers/cancels, reloads) with its actor.
+/// Spec reference: Roadmap §15.14 (audit log), §3.8.2 (write API safety).
+struct InsertAuditEntry {
+    std::string actor;               ///< "cli" | "mcp" | "http" | "scheduler" …
+    std::string action;              ///< "create_workflow" | "cancel_run" …
+    std::string target;              ///< Entity name/ID (may be empty).
+    std::string detail_json;         ///< Additional context (JSON object).
+};
+
 /// Union of all write request types.
 using DBWriteRequest = std::variant<
     InsertRun, UpdateRunComplete,
@@ -201,7 +211,8 @@ using DBWriteRequest = std::variant<
     BatchInsertWatchSamples, PruneWatchSamples,
     PruneOlderThan,
     InsertMetricsSnapshot, BatchInsertMetricsSnapshots,
-    PruneMetricsSnapshots
+    PruneMetricsSnapshots,
+    InsertAuditEntry
 >;
 
 // ── DB Writer ────────────────────────────────────────────────────────────
@@ -276,6 +287,7 @@ private:
     std::unique_ptr<SQLite::Statement> stmt_insert_watch_sample_;
     std::unique_ptr<SQLite::Statement> stmt_insert_watch_event_;
     std::unique_ptr<SQLite::Statement> stmt_insert_metrics_snapshot_;
+    std::unique_ptr<SQLite::Statement> stmt_insert_audit_;
 };
 
 }  // namespace kairos::persist
