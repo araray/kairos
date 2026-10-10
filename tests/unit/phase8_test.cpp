@@ -47,11 +47,12 @@ protected:
 
 // ─── Migration v2 is applied correctly ────────────────────────────────────
 
-TEST_F(Phase8IntegrationTest, MigrationV2Applied) {
+TEST_F(Phase8IntegrationTest, MigrationsApplied) {
     SQLite::Statement query(*db_,
         "SELECT MAX(version) FROM schema_version");
     ASSERT_TRUE(query.executeStep());
-    EXPECT_EQ(query.getColumn(0).getInt(), 2);
+    EXPECT_EQ(query.getColumn(0).getInt(),
+              static_cast<int>(kairos::persist::get_migrations().size()));
 }
 
 // ─── Tag lifecycle: sync → query → has_tag ────────────────────────────────

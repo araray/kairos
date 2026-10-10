@@ -143,7 +143,17 @@ protected:
                 rule_name TEXT DEFAULT '',
                 details_json TEXT DEFAULT '{}',
                 action_taken TEXT DEFAULT '',
-                created_at TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+                created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+            )
+        )");
+        db_->exec(R"(
+            CREATE TABLE IF NOT EXISTS audit_log (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+                actor TEXT NOT NULL,
+                action TEXT NOT NULL,
+                target TEXT,
+                detail_json TEXT
             )
         )");
         db_->exec(R"(
