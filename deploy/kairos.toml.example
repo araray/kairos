@@ -356,6 +356,43 @@ listen_port = 8420
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# § HEALTH — self-monitoring (Roadmap §15.5)
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+[kairos.health]
+
+# Run self-checks periodically and log degraded states. The same checks
+# are always available via `kairos status --health` and GET /health.
+enabled = true
+
+# Seconds between periodic checks.
+check_interval_seconds = 60
+
+# Warn when the SQLite database exceeds this size.
+max_db_size_mb = 1024
+
+# Warn when the trigger bus holds more than this many pending events.
+max_queue_depth = 100
+
+# Runs in RUNNING state longer than this are reported as stale.
+stale_run_timeout_seconds = 3600
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# § SECRETS — backend selection (Roadmap §12.2)
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+[kairos.security]
+
+# Secret source: "" (none), "vault" (Ansible Vault — also enabled by
+# the legacy [kairos.vault] section), or "env".
+#   env: every KAIROS_SECRET_<KEY> variable becomes secrets.<KEY>
+#        (e.g. KAIROS_SECRET_DEPLOY_API_KEY → ${{ secrets.DEPLOY_API_KEY }}).
+backend = ""
+env_prefix = "KAIROS_SECRET_"
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # § DAEMON — lifecycle management
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
