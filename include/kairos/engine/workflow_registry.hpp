@@ -48,6 +48,8 @@ struct JobDef {
     std::optional<std::string> condition_expr;  ///< KEL condition
     bool continue_on_error = false;
     std::unordered_map<std::string, std::string> env;  ///< Job-level env
+    std::vector<std::string> env_files;  ///< §11 .env files, loaded at
+                                         ///< execution; inline env wins.
     std::filesystem::path working_dir;  ///< Job-level working dir
     std::vector<std::string> tags;  ///< §6 Tags from YAML `tags:` array
 };

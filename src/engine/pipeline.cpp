@@ -12,8 +12,10 @@
 #include <spdlog/spdlog.h>
 
 #include <condition_variable>
+#include <filesystem>
 #include <future>
 #include <mutex>
+#include <unordered_map>
 
 namespace kairos::engine {
 
@@ -601,9 +603,29 @@ exec::ProcessSpec Pipeline::build_process_spec(
     spec.timeout = step.timeout;
 
     // Build environment via the 7-layer EnvBuilder (§14.6).
+    //
+    // §11 env_file layer: loaded at execution time; relative paths
+    // resolve against the effective working directory. Merged as its
+    // own layer BEFORE the job inline env — later layers override, so
+    // inline `env:` always wins over files, and later files win over
+    // earlier ones (map insert-or-assign below).
+    std::unordered_map<std::string, std::string> env_file_layer;
+    if (!job.env_files.empty()) {
+        std::filesystem::path base =
+            !spec.working_dir.empty()
+                ? std::filesystem::path(spec.working_dir)
+                : std::filesystem::current_path();
+        for (const auto& f : job.env_files) {
+            for (const auto& [k, v] : exec::load_env_file(f, base)) {
+                env_file_layer.insert_or_assign(k, v);
+            }
+        }
+    }
+
     exec::EnvBuilder builder;
-    builder.inherit_parent()
-           .add_job(job.env)
+    builder.inherit_parent();
+    if (!env_file_layer.empty()) builder.add_job(env_file_layer);
+    builder.add_job(job.env)
            .add_step(step.env);
 
     // Layer 6: Resolve ${{ secrets.key }} references (§17.1).

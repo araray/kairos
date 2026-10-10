@@ -993,4 +993,58 @@ watch_groups:
 }
 
 }  // anonymous namespace
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  §11 env_file parsing (Roadmap Phase 12)
+// ═══════════════════════════════════════════════════════════════════════════
+
+TEST(YamlLoaderTest, ParsesJobEnvFiles) {
+    auto r = load_workflow_string(R"(
+name: envfiles
+jobs:
+  build:
+    env_file: .env
+    steps:
+      - run: "true"
+  deploy:
+    env_file:
+      - .env
+      - .env.production
+      - /etc/kairos/global.env
+    steps:
+      - run: "true"
+)");
+    ASSERT_TRUE(r.ok()) << (r.errors.empty() ? "?" : r.errors[0].message);
+    ASSERT_EQ(r.workflows.size(), 1u);
+
+    const auto& jobs = r.workflows[0].jobs;
+    ASSERT_EQ(jobs.size(), 2u);
+    ASSERT_EQ(jobs[0].env_files.size(), 1u);
+    EXPECT_EQ(jobs[0].env_files[0], ".env");
+    ASSERT_EQ(jobs[1].env_files.size(), 3u);
+    EXPECT_EQ(jobs[1].env_files[2], "/etc/kairos/global.env");
+}
+
+TEST(YamlLoaderTest, EnvFileAffectsJobId) {
+    auto base = load_workflow_string(R"(
+name: ids
+jobs:
+  a:
+    steps:
+      - run: "true"
+)");
+    auto with_file = load_workflow_string(R"(
+name: ids
+jobs:
+  a:
+    env_file: extra.env
+    steps:
+      - run: "true"
+)");
+    ASSERT_TRUE(base.ok());
+    ASSERT_TRUE(with_file.ok());
+    EXPECT_NE(base.workflows[0].jobs[0].job_id,
+              with_file.workflows[0].jobs[0].job_id);
+}
+
 }  // namespace kairos::config

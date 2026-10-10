@@ -173,6 +173,12 @@ std::string job_hash_input(const JobDef& job, const std::string& workflow_id) {
         buf += '\0';
         buf += step.command;
     }
+    // §11: env files affect execution → different IDs when they change.
+    for (const auto& f : job.env_files) {
+        buf += '\0';
+        buf += "env_file:";
+        buf += f;
+    }
     return buf;
 }
 
@@ -268,6 +274,23 @@ JobDef parse_job(const std::string& job_key, const YAML::Node& node,
 
     // Job-level env.
     job.env = read_env_map(node["env"]);
+
+    // §11 env_file: one path or a list, loaded at execution time.
+    // Later files override earlier; inline `env` overrides all.
+    if (node["env_file"]) {
+        if (node["env_file"].IsSequence()) {
+            for (const auto& f : node["env_file"]) {
+                if (f.IsScalar())
+                    job.env_files.push_back(f.as<std::string>());
+            }
+        } else if (node["env_file"].IsScalar()) {
+            job.env_files.push_back(
+                node["env_file"].as<std::string>());
+        } else {
+            errors.push_back({file, path + ".env_file",
+                              "env_file must be a path or list of paths"});
+        }
+    }
 
     // Working directory.
     job.working_dir = opt_string(node, "working_dir", "");

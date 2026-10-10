@@ -7,7 +7,11 @@
 #include "kairos/exec/env_builder.hpp"
 
 #include <cstdlib>
+#include <filesystem>
+#include <fstream>
 #include <regex>
+#include <sstream>
+#include <stdexcept>
 
 #ifdef _WIN32
 // Windows: environment block via GetEnvironmentStringsW → UTF-8 conversion.
@@ -191,6 +195,88 @@ void EnvBuilder::scan_and_resolve(SecretResolver& resolver) {
             value = std::move(result);
         }
     }
+}
+
+
+// ── §11 .env file parsing ────────────────────────────────────────────────
+
+std::unordered_map<std::string, std::string> parse_env_file_content(
+    const std::string& content)
+{
+    std::unordered_map<std::string, std::string> result;
+    std::istringstream stream(content);
+    std::string line;
+    while (std::getline(stream, line)) {
+        if (!line.empty() && line.back() == '\r') line.pop_back();
+
+        // Trim leading whitespace.
+        size_t start = line.find_first_not_of(" \t");
+        if (start == std::string::npos) continue;              // blank
+        if (line[start] == '#' || line[start] == ';') continue; // comment
+
+        // Tolerate an optional "export " prefix (dotenv convention).
+        std::string body = line.substr(start);
+        if (body.starts_with("export ") ||
+            body.starts_with("export\t")) {
+            body = body.substr(7);
+            size_t ns = body.find_first_not_of(" \t");
+            if (ns == std::string::npos) continue;
+            body = body.substr(ns);
+        }
+
+        size_t eq = body.find('=');
+        if (eq == std::string::npos || eq == 0) continue;      // invalid
+
+        std::string key = body.substr(0, eq);
+        std::string value = body.substr(eq + 1);
+
+        // Trim whitespace around the key.
+        size_t kend = key.find_last_not_of(" \t");
+        if (kend != std::string::npos) key.erase(kend + 1);
+        if (key.empty()) continue;
+
+        // Trim surrounding whitespace of the value.
+        size_t vstart = value.find_first_not_of(" \t");
+        if (vstart == std::string::npos) {
+            value = "";
+        } else {
+            size_t vend = value.find_last_not_of(" \t");
+            value = value.substr(vstart, vend - vstart + 1);
+        }
+
+        // Strip one pair of matching surrounding quotes.
+        if (value.size() >= 2 &&
+            ((value.front() == '"' && value.back() == '"') ||
+             (value.front() == '\'' && value.back() == '\''))) {
+            value = value.substr(1, value.size() - 2);
+        }
+
+        result[key] = value;
+    }
+    return result;
+}
+
+std::unordered_map<std::string, std::string> load_env_file(
+    const std::filesystem::path& path,
+    const std::filesystem::path& base_dir)
+{
+    std::filesystem::path resolved = path;
+    if (resolved.is_relative()) resolved = base_dir / resolved;
+
+    std::error_code ec;
+    if (!std::filesystem::is_regular_file(resolved, ec) || ec) {
+        throw std::runtime_error(
+            "env_file not found: " + resolved.string());
+    }
+
+    std::ifstream in(resolved, std::ios::binary);
+    if (!in) {
+        throw std::runtime_error(
+            "env_file not readable: " + resolved.string());
+    }
+    std::string content((std::istreambuf_iterator<char>(in)),
+                        std::istreambuf_iterator<char>());
+    return parse_env_file_content(content);
 }
 
 }  // namespace kairos::exec

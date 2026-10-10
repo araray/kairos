@@ -8,6 +8,10 @@
 #include <gtest/gtest.h>
 
 #include <cstdlib>
+#include <filesystem>
+#include <fstream>
+
+#include "test_helpers.hpp"
 
 // ── Cross-platform setenv/unsetenv ───────────────────────────────────────
 // MSVC doesn't provide POSIX setenv/unsetenv.  Use _putenv_s instead.
@@ -221,4 +225,79 @@ TEST(EnvBuilderTest, FullPipeline) {
     EXPECT_EQ(env["SECRET_VAL"], "tok-abc");
     EXPECT_EQ(env["KAIROS_RUN_ID"], "r1");
     EXPECT_TRUE(env.contains("PATH"));
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  §11 .env file parsing (Roadmap Phase 12)
+// ═══════════════════════════════════════════════════════════════════════════
+
+TEST(EnvFileTest, ParsesBasicFormat) {
+    auto m = parse_env_file_content(
+        "# comment\n"
+        "PLAIN=value\n"
+        "QUOTED=\"hello world\"\n"
+        "SINGLE='single'\n"
+        "SPACED =  trimmed  \n"
+        "\n"
+        "EMPTY=\n");
+    EXPECT_EQ(m["PLAIN"], "value");
+    EXPECT_EQ(m["QUOTED"], "hello world");
+    EXPECT_EQ(m["SINGLE"], "single");
+    EXPECT_EQ(m["SPACED"], "trimmed");
+    EXPECT_EQ(m["EMPTY"], "");
+    EXPECT_EQ(m.size(), 5u);
+}
+
+TEST(EnvFileTest, ToleratesExportPrefixAndSkipsInvalid) {
+    auto m = parse_env_file_content(
+        "export A=1\n"
+        "; also a comment\n"
+        "this line has no equals\n"
+        "=novalue\n"
+        "B=2\n");
+    EXPECT_EQ(m["A"], "1");
+    EXPECT_EQ(m["B"], "2");
+    EXPECT_EQ(m.size(), 2u);
+}
+
+TEST(EnvFileTest, LoadEnvFileResolvesRelativeToBase) {
+    kairos::testing::TempDir dir;
+    std::ofstream(dir.path() / "app.env")
+        << "MODE=production\nTOKEN=abc\n";
+    std::filesystem::create_directories(dir.path() / "sub");
+
+    auto m = load_env_file("app.env", dir.path());
+    EXPECT_EQ(m["MODE"], "production");
+
+    // Relative to a different base that also has the file.
+    std::ofstream(dir.path() / "sub" / "app.env") << "MODE=staging\n";
+    auto m2 = load_env_file("app.env", dir.path() / "sub");
+    EXPECT_EQ(m2["MODE"], "staging");
+
+    // Absolute paths ignore the base.
+    auto m3 = load_env_file(dir.path() / "app.env",
+                            dir.path() / "sub");
+    EXPECT_EQ(m3["MODE"], "production");
+}
+
+TEST(EnvFileTest, LoadEnvFileMissingThrows) {
+    kairos::testing::TempDir dir;
+    EXPECT_THROW(load_env_file("nope.env", dir.path()),
+                 std::runtime_error);
+}
+
+TEST(EnvFileTest, EnvFileLayerBelowInlineEnv) {
+    // Precedence contract: env_file < job inline env < step env.
+    std::unordered_map<std::string, std::string> file_layer{
+        {"A", "file"}, {"B", "file"}, {"C", "file"}};
+    std::unordered_map<std::string, std::string> job_env{
+        {"B", "job"}, {"C", "job"}};
+    std::unordered_map<std::string, std::string> step_env{{"C", "step"}};
+
+    EnvBuilder b;
+    b.add_job(file_layer).add_job(job_env).add_step(step_env);
+    auto env = b.build();
+    EXPECT_EQ(env["A"], "file");
+    EXPECT_EQ(env["B"], "job");
+    EXPECT_EQ(env["C"], "step");
 }
