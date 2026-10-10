@@ -1,0 +1,85 @@
+<!-- Job detail (wrapped by base.html) -->
+<!-- Data: job{id, name, scope, scope_kind, condition, tags[], needs[]},
+     steps[{name, command, working_dir, timeout_s}], recent_runs[] -->
+
+<nav aria-label="breadcrumb">
+  <ol class="breadcrumb">
+    <li class="breadcrumb-item"><a href="/jobs">Jobs</a></li>
+    <li class="breadcrumb-item active">{{ job.name }}</li>
+  </ol>
+</nav>
+
+<div class="page-header">
+  <div>
+    <h4 class="mb-1">{{ job.name }}</h4>
+    <code>{{ job.id }}</code>
+    {% for t in job.tags %}<span class="kairos-tag">{{ t }}</span>{% endfor %}
+  </div>
+  <a href="/runs?workflow={{ job.name }}" class="btn btn-outline-info btn-sm">Run History</a>
+</div>
+
+<div class="row g-4">
+  <div class="col-lg-7">
+    <div class="card p-3">
+      <h5>Definition</h5>
+      <table class="table table-sm mb-0">
+        <tr><td class="text-muted" style="width:160px">Scope</td>
+          <td>
+{% if job.scope_kind == "workflow" %}
+            workflow <a href="/workflows/{{ job.scope }}">{{ job.scope }}</a>
+{% else %}
+            standalone
+{% endif %}
+          </td></tr>
+        <tr><td class="text-muted">Condition</td><td><code>{{ job.condition }}</code></td></tr>
+{% if length(job.needs) > 0 %}
+        <tr><td class="text-muted">Needs</td><td>{{ job.needs }}</td></tr>
+{% endif %}
+      </table>
+    </div>
+
+    <div class="card p-3 mt-4">
+      <h5>Steps</h5>
+      <div class="table-responsive">
+        <table class="table table-sm table-hover mb-0">
+          <thead><tr><th>#</th><th>Step</th><th>Command</th><th>Working Dir</th><th>Timeout</th></tr></thead>
+          <tbody>
+{% for s in steps %}
+            <tr>
+              <td class="fit text-muted">{{ s.index }}</td>
+              <td>{{ s.name }}</td>
+              <td><code>{{ s.command }}</code></td>
+              <td class="text-muted">{{ s.working_dir }}</td>
+              <td class="fit text-muted">{{ s.timeout_s }}</td>
+            </tr>
+{% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
+  <div class="col-lg-5">
+    <div class="card p-3">
+      <h5>Recent Runs</h5>
+      <div class="table-responsive">
+        <table class="table table-sm table-hover mb-0">
+          <thead><tr><th>Run</th><th>Status</th><th>Exit</th><th>Started</th></tr></thead>
+          <tbody>
+{% for r in recent_runs %}
+            <tr>
+              <td><a href="/runs/{{ r.run_id }}"><code>{{ r.run_id_short }}</code></a></td>
+              <td><span class="badge badge-{{ r.badge }}">{{ r.status }}</span></td>
+              <td class="fit"><code>{{ r.exit_code }}</code></td>
+              <td class="fit">{{ r.start_ts }}</td>
+            </tr>
+{% endfor %}
+{% if length(recent_runs) == 0 %}
+            <tr><td colspan="4" class="text-center k-empty">No runs yet</td></tr>
+{% endif %}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+</div>

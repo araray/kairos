@@ -228,7 +228,10 @@ static bool perform_config_reload(
     watch::WatchEngine& watch_engine,
     std::shared_ptr<spdlog::logger> log,
     mcp::McpHandler* mcp_handler = nullptr,
-    persist::TagStore* tag_store = nullptr)
+    persist::TagStore* tag_store = nullptr,
+    const std::function<void(
+        const std::shared_ptr<const engine::WorkflowRegistry>&)>&
+        registry_notify = {})
 {
     log->info("Config reload: re-parsing {}", config_path.string());
 
@@ -302,6 +305,12 @@ static bool perform_config_reload(
     // Propagate to MCP handler if available (Phase 4 Batch 3).
     if (mcp_handler) {
         mcp_handler->update_registry(new_registry);
+    }
+
+    // Propagate to the HTTP server if running (Phase 9 — keeps the Web
+    // UI's workflow/job/watch views fresh across reloads).
+    if (registry_notify) {
+        registry_notify(new_registry);
     }
 
     log->info("Config reload complete");
@@ -640,6 +649,29 @@ int run_daemon(std::shared_ptr<const kairos::config::ConfigState> config) {
     bool mcp_enabled = config->global.get<bool>(
         "kairos.mcp.enabled", false);
 
+    // Registry-reload notifier for the HTTP server (Phase 9): declared
+    // before the MCP wiring so every reload path can thread it through;
+    // populated in Step 15.9 when the HTTP server exists, null otherwise.
+    std::function<void(
+        const std::shared_ptr<const engine::WorkflowRegistry>&)>
+        registry_reload_notify;
+#ifdef KAIROS_HTTP_ENABLED
+    // Declared early (constructed in Step 15.9) so the notify lambda can
+    // safely capture it before any thread that triggers reloads starts.
+    std::unique_ptr<http::HttpServer> http_server;
+    // Current-registry holder for the HTTP submit path (name→id/kind
+    // resolution); kept in sync with the engines on every reload.
+    auto current_registry = std::make_shared<
+        std::atomic<std::shared_ptr<const engine::WorkflowRegistry>>>(
+            std::shared_ptr<const engine::WorkflowRegistry>(registry));
+    registry_reload_notify =
+        [&http_server, current_registry](
+            const std::shared_ptr<const engine::WorkflowRegistry>& reg) {
+            current_registry->store(reg);
+            if (http_server) http_server->update_registry(reg);
+        };
+#endif
+
     // MCP handler and transport (kept alive for the daemon's lifetime).
     std::unique_ptr<mcp::McpHandler> mcp_handler;
     std::unique_ptr<mcp::StdioTransport> mcp_transport;
@@ -680,12 +712,13 @@ int run_daemon(std::shared_ptr<const kairos::config::ConfigState> config) {
 
         // Config reload callback: delegates to the daemon's reload logic.
         mcp_deps.reload_config =
-            [&config, &scheduler, &pipeline, &watch_engine, &log, &tag_store]
+            [&config, &scheduler, &pipeline, &watch_engine, &log,
+             &tag_store, &registry_reload_notify]
             (std::vector<std::string>& errors) -> bool {
                 bool ok = perform_config_reload(
                     config->config_file_path,
                     scheduler, pipeline, watch_engine, log,
-                    nullptr, &tag_store);
+                    nullptr, &tag_store, registry_reload_notify);
                 if (!ok) {
                     errors.push_back("Config reload failed — see logs");
                 }
@@ -724,22 +757,43 @@ int run_daemon(std::shared_ptr<const kairos::config::ConfigState> config) {
 
     // ── Step 15.9: Start HTTP server (optional, §26) ─────────────
 #ifdef KAIROS_HTTP_ENABLED
-    std::unique_ptr<http::HttpServer> http_server;
     bool http_enabled = config->global.get<bool>(
         "kairos.http.enabled", false);
 
     if (http_enabled) {
         http::HttpConfig http_cfg;
-        http_cfg.listen_addr = config->global.get<std::string>(
-            "kairos.http.host", "127.0.0.1");
+        // Keys follow the documented names (listen_addr / listen_port /
+        // api_token — see deploy/kairos.toml.example). The host/port/
+        // auth_token spellings are honored as legacy fallbacks.
+        http_cfg.listen_addr =
+            config->global.get<std::string>("kairos.http.listen_addr",
+                config->global.get<std::string>(
+                    "kairos.http.host", "127.0.0.1"));
         http_cfg.listen_port = static_cast<uint16_t>(
-            config->global.get<int>("kairos.http.port", 8420));
-        http_cfg.api_token = config->global.get<std::string>(
-            "kairos.http.auth_token", "");
+            config->global.get<int>("kairos.http.listen_port",
+                config->global.get<int>("kairos.http.port", 8420)));
+        http_cfg.api_token =
+            config->global.get<std::string>("kairos.http.api_token",
+                config->global.get<std::string>(
+                    "kairos.http.auth_token", ""));
         http_cfg.enable_cors = config->global.get<bool>(
             "kairos.http.cors_enabled", false);
+        http_cfg.read_timeout_seconds = config->global.get<int>(
+            "kairos.http.read_timeout_s", 30);
         http_cfg.timezone = config->global.get<std::string>(
             "kairos.timezone", "local");
+
+        // Web asset root (Roadmap §3.1): explicit override, else
+        // <data_dir>/web when present; otherwise embedded assets only.
+        http_cfg.web_root = config->global.get<std::string>(
+            "kairos.http.web_root", "");
+        if (http_cfg.web_root.empty()) {
+            auto web_candidate = config->data_dir / "web";
+            std::error_code web_ec;
+            if (std::filesystem::is_directory(web_candidate, web_ec)) {
+                http_cfg.web_root = web_candidate.string();
+            }
+        }
 
         auto uptime_start_http = std::chrono::steady_clock::now();
 
@@ -752,24 +806,54 @@ int run_daemon(std::shared_ptr<const kairos::config::ConfigState> config) {
             return std::chrono::duration<double>(
                 std::chrono::steady_clock::now() - uptime_start_http).count();
         };
-        http_deps.submit_run = [&trigger_bus](
+        http_deps.submit_run = [&trigger_bus, current_registry](
             const std::string& name) -> std::string {
+            // Resolve the name (or raw ID) to a registry target first —
+            // the pipeline resolves targets by ID, not by name.
+            auto reg = current_registry->load();
+            if (!reg) return {};
+
+            std::string target_id;
+            engine::TriggerEvent::TargetKind kind;
+            if (const auto* wf = reg->workflow_by_name(name)) {
+                target_id = wf->workflow_id;
+                kind = engine::TriggerEvent::TargetKind::Workflow;
+            } else if (const auto* sj =
+                           reg->standalone_job_by_name(name)) {
+                target_id = sj->job_id;
+                kind = engine::TriggerEvent::TargetKind::StandaloneJob;
+            } else if (const auto* wfbid = reg->workflow(name)) {
+                target_id = wfbid->workflow_id;
+                kind = engine::TriggerEvent::TargetKind::Workflow;
+            } else if (const auto* sjbid = reg->standalone_job(name)) {
+                target_id = sjbid->job_id;
+                kind = engine::TriggerEvent::TargetKind::StandaloneJob;
+            } else {
+                return {};  // Unknown target → 404 at the API layer.
+            }
+
             auto run_id = core::generate_run_id();
             engine::TriggerEvent evt;
             evt.type = engine::TriggerType::ManualRun;
-            evt.target_id = name;
+            evt.target_id = target_id;
+            evt.target_kind = kind;
             evt.trigger_id = "http-api";
             evt.correlation_id = run_id;
+            evt.fire_time = std::chrono::system_clock::now();
+            evt.mono_time = std::chrono::steady_clock::now();
+            evt.payload = engine::ManualRunPayload{
+                .invoked_by = "http"};
             bool ok = trigger_bus.push(std::move(evt),
                 std::chrono::milliseconds(5000));
             return ok ? run_id : std::string{};
         };
         http_deps.reload_config = [&config, &scheduler, &pipeline,
-                                    &watch_engine, &log, &tag_store]() -> bool {
+                                    &watch_engine, &log, &tag_store,
+                                    &registry_reload_notify]() -> bool {
             return perform_config_reload(
                 config->config_file_path,
                 scheduler, pipeline, watch_engine, log,
-                nullptr, &tag_store);
+                nullptr, &tag_store, registry_reload_notify);
         };
 
         http_server = std::make_unique<http::HttpServer>(
@@ -1020,7 +1104,7 @@ int run_daemon(std::shared_ptr<const kairos::config::ConfigState> config) {
             bool ok = perform_config_reload(
                 config->config_file_path,
                 scheduler, pipeline, watch_engine, log,
-                mcp_handler.get(), &tag_store);
+                mcp_handler.get(), &tag_store, registry_reload_notify);
             if (ok) {
                 counter_reloads_ok->increment();
             } else {

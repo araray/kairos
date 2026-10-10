@@ -509,6 +509,36 @@ void QueryReader::register_watch_kel_bindings(
     };
 }
 
+std::optional<QueryReader::WatchEventRow> QueryReader::get_watch_event(
+    const std::string& event_uid) const
+{
+    WatchEventRow row;
+    SQLite::Statement query(db_,
+        "SELECT id, watch_group, rule_name, event_type, action_taken, "
+        "file_path, details_json, created_at "
+        "FROM watch_events WHERE id = ?");
+
+    // event_uid is the row id (see query_watch_events) — numeric.
+    try {
+        query.bind(1, static_cast<int64_t>(std::stoll(event_uid)));
+    } catch (...) {
+        return std::nullopt;  // Non-numeric uid — cannot match.
+    }
+
+    if (!query.executeStep()) return std::nullopt;
+
+    row.event_uid           = std::to_string(query.getColumn(0).getInt64());
+    row.watch_group         = query.getColumn(1).getString();
+    row.rule_name           = query.getColumn(2).getString();
+    row.event_type          = query.getColumn(3).getString();
+    row.severity            = query.getColumn(4).getString();
+    row.affected_files_json = query.getColumn(5).getString();
+    row.details_json        = query.getColumn(6).getString();
+    row.created_at          = query.getColumn(7).getString();
+    row.sample_epoch        = 0;
+    return row;
+}
+
 std::vector<QueryReader::WatchEventRow> QueryReader::query_watch_events(
     int limit, const std::string& watch_group) const
 {
@@ -718,6 +748,17 @@ QueryReader::PrefixResult QueryReader::resolve_run_id_prefix(
     }
 
     return result;
+}
+
+std::optional<std::string> QueryReader::get_run_id_by_correlation(
+    const std::string& correlation_id) const
+{
+    SQLite::Statement q(db_,
+        "SELECT run_id FROM runs WHERE correlation_id = ? "
+        "ORDER BY start_ts DESC LIMIT 1");
+    q.bind(1, correlation_id);
+    if (!q.executeStep()) return std::nullopt;
+    return q.getColumn(0).getString();
 }
 
 std::optional<QueryReader::RunSummary> QueryReader::get_run_summary(

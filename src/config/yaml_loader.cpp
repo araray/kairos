@@ -664,6 +664,11 @@ YamlLoadResult load_workflow_file(const fs::path& path) {
         result.triggers = std::move(r.triggers);
         result.errors = std::move(r.errors);
 
+        // Record provenance for the /yaml API endpoints (Roadmap §3.8.1).
+        for (auto& wf : result.workflows) {
+            wf.source_path = path.string();
+        }
+
     } catch (const YAML::Exception& e) {
         result.errors.push_back({path.string(), "",
             "YAML parse error: " + std::string(e.what())});
@@ -931,6 +936,8 @@ YamlLoadResult load_watch_groups_file(const fs::path& path) {
         for (const auto& node : groups_node) {
             auto group = parse_watch_group_node(
                 node, result.errors, path.string());
+            // Record provenance for the /yaml API endpoint (§3.8.1).
+            group.source_path = path.string();
             result.watch_groups.push_back(std::move(group));
         }
 

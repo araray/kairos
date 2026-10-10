@@ -94,6 +94,10 @@ struct WatchGroupDef {
 
     /// §6 Tags from YAML `tags:` array.
     std::vector<std::string> tags;
+
+    /// YAML file this group was loaded from ("" for inline definitions).
+    /// Not part of the content ID hash.
+    std::string source_path;
 };
 
 /// Result of a triggered watch rule, ready for persistence and

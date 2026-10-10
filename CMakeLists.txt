@@ -101,6 +101,7 @@ add_library(kairos_core STATIC
     src/persist/tag_store.cpp
     src/persist/stale_recovery.cpp
     src/cli/dag_graph.cpp
+    src/engine/explain.cpp
 )
 
 # ── Platform-conditional sources in kairos_core ────────────────────────
@@ -196,13 +197,25 @@ target_link_libraries(kairos PRIVATE
 
 # ── Optional: HTTP server (KAIROS_HTTP=ON) ─────────────────────────────────
 if(KAIROS_HTTP)
-    target_sources(kairos PRIVATE src/http/http_server.cpp)
+    include(cmake/KairosWebResources.cmake)
+    kairos_embed_web_resources(KAIROS_WEB_GENERATED_SRC)
+
+    target_sources(kairos PRIVATE
+        src/http/http_server.cpp
+        src/http/web_catalog.cpp
+        ${KAIROS_WEB_GENERATED_SRC}
+    )
     target_compile_definitions(kairos PRIVATE KAIROS_HTTP_ENABLED)
     target_link_libraries(kairos PRIVATE httplib::httplib)
     # inja is header-only; include path comes from FetchContent.
     target_include_directories(kairos PRIVATE
         ${inja_SOURCE_DIR}/include
     )
+    # The generated web_resources.cpp embeds UTF-8 asset content as raw
+    # string literals — MSVC needs the source charset set explicitly.
+    if(MSVC)
+        target_compile_options(kairos PRIVATE /utf-8)
+    endif()
 endif()
 
 # ── Optional: OpenTelemetry tracing (KAIROS_OTEL=ON) ──────────────────────

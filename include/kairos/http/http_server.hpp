@@ -28,6 +28,7 @@
 #include <filesystem>
 #include <functional>
 #include <memory>
+#include <mutex>
 #include <stop_token>
 #include <string>
 
@@ -62,6 +63,12 @@ struct HttpConfig {
     /// Timezone for display in HTML pages (e.g., "UTC", "local", "+05:30").
     /// JSON API always returns UTC.
     std::string timezone = "local";
+
+    /// External web asset root (Roadmap §3.1). When the directory exists,
+    /// templates and static files are served from it (hot-editable);
+    /// otherwise the compiled-in web/ assets are used. Empty = embedded
+    /// only.
+    std::string web_root;
 };
 
 // ── Shared dependencies ───────────────────────────────────────────────────
@@ -108,6 +115,12 @@ public:
 
     /// Gracefully stop the server.
     void stop();
+
+    /// Swap in a new (immutable) workflow registry after a config reload.
+    /// Thread-safe; request threads pick up the new snapshot on their
+    /// next registry access.
+    void update_registry(
+        std::shared_ptr<const engine::WorkflowRegistry> registry);
 
     /// @return The listen address (e.g., "127.0.0.1:8420").
     [[nodiscard]] std::string listen_address() const;

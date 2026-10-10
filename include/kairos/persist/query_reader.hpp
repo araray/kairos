@@ -155,6 +155,11 @@ public:
         int limit = 50,
         const std::string& watch_group = "") const;
 
+    /// Get a single watch event by its event_uid (the row id).
+    /// @return nullopt when no event has this id.
+    [[nodiscard]] std::optional<WatchEventRow> get_watch_event(
+        const std::string& event_uid) const;
+
     // ── Run summary stats (for CLI status) ───────────────────────
 
     /// Summary statistics for `kairos status` display.
@@ -226,6 +231,12 @@ public:
     /// Get a single run summary by run_id.
     [[nodiscard]] std::optional<RunSummary> get_run_summary(
         const std::string& run_id) const;
+
+    /// Resolve a run by its correlation_id (the ID handed to submitters
+    /// of manual runs before the pipeline mints the actual run_id).
+    /// Returns the most recent matching run_id, or nullopt.
+    [[nodiscard]] std::optional<std::string> get_run_id_by_correlation(
+        const std::string& correlation_id) const;
 
     /// Full run detail with jobs and steps (§16.6).
     struct StepDetail {

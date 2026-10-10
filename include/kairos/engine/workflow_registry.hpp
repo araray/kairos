@@ -61,6 +61,8 @@ struct WorkflowDef {
     std::vector<JobDef> jobs;    ///< All jobs in the workflow
     WorkflowDag dag;             ///< Pre-built DAG from job definitions
     std::vector<std::string> tags;  ///< §6 Tags from YAML `tags:` array
+    std::string source_path;     ///< YAML file loaded from ("" for inline).
+                                  ///< Not part of the content ID hash.
 };
 
 // ── Workflow Registry ───────────────────────────────────────────────────

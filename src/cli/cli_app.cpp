@@ -14,6 +14,7 @@
 #include "kairos/core/id_generator.hpp"
 #include "kairos/core/version.hpp"
 #include "kairos/daemon/daemon.hpp"
+#include "kairos/engine/explain.hpp"
 #include "kairos/engine/pipeline.hpp"
 #include "kairos/engine/trigger_event.hpp"
 #include "kairos/engine/trigger_types.hpp"
@@ -3313,14 +3314,6 @@ int run(int argc, char** argv) {
             return static_cast<int>(ExitCode::kNotFound);
         }
 
-        // Build execution plan from the DAG (§11.7).
-        // For explain, we evaluate conditions against SQLite history
-        // but do not execute anything.
-        engine::ExecutionPlan plan;
-        plan.workflow_id = found_wf->workflow_id;
-        plan.workflow_name = found_wf->workflow_name;
-        plan.trigger_type = "explain";
-
         // Try to open DB for condition evaluation — if it fails,
         // conditions that query history will be marked PENDING.
         std::unique_ptr<SQLite::Database> db;
@@ -3332,149 +3325,12 @@ int run(int argc, char** argv) {
             // DB may not exist — proceed without history queries.
         }
 
-        // Walk the DAG level-by-level, building plan entries.
-        for (int lvl = 0; lvl < found_wf->dag.level_count(); ++lvl) {
-            for (const auto& job_id : found_wf->dag.jobs_at_level(lvl)) {
-                const auto& dag_node = found_wf->dag.node(job_id);
-
-                engine::PlanEntry entry;
-                entry.job_id = dag_node.job_id;
-                entry.job_name = dag_node.job_name;
-                entry.level = dag_node.topo_level;
-                entry.needs = dag_node.needs;
-                entry.condition_expr =
-                    dag_node.condition_expr.value_or("");
-
-                // Check if any predecessor would not run.
-                bool all_needs_will_run = true;
-                for (const auto& need_id : dag_node.needs) {
-                    // Look up the predecessor's plan entry.
-                    for (const auto& prev : plan.entries) {
-                        if (prev.job_id == need_id &&
-                            prev.action != engine::PlanAction::Run &&
-                            prev.action != engine::PlanAction::ConditionPending) {
-                            all_needs_will_run = false;
-                            break;
-                        }
-                    }
-                }
-
-                if (!all_needs_will_run) {
-                    entry.action = engine::PlanAction::DependencyFailed;
-                    entry.reason = "Upstream dependency will not run";
-                    plan.entries.push_back(std::move(entry));
-                    continue;
-                }
-
-                // Evaluate condition expression if present.
-                if (dag_node.condition_expr.has_value() &&
-                    !dag_node.condition_expr->empty()) {
-                    // Check if condition references jobs in THIS workflow
-                    // (which haven't run yet).
-                    bool references_self_jobs = false;
-                    for (const auto& other_id :
-                         found_wf->dag.all_job_ids()) {
-                        // Simple heuristic: if condition mentions a job name
-                        // from this workflow, it's undecidable before execution.
-                        const auto& other_node =
-                            found_wf->dag.node(other_id);
-                        if (dag_node.condition_expr->find(
-                                "\"" + other_node.job_name + "\"") !=
-                            std::string::npos) {
-                            references_self_jobs = true;
-                            break;
-                        }
-                    }
-
-                    if (references_self_jobs) {
-                        entry.action = engine::PlanAction::ConditionPending;
-                        entry.reason =
-                            "Condition references same-workflow job "
-                            "(undecidable before execution)";
-                        entry.condition_result = "pending";
-                        plan.entries.push_back(std::move(entry));
-                        continue;
-                    }
-
-                    // Try to evaluate the condition against history.
-                    if (reader) {
-                        try {
-                            kel::EvalContext ctx;
-                            ctx.variables["workflow"] =
-                                kel::KelValue(found_wf->workflow_name);
-                            ctx.variables["trigger"] =
-                                kel::KelValue(std::string("explain"));
-                            ctx.variables["run_id"] =
-                                kel::KelValue(std::string("(dry-run)"));
-
-                            reader->register_kel_bindings(
-                                ctx, std::chrono::system_clock::now());
-
-                            kel::EvalLimits limits;
-                            auto result = kel::eval_expression(
-                                *dag_node.condition_expr, ctx, limits);
-
-                            if (result.is_bool()) {
-                                if (result.as_bool()) {
-                                    entry.action = engine::PlanAction::Run;
-                                    entry.reason = "Condition: " +
-                                        *dag_node.condition_expr +
-                                        " \xe2\x86\x92 true";
-                                    entry.condition_result = "true";
-                                } else {
-                                    entry.action = engine::PlanAction::Skip;
-                                    entry.reason = "Condition: " +
-                                        *dag_node.condition_expr +
-                                        " \xe2\x86\x92 false";
-                                    entry.condition_result = "false";
-                                }
-                            } else {
-                                entry.action =
-                                    engine::PlanAction::ConditionPending;
-                                entry.reason = "Condition evaluated to "
-                                    "non-boolean result";
-                                entry.condition_result = "error";
-                            }
-                        } catch (const std::exception& e) {
-                            entry.action =
-                                engine::PlanAction::ConditionPending;
-                            entry.reason = std::string(
-                                "Condition eval error: ") + e.what();
-                            entry.condition_result = "error";
-                        }
-                    } else {
-                        // No DB available — mark as pending.
-                        entry.action = engine::PlanAction::ConditionPending;
-                        entry.reason = "No database available for "
-                            "condition evaluation";
-                        entry.condition_result = "pending";
-                    }
-                } else {
-                    // No condition — will run.
-                    if (dag_node.needs.empty()) {
-                        entry.action = engine::PlanAction::Run;
-                        entry.reason = "No dependencies, no condition";
-                    } else {
-                        entry.action = engine::PlanAction::Run;
-                        std::string needs_str;
-                        for (size_t i = 0; i < dag_node.needs.size(); ++i) {
-                            if (i > 0) needs_str += ", ";
-                            // Resolve ID to name.
-                            try {
-                                needs_str += found_wf->dag.node(
-                                    dag_node.needs[i]).job_name;
-                            } catch (...) {
-                                needs_str += dag_node.needs[i];
-                            }
-                        }
-                        entry.reason = "Needs [" + needs_str +
-                            "] \xe2\x86\x92 will be met";
-                    }
-                }
-
-                plan.entries.push_back(std::move(entry));
-            }
-        }
+        // Build execution plan from the DAG (§11.7).
+        // For explain, we evaluate conditions against SQLite history
+        // but do not execute anything. Shared with HTTP /api/v1/explain
+        // and MCP kairos.explainPlan (Roadmap Phase 9).
+        engine::ExecutionPlan plan = engine::build_explain_plan(
+            *found_wf, reader.get());
 
         // Output the plan.
         if (json_output) {

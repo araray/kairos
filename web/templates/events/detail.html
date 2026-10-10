@@ -1,0 +1,54 @@
+<!-- Event detail (wrapped by base.html) -->
+<!-- Data: event{event_uid, watch_group, rule_name, event_type, severity,
+     created_at, sample_epoch, files_list[], details_pretty} -->
+
+<nav aria-label="breadcrumb">
+  <ol class="breadcrumb">
+    <li class="breadcrumb-item"><a href="/events">Events</a></li>
+    <li class="breadcrumb-item active">{{ event_uid_short }}</li>
+  </ol>
+</nav>
+
+<div class="page-header">
+  <div>
+    <h4 class="mb-1">Watch Event</h4>
+    <code>{{ event.event_uid }}</code>
+  </div>
+  <a href="/events" class="btn btn-outline-info btn-sm">Back to Events</a>
+</div>
+
+<div class="row g-4">
+  <div class="col-lg-5">
+    <div class="card p-3">
+      <h5>Detail</h5>
+      <table class="table table-sm mb-0">
+        <tr><td class="text-muted" style="width:150px">Watch Group</td><td>{{ event.watch_group }}</td></tr>
+        <tr><td class="text-muted">Rule</td><td>{{ event.rule_name }}</td></tr>
+        <tr><td class="text-muted">Type</td><td>{{ event.event_type }}</td></tr>
+        <tr><td class="text-muted">Severity</td><td class="sev-{{ severity_class(event.severity) }}">{{ event.severity }}</td></tr>
+        <tr><td class="text-muted">Sample Epoch</td><td>{{ event.sample_epoch }}</td></tr>
+        <tr><td class="text-muted">Time</td><td>{{ event.created_at }}</td></tr>
+      </table>
+    </div>
+  </div>
+  <div class="col-lg-7">
+    <div class="card p-3 mb-4">
+      <h5>Affected Files <span class="text-muted small">({{ length(event.files_list) }})</span></h5>
+{% if length(event.files_list) > 0 %}
+      <ul class="mb-0" style="font-size: 0.9rem;">
+{% for f in event.files_list %}
+        <li class="mb-1" style="word-break:break-all;"><code>{{ f }}</code></li>
+{% endfor %}
+      </ul>
+{% else %}
+      <p class="text-muted mb-0">No affected files recorded.</p>
+{% endif %}
+    </div>
+{% if event.details_pretty != "" %}
+    <div class="card p-3">
+      <h5>Details</h5>
+      <div class="yaml-block">{{ event.details_pretty }}</div>
+    </div>
+{% endif %}
+  </div>
+</div>

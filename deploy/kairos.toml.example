@@ -340,6 +340,20 @@ listen_port = 8420
 #   Default: "" (no auth)
 # api_token = ""
 
+# Web asset root — external override directory for the Web UI templates
+# and static files (Roadmap §3.1). When the directory exists, its files
+# take precedence over the assets embedded in the binary, so the UI can
+# be customized or hot-edited without recompiling. Empty (default) uses
+# <data_dir>/web when present, falling back to the embedded assets.
+#   Env: KAIROS_HTTP_WEB__ROOT
+#   Default: "" (auto: <data_dir>/web, else embedded)
+# web_root = "/etc/kairos/web"
+
+# Per-connection read timeout in seconds.
+#   Env: KAIROS_HTTP_READ__TIMEOUT__S
+#   Default: 30
+# read_timeout_s = 30
+
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # § DAEMON — lifecycle management

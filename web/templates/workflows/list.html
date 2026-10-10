@@ -1,0 +1,40 @@
+<!-- Workflows list (wrapped by base.html) -->
+<!-- Data: workflows[{name, id, job_count, tags[], trigger_summary, last_status, last_badge, last_when}] -->
+
+<h4 class="page-header">Workflows</h4>
+
+<div class="card p-3">
+  <div class="table-responsive">
+    <table class="table table-sm table-hover mb-0">
+      <thead>
+        <tr>
+          <th>Name</th><th>Jobs</th><th>Triggers</th><th>Tags</th>
+          <th>Last Run</th><th>When</th>
+        </tr>
+      </thead>
+      <tbody>
+{% for wf in workflows %}
+        <tr>
+          <td><a href="/workflows/{{ wf.name }}"><strong>{{ wf.name }}</strong></a></td>
+          <td class="fit">{{ wf.job_count }}</td>
+          <td class="text-muted">{{ wf.trigger_summary }}</td>
+          <td>
+{% for t in wf.tags %}<span class="kairos-tag">{{ t }}</span>{% endfor %}
+          </td>
+          <td>
+{% if wf.last_status != "" %}
+            <span class="badge badge-{{ wf.last_badge }}">{{ wf.last_status }}</span>
+{% else %}
+            <span class="text-muted">never</span>
+{% endif %}
+          </td>
+          <td class="fit text-muted">{{ wf.last_when }}</td>
+        </tr>
+{% endfor %}
+{% if length(workflows) == 0 %}
+        <tr><td colspan="6" class="text-center k-empty py-4">No workflows loaded</td></tr>
+{% endif %}
+      </tbody>
+    </table>
+  </div>
+</div>

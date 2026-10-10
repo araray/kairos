@@ -1,0 +1,97 @@
+<!-- Watch group detail (wrapped by base.html) -->
+<!-- Data: group{name, id, mode, enabled, tags[], watch_items[], exclude_globs[],
+     max_depth, sample_rate_s, hash_policy, rules[{name, condition, severity,
+     target}], source_path, yaml}, recent_events[] -->
+
+<nav aria-label="breadcrumb">
+  <ol class="breadcrumb">
+    <li class="breadcrumb-item"><a href="/watches">Watches</a></li>
+    <li class="breadcrumb-item active">{{ group.name }}</li>
+  </ol>
+</nav>
+
+<div class="page-header">
+  <div>
+    <h4 class="mb-1">{{ group.name }}</h4>
+    <code>{{ group.id }}</code>
+    {% for t in group.tags %}<span class="kairos-tag">{{ t }}</span>{% endfor %}
+  </div>
+  <div class="d-flex gap-2">
+    <a href="/api/v1/watches/{{ group.name }}/yaml" class="btn btn-outline-info btn-sm">YAML</a>
+    <a href="/events?watch_group={{ group.name }}" class="btn btn-outline-info btn-sm">Events</a>
+  </div>
+</div>
+
+<div class="row g-4">
+  <div class="col-lg-7">
+    <div class="card p-3 mb-4">
+      <h5>Rules</h5>
+      <div class="table-responsive">
+        <table class="table table-sm table-hover mb-0">
+          <thead><tr><th>Rule</th><th>Severity</th><th>Condition</th><th>Triggers</th></tr></thead>
+          <tbody>
+{% for r in group.rules %}
+            <tr>
+              <td>{{ r.name }}</td>
+              <td class="fit sev-{{ severity_class(r.severity) }}">{{ r.severity }}</td>
+              <td><code class="d-block" style="max-width: 320px; white-space: normal;">{{ r.condition }}</code></td>
+              <td class="text-muted">{{ r.trigger_target }}</td>
+            </tr>
+{% endfor %}
+{% if length(group.rules) == 0 %}
+            <tr><td colspan="4" class="text-center k-empty">No rules defined</td></tr>
+{% endif %}
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <div class="card p-3 mb-4">
+      <h5>Scan Settings</h5>
+      <table class="table table-sm mb-0">
+        <tr><td class="text-muted" style="width:160px">Mode</td><td><span class="badge badge-primary">{{ group.mode }}</span></td></tr>
+        <tr><td class="text-muted">Watch items</td>
+          <td>
+{% for item in group.watch_items %}<code class="d-block" style="word-break:break-all;">{{ item }}</code>{% endfor %}
+          </td></tr>
+{% if length(group.exclude_globs) > 0 %}
+        <tr><td class="text-muted">Excludes</td>
+          <td>{% for e in group.exclude_globs %}<code>{{ e }}</code> {% endfor %}</td></tr>
+{% endif %}
+        <tr><td class="text-muted">Max depth</td><td>{{ group.max_depth }}</td></tr>
+        <tr><td class="text-muted">Sample rate</td><td>{{ group.sample_rate_s }}s</td></tr>
+        <tr><td class="text-muted">Hash policy</td><td>{{ group.hash_policy }}</td></tr>
+      </table>
+    </div>
+
+    <div class="card p-3">
+      <h5>Recent Events</h5>
+      <div class="table-responsive">
+        <table class="table table-sm table-hover mb-0">
+          <thead><tr><th>Event</th><th>Rule</th><th>Type</th><th>Time</th></tr></thead>
+          <tbody>
+{% for e in recent_events %}
+            <tr>
+              <td><a href="/events/{{ e.event_uid }}"><code>{{ e.event_uid_short }}</code></a></td>
+              <td>{{ e.rule_name }}</td>
+              <td>{{ e.event_type }}</td>
+              <td class="fit">{{ e.created_at }}</td>
+            </tr>
+{% endfor %}
+{% if length(recent_events) == 0 %}
+            <tr><td colspan="4" class="text-center k-empty">No events yet</td></tr>
+{% endif %}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
+  <div class="col-lg-5">
+    <div class="card p-3">
+      <h5>Source</h5>
+      <p class="text-muted small mb-2"><code>{{ group.source_path }}</code></p>
+      <div class="yaml-block">{{ group.yaml }}</div>
+    </div>
+  </div>
+</div>

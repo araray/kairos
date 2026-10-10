@@ -1,0 +1,34 @@
+<!-- Jobs list (wrapped by base.html) -->
+<!-- Data: jobs[{id, name, scope, scope_kind, step_count, condition, tags[]}] -->
+
+<h4 class="page-header">Jobs</h4>
+
+<div class="card p-3">
+  <div class="table-responsive">
+    <table class="table table-sm table-hover mb-0">
+      <thead>
+        <tr><th>Job</th><th>Scope</th><th>Steps</th><th>Condition</th><th>Tags</th></tr>
+      </thead>
+      <tbody>
+{% for job in jobs %}
+        <tr>
+          <td><a href="/jobs/{{ job.id }}"><strong>{{ job.name }}</strong></a></td>
+          <td>
+{% if job.scope_kind == "workflow" %}
+            <a href="/workflows/{{ job.scope }}">{{ job.scope }}</a>
+{% else %}
+            <span class="badge badge-secondary">standalone</span> {{ job.scope }}
+{% endif %}
+          </td>
+          <td class="fit">{{ job.step_count }}</td>
+          <td><code class="d-block" style="max-width: 320px; white-space: normal;">{{ job.condition }}</code></td>
+          <td>{% for t in job.tags %}<span class="kairos-tag">{{ t }}</span>{% endfor %}</td>
+        </tr>
+{% endfor %}
+{% if length(jobs) == 0 %}
+        <tr><td colspan="5" class="text-center k-empty py-4">No jobs defined</td></tr>
+{% endif %}
+      </tbody>
+    </table>
+  </div>
+</div>

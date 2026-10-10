@@ -21,6 +21,20 @@ install(FILES deploy/kairos.toml.example
     DESTINATION ${CMAKE_INSTALL_DATADIR}/kairos
 )
 
+# ── Web UI assets (Roadmap §3.1) ───────────────────────────────────────────
+# The binary embeds these files as a fallback, but distributions ship the
+# real directory so deployments can override templates without rebuilding
+# (point kairos.http.web_root at it).
+install(DIRECTORY web/
+    DESTINATION ${CMAKE_INSTALL_DATADIR}/kairos/web
+    FILES_MATCHING
+        PATTERN "*.html"
+        PATTERN "*.css"
+        PATTERN "*.js"
+        PATTERN "*.svg"
+        PATTERN "*.md"
+)
+
 # ── Service files (platform-specific) ─────────────────────────────────────
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     install(FILES deploy/systemd/kairos.service

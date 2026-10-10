@@ -1,0 +1,64 @@
+<!-- Runs list (wrapped by base.html) -->
+<!-- Data: runs[{run_id, run_id_short, target_name, target_type, trigger_type,
+     badge, status, start_ts, duration_ms, tags[]}], filters{status, workflow} -->
+
+<h4 class="page-header">Run History</h4>
+
+<form class="card p-3 mb-4" method="get" action="/runs" data-kairos-nofilter>
+  <div class="row g-2 align-items-end">
+    <div class="col-sm-3">
+      <label class="form-label small text-muted mb-1" for="f-status">Status</label>
+      <select class="form-select form-select-sm" id="f-status" name="status">
+        <option value="">any</option>
+{% for s in statuses %}
+        <option value="{{ s }}"{% if filters.status == s %} selected{% endif %}>{{ s }}</option>
+{% endfor %}
+      </select>
+    </div>
+    <div class="col-sm-3">
+      <label class="form-label small text-muted mb-1" for="f-workflow">Workflow / Job</label>
+      <input class="form-control form-control-sm" id="f-workflow" name="workflow" value="{{ filters.workflow }}" placeholder="name">
+    </div>
+    <div class="col-sm-2">
+      <label class="form-label small text-muted mb-1" for="f-limit">Limit</label>
+      <input class="form-control form-control-sm" id="f-limit" name="limit" type="number" min="1" max="500" value="{{ filters.limit }}">
+    </div>
+    <div class="col-sm-2">
+      <button class="btn btn-outline-info btn-sm w-100" type="submit">Apply</button>
+    </div>
+    <div class="col-sm-2">
+      <a href="/runs" class="btn btn-outline-secondary btn-sm w-100">Reset</a>
+    </div>
+  </div>
+</form>
+
+<div class="card p-3">
+  <div class="table-responsive">
+    <table class="table table-sm table-hover mb-0">
+      <thead>
+        <tr>
+          <th>Run ID</th><th>Target</th><th>Type</th><th>Status</th>
+          <th>Exit</th><th>Trigger</th><th>Started</th><th>Duration</th><th>Tags</th>
+        </tr>
+      </thead>
+      <tbody>
+{% for run in runs %}
+        <tr>
+          <td><a href="/runs/{{ run.run_id }}"><code>{{ run.run_id_short }}</code></a></td>
+          <td>{{ run.target_name }}</td>
+          <td class="text-muted">{{ run.target_type }}</td>
+          <td><span class="badge badge-{{ run.badge }}">{{ run.status }}</span></td>
+          <td class="fit"><code>{{ run.exit_code }}</code></td>
+          <td class="text-muted">{{ run.trigger_type }}</td>
+          <td class="fit">{{ run.start_ts }}</td>
+          <td class="fit">{{ run.duration_ms }}ms</td>
+          <td>{% for t in run.tags %}<span class="kairos-tag">{{ t }}</span>{% endfor %}</td>
+        </tr>
+{% endfor %}
+{% if length(runs) == 0 %}
+        <tr><td colspan="9" class="text-center k-empty py-4">No runs match the current filters</td></tr>
+{% endif %}
+      </tbody>
+    </table>
+  </div>
+</div>

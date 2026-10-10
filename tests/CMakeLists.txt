@@ -548,19 +548,32 @@ kairos_discover_tests(test_command_reader)
 
 # ── HTTP server tests (conditional on KAIROS_HTTP) ───────────
 
+# Generated web resources are shared by both HTTP test targets in this
+# directory (the custom command is directory-scoped, so one call serves both).
+if(KAIROS_HTTP)
+    include(${CMAKE_SOURCE_DIR}/cmake/KairosWebResources.cmake)
+    kairos_embed_web_resources(TEST_WEB_GENERATED_SRC)
+endif()
+
 add_executable(test_http_server
     unit/http/http_server_test.cpp
+    unit/http/web_catalog_test.cpp
 )
 target_link_libraries(test_http_server PRIVATE kairos_test_helpers)
 if(KAIROS_HTTP)
     target_compile_definitions(test_http_server PRIVATE KAIROS_HTTP_ENABLED)
     target_sources(test_http_server PRIVATE
         ${CMAKE_SOURCE_DIR}/src/http/http_server.cpp
+        ${CMAKE_SOURCE_DIR}/src/http/web_catalog.cpp
+        ${TEST_WEB_GENERATED_SRC}
     )
     target_link_libraries(test_http_server PRIVATE httplib::httplib)
     target_include_directories(test_http_server PRIVATE
         ${inja_SOURCE_DIR}/include
     )
+    if(MSVC)
+        target_compile_options(test_http_server PRIVATE /utf-8)
+    endif()
 endif()
 kairos_discover_tests(test_http_server)
 
@@ -613,12 +626,17 @@ if(KAIROS_HTTP)
     target_compile_definitions(test_http_integration PRIVATE KAIROS_HTTP_ENABLED)
     target_sources(test_http_integration PRIVATE
         ${CMAKE_SOURCE_DIR}/src/http/http_server.cpp
+        ${CMAKE_SOURCE_DIR}/src/http/web_catalog.cpp
+        ${TEST_WEB_GENERATED_SRC}
     )
     target_link_libraries(test_http_integration PRIVATE httplib::httplib)
     # inja include path for template rendering.
     target_include_directories(test_http_integration PRIVATE
         ${inja_SOURCE_DIR}/include
     )
+    if(MSVC)
+        target_compile_options(test_http_integration PRIVATE /utf-8)
+    endif()
 endif()
 kairos_discover_tests(test_http_integration)
 

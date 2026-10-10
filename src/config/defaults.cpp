@@ -93,13 +93,13 @@ confy::Value build_kairos_defaults() {
                 {"color",              "auto"},       // "auto"|"always"|"never"
             }},
 
-            // ─── HTTP (Phase 4, but defaults included for completeness)
+            // ─── HTTP (§26; Web UI foundation — Roadmap Phase 9)
             {"http", {
                 {"enabled",            false},
                 {"listen_addr",        "127.0.0.1"},
                 {"listen_port",        8420},
                 {"api_token",          ""},
-                {"static_dir",         ""},
+                {"web_root",           ""},
                 {"cors_enabled",       false},
                 {"cors_origins",       "*"},
                 {"read_timeout_s",     30},

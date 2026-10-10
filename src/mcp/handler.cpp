@@ -20,6 +20,7 @@
 #include "kairos/core/version.hpp"
 #include "kairos/engine/dag.hpp"
 #include "kairos/engine/execution_plan.hpp"
+#include "kairos/engine/explain.hpp"
 
 #include <spdlog/spdlog.h>
 
@@ -513,69 +514,11 @@ json McpHandler::tool_explain_plan(const json& args) {
         return {{"error", "Workflow not found: " + workflow_id}};
     }
 
-    // Build execution plan from the DAG structure.
-    // Walk the DAG level-by-level, marking conditions as pending
-    // if they reference same-workflow jobs (can't evaluate until runtime).
-    engine::ExecutionPlan plan;
-    plan.workflow_id = wf->workflow_id;
-    plan.workflow_name = wf->workflow_name;
-    plan.trigger_type = "explain";
-
-    // Collect all job names in this workflow for self-reference detection.
-    std::unordered_set<std::string> wf_job_names;
-    for (const auto& job : wf->jobs) {
-        wf_job_names.insert(job.job_name);
-    }
-
-    for (int lvl = 0; lvl < wf->dag.level_count(); ++lvl) {
-        for (const auto& job_id : wf->dag.jobs_at_level(lvl)) {
-            const auto& node = wf->dag.node(job_id);
-            engine::PlanEntry entry;
-            entry.job_id = node.job_id;
-            entry.job_name = node.job_name;
-            entry.level = node.topo_level;
-            entry.needs = node.needs;
-            entry.condition_expr =
-                node.condition_expr.value_or("");
-
-            if (node.condition_expr.has_value() &&
-                !node.condition_expr->empty()) {
-                // Check if the condition references a job in the same
-                // workflow — if so, mark as ConditionPending because
-                // we can't evaluate it before the run starts.
-                bool refs_self = false;
-                for (const auto& jn : wf_job_names) {
-                    if (node.condition_expr->find(
-                            "\"" + jn + "\"") != std::string::npos) {
-                        refs_self = true;
-                        break;
-                    }
-                }
-
-                if (refs_self) {
-                    entry.action = engine::PlanAction::ConditionPending;
-                    entry.reason = "Condition references same-workflow "
-                                   "job — will be evaluated at runtime";
-                    entry.condition_result = "pending";
-                } else {
-                    // External condition — could potentially evaluate
-                    // against the database, but for safety we mark
-                    // as Run (the condition will be evaluated at runtime).
-                    entry.action = engine::PlanAction::Run;
-                    entry.reason = "External condition (evaluated at "
-                                   "runtime)";
-                }
-            } else if (node.needs.empty()) {
-                entry.action = engine::PlanAction::Run;
-                entry.reason = "No dependencies, no condition";
-            } else {
-                entry.action = engine::PlanAction::Run;
-                entry.reason = "Dependencies will be met";
-            }
-
-            plan.entries.push_back(std::move(entry));
-        }
-    }
+    // Build the plan with the shared dry-run builder (Roadmap Phase 9):
+    // conditions decidable from run history are evaluated via the query
+    // reader when available; same-workflow references stay pending.
+    engine::ExecutionPlan plan = engine::build_explain_plan(
+        *wf, deps_.query_reader);
 
     // Return as parsed JSON (from render_json).
     auto json_str = plan.render_json();

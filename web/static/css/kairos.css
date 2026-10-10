@@ -1,0 +1,386 @@
+/* ==========================================================================
+   Kairos Web UI — theme variables and component styles
+   --------------------------------------------------------------------------
+   Three themes (Roadmap §3.2), selected via <html data-theme="...">
+   and mirrored to Bootstrap 5's data-bs-theme for component compatibility:
+
+     blue  (default) — the classic Kairos dark-navy look
+     dark           — GitHub-dark style pure dark mode
+     light          — clean professional light mode
+
+   All colors flow through custom properties so the whole UI (and any
+   user-override stylesheet) can restyle by redefining the variables.
+   ========================================================================== */
+
+/* ---- Theme: blue (default) --------------------------------------------- */
+:root,
+[data-theme="blue"] {
+  --k-bg:          #1a1a2e;
+  --k-bg-soft:     #16213e;
+  --k-surface:     #16213e;
+  --k-border:      #0f3460;
+  --k-text:        #e0e0e0;
+  --k-text-muted:  #8a8fa3;
+  --k-accent:      #00d4ff;
+  --k-accent-2:    #6f42c1;
+  --k-accent-text: #00131a;
+  --k-link:        #00d4ff;
+  --k-link-hover:  #33e0ff;
+  --k-danger:      #ff6b6b;
+  --k-success:     #2dd4a0;
+  --k-code-bg:     #0d1117;
+  --k-code-border: #30363d;
+  --k-code-text:   #00d4ff;
+  --k-hover-row:   rgba(0, 212, 255, 0.06);
+  --k-navbar-bg:   #0f3460;
+  --k-shadow:      rgba(0, 0, 0, 0.45);
+}
+
+/* ---- Theme: dark -------------------------------------------------------- */
+[data-theme="dark"] {
+  --k-bg:          #0d1117;
+  --k-bg-soft:     #010409;
+  --k-surface:     #161b22;
+  --k-border:      #30363d;
+  --k-text:        #c9d1d9;
+  --k-text-muted:  #8b949e;
+  --k-accent:      #58a6ff;
+  --k-accent-2:    #f78166;
+  --k-accent-text: #00131a;
+  --k-link:        #58a6ff;
+  --k-link-hover:  #79b8ff;
+  --k-danger:      #f85149;
+  --k-success:     #3fb950;
+  --k-code-bg:     #010409;
+  --k-code-border: #30363d;
+  --k-code-text:   #79b8ff;
+  --k-hover-row:   rgba(88, 166, 255, 0.07);
+  --k-navbar-bg:   #161b22;
+  --k-shadow:      rgba(0, 0, 0, 0.55);
+}
+
+/* ---- Theme: light ------------------------------------------------------- */
+[data-theme="light"] {
+  --k-bg:          #f6f8fa;
+  --k-bg-soft:     #eaeef2;
+  --k-surface:     #ffffff;
+  --k-border:      #d0d7de;
+  --k-text:        #1f2328;
+  --k-text-muted:  #636c76;
+  --k-accent:      #0969da;
+  --k-accent-2:    #8250df;
+  --k-accent-text: #ffffff;
+  --k-link:        #0969da;
+  --k-link-hover:  #0550ae;
+  --k-danger:      #cf222e;
+  --k-success:     #1a7f37;
+  --k-code-bg:     #f6f8fa;
+  --k-code-border: #d0d7de;
+  --k-code-text:   #0550ae;
+  --k-hover-row:   rgba(9, 105, 218, 0.06);
+  --k-navbar-bg:   #24292f;
+  --k-shadow:      rgba(140, 149, 159, 0.2);
+}
+
+/* ==========================================================================
+   Base
+   ========================================================================== */
+
+html { color-scheme: dark; }
+[data-theme="light"] { color-scheme: light; }
+
+body {
+  background: var(--k-bg);
+  color: var(--k-text);
+  font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+  min-height: 100vh;
+}
+
+a { color: var(--k-link); text-decoration: none; }
+a:hover { color: var(--k-link-hover); }
+
+code {
+  color: var(--k-code-text);
+  font-size: 0.85em;
+  background: var(--k-code-bg);
+  border: 1px solid var(--k-code-border);
+  border-radius: 4px;
+  padding: 0.1em 0.35em;
+}
+
+/* ==========================================================================
+   Navbar
+   ========================================================================== */
+
+.kairos-navbar {
+  background: var(--k-navbar-bg);
+  border-bottom: 1px solid var(--k-border);
+  box-shadow: 0 1px 8px var(--k-shadow);
+}
+
+.kairos-brand {
+  font-weight: 700;
+  letter-spacing: 1px;
+  color: #fff;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+.kairos-brand:hover { color: #fff; }
+.kairos-brand img { width: 22px; height: 22px; }
+
+.kairos-nav a {
+  color: rgba(255, 255, 255, 0.72);
+  padding: 0.25rem 0.6rem;
+  border-radius: 6px;
+  font-size: 0.93rem;
+  white-space: nowrap;
+}
+.kairos-nav a:hover { color: #fff; background: rgba(255, 255, 255, 0.08); }
+.kairos-nav a.active {
+  color: #fff;
+  background: rgba(255, 255, 255, 0.14);
+  font-weight: 600;
+}
+
+/* ==========================================================================
+   Cards, headers, layout
+   ========================================================================== */
+
+.card {
+  background: var(--k-surface);
+  border: 1px solid var(--k-border);
+  border-radius: 8px;
+  box-shadow: 0 1px 4px var(--k-shadow);
+}
+
+.page-header {
+  border-bottom: 1px solid var(--k-border);
+  padding-bottom: 12px;
+  margin-bottom: 24px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+}
+
+.breadcrumb { background: transparent; padding: 0; margin-bottom: 1rem; }
+.breadcrumb-item a { color: var(--k-link); }
+.breadcrumb-item.active { color: var(--k-text-muted); }
+
+/* ==========================================================================
+   Stat tiles (dashboard)
+   ========================================================================== */
+
+.stat-value {
+  font-size: 2rem;
+  font-weight: 700;
+  color: var(--k-accent);
+  line-height: 1.2;
+}
+.stat-value.danger { color: var(--k-danger); }
+.stat-label {
+  font-size: 0.8rem;
+  color: var(--k-text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  margin-top: 4px;
+}
+
+/* ==========================================================================
+   Tables
+   ========================================================================== */
+
+.table { color: var(--k-text); --bs-table-bg: transparent; }
+.table th {
+  border-color: var(--k-border);
+  font-weight: 600;
+  color: var(--k-text-muted);
+  text-transform: uppercase;
+  font-size: 0.75rem;
+  letter-spacing: 0.4px;
+  white-space: nowrap;
+}
+.table td { border-color: var(--k-border); }
+.table-hover tbody tr:hover { background-color: var(--k-hover-row); }
+.table td.fit { white-space: nowrap; }
+
+/* ==========================================================================
+   Badges / status pills
+   ========================================================================== */
+
+.badge-success   { background-color: #198754 !important; }
+.badge-danger    { background-color: #dc3545 !important; }
+.badge-primary   { background-color: #0d6efd !important; }
+.badge-warning   { background-color: #ffc107 !important; color: #000 !important; }
+.badge-secondary { background-color: #6c757d !important; }
+
+.kairos-tag {
+  display: inline-block;
+  background: color-mix(in srgb, var(--k-accent) 14%, transparent);
+  border: 1px solid color-mix(in srgb, var(--k-accent) 38%, transparent);
+  color: var(--k-accent);
+  border-radius: 999px;
+  padding: 0.05rem 0.55rem;
+  font-size: 0.72rem;
+  font-weight: 500;
+  margin: 0 0.15rem 0.15rem 0;
+  white-space: nowrap;
+}
+.kairos-tag:hover {
+  background: color-mix(in srgb, var(--k-accent) 24%, transparent);
+  color: var(--k-accent);
+}
+
+/* ==========================================================================
+   Buttons (Bootstrap outline variants re-tinted)
+   ========================================================================== */
+
+.btn-outline-info {
+  --bs-btn-color: var(--k-accent);
+  --bs-btn-border-color: var(--k-accent);
+  --bs-btn-hover-bg: var(--k-accent);
+  --bs-btn-hover-border-color: var(--k-accent);
+  --bs-btn-hover-color: var(--k-accent-text);
+  --bs-btn-active-bg: var(--k-accent);
+  --bs-btn-active-border-color: var(--k-accent);
+  --bs-btn-active-color: var(--k-accent-text);
+}
+
+.btn-outline-secondary {
+  --bs-btn-color: var(--k-text-muted);
+  --bs-btn-border-color: var(--k-border);
+  --bs-btn-hover-bg: var(--k-bg-soft);
+  --bs-btn-hover-border-color: var(--k-border);
+  --bs-btn-hover-color: var(--k-text);
+}
+
+/* ==========================================================================
+   Log panel (run detail / live SSE)
+   ========================================================================== */
+
+.log-panel {
+  background: var(--k-code-bg);
+  border: 1px solid var(--k-code-border);
+  border-radius: 6px;
+  padding: 12px;
+  font-family: ui-monospace, 'Cascadia Mono', Menlo, Consolas, monospace;
+  font-size: 0.85rem;
+  max-height: 480px;
+  overflow-y: auto;
+}
+.log-panel .log-line { padding: 1px 0; word-break: break-all; }
+.log-panel .log-stderr { color: var(--k-danger); }
+.log-panel .log-stdout { color: var(--k-text); }
+.log-panel .log-meta { color: var(--k-text-muted); }
+
+/* ==========================================================================
+   Code / YAML blocks
+   ========================================================================== */
+
+.yaml-block {
+  background: var(--k-code-bg);
+  border: 1px solid var(--k-code-border);
+  border-radius: 6px;
+  padding: 12px 16px;
+  font-family: ui-monospace, 'Cascadia Mono', Menlo, Consolas, monospace;
+  font-size: 0.82rem;
+  white-space: pre;
+  overflow-x: auto;
+  max-height: 560px;
+  color: var(--k-text);
+}
+
+/* ==========================================================================
+   Search bar (global, filters visible tables — Roadmap §3.3)
+   ========================================================================== */
+
+.kairos-search {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  background: rgba(255, 255, 255, 0.08);
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  border-radius: 8px;
+  padding: 0.15rem 0.6rem;
+  min-width: 210px;
+}
+[data-theme="light"] .kairos-search {
+  background: #ffffff;
+  border-color: var(--k-border);
+}
+.kairos-search:focus-within {
+  border-color: var(--k-accent);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--k-accent) 25%, transparent);
+}
+.kairos-search svg { opacity: 0.55; flex: none; }
+.kairos-search input {
+  background: transparent;
+  border: none;
+  outline: none;
+  color: inherit;
+  font-size: 0.9rem;
+  width: 100%;
+}
+.kairos-search input::placeholder { color: rgba(255, 255, 255, 0.45); }
+[data-theme="light"] .kairos-search input::placeholder { color: var(--k-text-muted); }
+.kairos-search .k-search-count { font-size: 0.75rem; color: var(--k-text-muted); white-space: nowrap; }
+
+/* ==========================================================================
+   Theme toggle
+   ========================================================================== */
+
+.theme-btn {
+  background: transparent;
+  border: 1px solid rgba(255, 255, 255, 0.25);
+  color: rgba(255, 255, 255, 0.8);
+  border-radius: 8px;
+  padding: 0.22rem 0.6rem;
+  font-size: 0.85rem;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.theme-btn:hover { color: #fff; border-color: rgba(255, 255, 255, 0.55); }
+
+/* ==========================================================================
+   Details / misc
+   ========================================================================== */
+
+details > summary { cursor: pointer; }
+details[open] > summary { margin-bottom: 0.35rem; }
+
+.text-muted { color: var(--k-text-muted) !important; }
+
+.k-empty { color: var(--k-text-muted); }
+
+.footer {
+  color: var(--k-text-muted);
+  font-size: 0.8rem;
+  border-top: 1px solid var(--k-border);
+  margin-top: 2.5rem;
+  padding: 0.9rem 0 1.2rem;
+}
+
+/* Filter form controls on list pages */
+.form-control, .form-select {
+  background: var(--k-bg-soft);
+  border: 1px solid var(--k-border);
+  color: var(--k-text);
+}
+.form-control:focus, .form-select:focus {
+  background: var(--k-bg-soft);
+  color: var(--k-text);
+  border-color: var(--k-accent);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--k-accent) 20%, transparent);
+}
+
+/* Severity color hints for events */
+.sev-info     { color: var(--k-accent); }
+.sev-warning  { color: #e3b341; }
+.sev-critical { color: var(--k-danger); font-weight: 600; }
+
+@media (max-width: 991.98px) {
+  .kairos-nav { margin-top: 0.5rem; }
+  .kairos-search { min-width: 150px; }
+}
