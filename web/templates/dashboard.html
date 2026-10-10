@@ -1,6 +1,9 @@
-<!-- Dashboard content (wrapped by base.html) -->
+<!-- Dashboard content (wrapped by base.html) — data-kairos-live enables
+     SSE-driven updates (§3.8.6). -->
 <!-- Data: total_runs, active_runs, runs_today, failures_today, uptime,
      recent_runs[], recent_events[] -->
+
+<div data-kairos-live="dashboard">
 
 <div class="row mb-4">
   <div class="col-6 col-md-3">
@@ -63,7 +66,7 @@
       </thead>
       <tbody>
 {% for run in recent_runs %}
-        <tr>
+        <tr id="live-runs">
           <td><a href="/runs/{{ run.run_id }}"><code>{{ run.run_id_short }}</code></a></td>
           <td>{{ run.target_name }}</td>
           <td><span class="badge badge-{{ run.badge }}">{{ run.status }}</span></td>
@@ -95,7 +98,7 @@
       </thead>
       <tbody>
 {% for event in recent_events %}
-        <tr>
+        <tr id="live-events">
           <td><a href="/events/{{ event.event_uid }}"><code>{{ event.event_uid_short }}</code></a></td>
           <td>{{ event.watch_group }}</td>
           <td>{{ event.rule_name }}</td>
@@ -110,4 +113,5 @@
       </tbody>
     </table>
   </div>
+</div>
 </div>

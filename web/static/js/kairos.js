@@ -174,11 +174,112 @@
     es.onerror = function () { es.close(); };
   }
 
+  /* ---- Toast notifications (§3.8.6) --------------------------------------- */
+
+  function toast(text, cls) {
+    var host = document.getElementById('kairos-toasts');
+    if (!host) {
+      host = document.createElement('div');
+      host.id = 'kairos-toasts';
+      document.body.appendChild(host);
+    }
+    var t = document.createElement('div');
+    t.className = 'kairos-toast ' + (cls || '');
+    t.textContent = text;
+    host.appendChild(t);
+    setTimeout(function () {
+      t.classList.add('kairos-toast-out');
+      setTimeout(function () { t.remove(); }, 400);
+    }, 5000);
+  }
+
+  /* ---- Live dashboard updates (§3.8.6) ------------------------------------ */
+
+  function badgeClass(status) {
+    return {SUCCESS: 'success', FAILURE: 'danger', RUNNING: 'primary',
+            CANCELLED: 'warning'}[status] || 'secondary';
+  }
+
+  function upsertRunRow(run) {
+    var tbody = document.getElementById('live-runs');
+    if (!tbody) return;
+    var tr = tbody.querySelector('tr[data-run-id="' + run.run_id + '"]');
+    if (!tr) {
+      tr = document.createElement('tr');
+      tr.setAttribute('data-run-id', run.run_id);
+      tbody.insertBefore(tr, tbody.firstChild);
+    }
+    tr.innerHTML =
+      '<td><a href="/runs/' + run.run_id + '"><code>' +
+        run.run_id_short + '</code></a></td>' +
+      '<td>' + run.target_name + '</td>' +
+      '<td><span class="badge badge-' + badgeClass(run.status) + '">' +
+        run.status + '</span></td>' +
+      '<td>' + run.trigger_type + '</td>' +
+      '<td class="fit">' + run.start_ts + '</td>' +
+      '<td class="fit">' + run.duration_ms + 'ms</td>';
+  }
+
+  function prependEventRow(evt) {
+    var tbody = document.getElementById('live-events');
+    if (!tbody) return;
+    var tr = document.createElement('tr');
+    tr.innerHTML =
+      '<td><a href="/events/' + evt.event_uid + '"><code>' +
+        String(evt.event_uid).slice(0, 12) + '</code></a></td>' +
+      '<td>' + evt.watch_group + '</td>' +
+      '<td>' + evt.rule_name + '</td>' +
+      '<td>' + evt.event_type + '</td>' +
+      '<td class="text-muted" style="max-width:240px;overflow:hidden;' +
+        'text-overflow:ellipsis;white-space:nowrap;">' +
+        (evt.affected_files || []).join(', ') + '</td>' +
+      '<td class="fit">' + evt.created_at + '</td>';
+    tbody.insertBefore(tr, tbody.firstChild);
+    // Keep the panel bounded.
+    while (tbody.children.length > 10) tbody.lastChild.remove();
+  }
+
+  function initLive() {
+    var live = document.querySelector('[data-kairos-live]');
+    if (!live || !window.EventSource) return;
+
+    var runs = new EventSource('/sse/runs');
+    runs.onmessage = function (ev) {
+      try {
+        var run = JSON.parse(ev.data);
+        upsertRunRow(run);
+        if (run.status === 'RUNNING') {
+          toast('▶ ' + run.target_name + ' started', 'toast-info');
+        } else if (run.status === 'FAILURE') {
+          toast('✕ ' + run.target_name + ' failed', 'toast-danger');
+        } else if (run.status === 'SUCCESS') {
+          toast('✓ ' + run.target_name + ' succeeded', 'toast-success');
+        } else if (run.status === 'CANCELLED') {
+          toast('⤫ ' + run.target_name + ' cancelled', 'toast-warn');
+        }
+      } catch (e) { /* ignore */ }
+    };
+
+    var events = new EventSource('/sse/events');
+    events.onmessage = function (ev) {
+      try {
+        var evt = JSON.parse(ev.data);
+        prependEventRow(evt);
+        if (evt.severity === 'critical' || evt.severity === 'warning') {
+          toast('⚠ ' + evt.watch_group + '/' + evt.rule_name + ': ' +
+                evt.event_type,
+                evt.severity === 'critical' ? 'toast-danger' : 'toast-warn');
+        }
+      } catch (e) { /* ignore */ }
+    };
+  }
+
   /* ---- Boot -------------------------------------------------------------- */
 
   document.addEventListener('DOMContentLoaded', function () {
     initTheme();
     initSearch();
     initSSE();
+    initLive();
   });
 })();

@@ -344,6 +344,61 @@ code {
 .theme-btn:hover { color: #fff; border-color: rgba(255, 255, 255, 0.55); }
 
 /* ==========================================================================
+   Toast notifications (§3.8.6)
+   ========================================================================== */
+
+#kairos-toasts {
+  position: fixed;
+  bottom: 16px;
+  right: 16px;
+  z-index: 1080;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-width: 380px;
+}
+
+.kairos-toast {
+  background: var(--k-surface);
+  color: var(--k-text);
+  border: 1px solid var(--k-border);
+  border-left: 4px solid var(--k-accent);
+  border-radius: 8px;
+  box-shadow: 0 4px 14px var(--k-shadow);
+  padding: 10px 14px;
+  font-size: 0.88rem;
+  opacity: 1;
+  transition: opacity 0.35s ease, transform 0.35s ease;
+}
+.kairos-toast.toast-success { border-left-color: var(--k-success); }
+.kairos-toast.toast-danger  { border-left-color: var(--k-danger); }
+.kairos-toast.toast-warn    { border-left-color: #e3b341; }
+.kairos-toast.kairos-toast-out { opacity: 0; transform: translateY(6px); }
+
+/* ==========================================================================
+   DAG visualization (§3.7) — SVG nodes follow the theme variables
+   ========================================================================== */
+
+.dag-svg { width: 100%; height: auto; }
+.dag-svg text { font-family: 'Segoe UI', system-ui, sans-serif; }
+.dag-svg .dag-edge { stroke: var(--k-text-muted); stroke-opacity: 0.55;
+                     stroke-width: 1.5; fill: none; }
+.dag-svg .dag-node rect { fill: var(--k-surface); stroke: var(--k-accent);
+                          stroke-width: 1.5; }
+.dag-svg .dag-node text { fill: var(--k-text); }
+.dag-svg .dag-node .dag-sub { fill: var(--k-text-muted); }
+.dag-svg .dag-node.dag-success rect { stroke: var(--k-success); }
+.dag-svg .dag-node.dag-failure rect { stroke: var(--k-danger); }
+.dag-svg .dag-node.dag-running rect { stroke: var(--k-accent);
+                                      stroke-width: 2.5;
+                                      stroke-dasharray: 5 3; }
+.dag-svg .dag-node.dag-cancelled rect { stroke: #e3b341; }
+.dag-svg .dag-node.dag-muted rect { stroke: var(--k-border); }
+.dag-svg .dag-node:hover rect { filter: brightness(1.2); }
+.dag-svg .dag-level-label { fill: var(--k-text-muted);
+                            font-size: 11px; }
+
+/* ==========================================================================
    Details / misc
    ========================================================================== */
 
