@@ -98,6 +98,16 @@ kairos.getStepOutput    kairos.listWatchGroups kairos.getEvents
 kairos.reloadConfig     kairos.watchScanOnce
 ```
 
+### Web Console
+
+A server-rendered web UI ships embedded in the binary (build with `KAIROS_HTTP=ON`, enable `kairos.http.enabled`):
+
+- **Full read console** — dashboard, workflows (with dry-run plan + YAML source), jobs, runs (SSE live logs), events (affected files), watches, triggers.
+- **Three themes** — blue / dark / light via CSS custom properties, persisted per browser.
+- **Instant search** — one filter bar searches every table (plain text or `/regex/`).
+- **Hot-editable** — set `kairos.http.web_root` to override the embedded templates without rebuilding.
+- **REST API** — token-authenticated read endpoints for every entity plus run triggering and live SSE logs.
+
 ### Observability
 
 - **Structured logs** — JSON or text format, with `run_id`/`job_id`/`step_id` correlation.
@@ -380,6 +390,7 @@ kairos/
 │   ├── security/                   #   Secret store (Vault)
 │   ├── testing/                    #   Fake clock, filesystem, process
 │   └── watch/                      #   Watch engine, scanners, debounce
+├── web/                            # Web UI templates + static (embedded at build)
 ├── src/                            # Implementation sources
 ├── tests/                          # Test suite (Google Test)
 │   ├── unit/                       #   ~1100 unit tests

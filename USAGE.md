@@ -25,6 +25,7 @@ This guide covers installation, configuration, CLI usage, common workflows, and 
 15. [Build and Test Scripts](#15-build-and-test-scripts)
 16. [Examples](#16-examples)
 17. [Troubleshooting](#17-troubleshooting)
+18. [HTTP API and Web UI](#18-http-api-and-web-ui)
 
 ---
 
@@ -1089,6 +1090,96 @@ Multiple processes sharing the same database. Check for stale test processes:
 ```bash
 pkill -f test_persist
 ```
+
+---
+
+## 18. HTTP API and Web UI
+
+> Requires a build with `KAIROS_HTTP=ON` (`./scripts/build.sh --http` or
+> `--profile full`). Enable in config with `[kairos.http] enabled = true`.
+
+### 18.1 Configuration
+
+```toml
+[kairos.http]
+enabled     = true
+listen_addr = "127.0.0.1"   # "0.0.0.0" for all interfaces
+listen_port = 8420
+# api_token = "secret"      # Bearer token for /api/v1/* when set
+# web_root  = "/etc/kairos/web"  # external UI override directory
+```
+
+When `web_root` is set (or `<data_dir>/web/` exists), the Web UI templates
+and static assets are served from that directory — edit a file, refresh,
+see the change, no rebuild. Otherwise the assets compiled into the binary
+from `web/` are used, keeping the single-binary property.
+
+### 18.2 Web UI
+
+Pages (all server-rendered, no client framework):
+
+| Path | Content |
+|------|---------|
+| `/` | Dashboard: run/event stats, recent runs + events |
+| `/workflows`, `/workflows/{name}` | Workflow list / detail (jobs, dry-run plan, triggers, recent runs, YAML source) |
+| `/jobs`, `/jobs/{id}` | Job list (workflow + standalone) / detail |
+| `/runs`, `/runs/{id}` | Run history with filters / run detail with logs (SSE live streaming for running runs) |
+| `/events`, `/events/{uid}` | Watch events with affected files / event detail |
+| `/watches`, `/watches/{name}` | Watch group list / detail (rules, scan settings, YAML) |
+| `/triggers` | Schedule triggers with next fire times |
+
+- **Themes** — blue (default) / dark / light via the navbar toggle;
+  the choice persists in the browser and follows `prefers-color-scheme`
+  on first visit.
+- **Search** — the navbar search box filters every table on the current
+  page. Plain text matches case-insensitively; `/regex/` switches to
+  regex mode. Press `/` to focus, `Esc` to clear.
+- Run IDs in URLs accept unique prefixes, matching the CLI (`/runs/run-abc123`).
+
+### 18.3 REST API
+
+All `/api/v1/*` endpoints require `Authorization: Bearer <token>` when
+`api_token` is configured. Responses are JSON; timestamps are display-formatted.
+
+```
+# Read
+GET  /api/v1/workflows                     # list (with tags, triggers, job counts)
+GET  /api/v1/workflows/{name}              # detail incl. jobs and YAML source
+GET  /api/v1/workflows/{name}/yaml         # raw YAML (text)
+GET  /api/v1/jobs                          # all jobs (workflow + standalone)
+GET  /api/v1/jobs/{id-or-name}             # job detail + recent runs
+GET  /api/v1/runs                          # ?status=&workflow=&since=&tag=a,b&limit=
+GET  /api/v1/runs/{id-or-prefix}           # run detail (jobs, steps)
+GET  /api/v1/runs/{id}/logs                # ?after=<cursor>&limit=
+GET  /api/v1/events                        # ?watch_group=&severity=&limit=
+GET  /api/v1/events/{uid}                  # event detail with affected files
+GET  /api/v1/watches                       # watch group list
+GET  /api/v1/watches/{name}                # detail incl. rules and YAML
+GET  /api/v1/watches/{name}/yaml           # raw YAML (text)
+GET  /api/v1/triggers                      # triggers with next fire times
+GET  /api/v1/triggers/{id}                 # trigger detail
+GET  /api/v1/explain/{workflow}            # dry-run execution plan
+GET  /health                               # liveness (no auth)
+GET  /metrics                              # Prometheus text (no auth)
+
+# Write
+POST /api/v1/workflows/{name}/run          # trigger a run (resolves real run_id)
+POST /api/v1/config/reload                 # reload configuration
+
+# Streaming
+GET  /sse/logs/{run_id}                    # live log stream (SSE)
+```
+
+Example — trigger a run and wait for it:
+
+```bash
+RUN=$(curl -s -X POST http://127.0.0.1:8420/api/v1/workflows/backup/run \
+      | jq -r .run_id)
+curl -s "http://127.0.0.1:8420/api/v1/runs/$RUN" | jq .status
+```
+
+The `tag` filter uses AND semantics for comma-separated tags, mirroring
+`kairos runs list --tag`.
 
 ---
 
