@@ -28,6 +28,8 @@
 #include <gtest/gtest.h>
 
 #include <chrono>
+#include <filesystem>
+#include <set>
 #include <stop_token>
 #include <thread>
 
@@ -53,11 +55,6 @@ protected:
             std::vector<engine::TimerEntry>{});
 
         start_ = std::chrono::steady_clock::now();
-    }
-
-    void TearDown() override {
-        reader_.reset();
-        db_.reset();
     }
 
     /// Build a registry from a workflow YAML string (real parse path).
@@ -141,6 +138,70 @@ protected:
         return std::make_unique<HttpServer>(std::move(cfg),
                                              std::move(deps));
     }
+
+    /// Create a server with the write API enabled: YAML dirs under
+    /// `wf_dir`/`wg_dir`, a DB writer for audit entries, a reload
+    /// flag, and a controllable cancel callback.
+    std::unique_ptr<HttpServer> make_write_server(
+        uint16_t port,
+        const std::filesystem::path& wf_dir,
+        const std::filesystem::path& wg_dir)
+    {
+        HttpConfig cfg;
+        cfg.listen_addr = "127.0.0.1";
+        cfg.listen_port = port;
+
+        writer_ = std::make_unique<persist::DBWriter>(*db_);
+        writer_stop_ = std::stop_source{};
+        writer_->start(writer_stop_.get_token());
+
+        HttpDependencies deps;
+        deps.metrics = &metrics_;
+        deps.reader = reader_.get();
+        deps.registry = registry_;
+        deps.get_uptime = [this]() -> double {
+            return std::chrono::duration<double>(
+                std::chrono::steady_clock::now() - start_).count();
+        };
+        deps.workflows_dir = wf_dir;
+        deps.watch_groups_dir = wg_dir;
+        deps.db_writer = writer_.get();
+        deps.reload_config = [this]() -> bool {
+            ++reload_calls_;
+            return true;
+        };
+        deps.cancel_run = [this](const std::string& run_id) -> bool {
+            last_cancelled_ = run_id;
+            return cancel_result_;
+        };
+        deps.submit_run = [this](const std::string& name) -> std::string {
+            if (submit_targets_.count(name) == 0) return {};
+            ++submit_calls_;
+            return "run-fixedcorrelationid0000000000000";
+        };
+
+        return std::make_unique<HttpServer>(std::move(cfg),
+                                             std::move(deps));
+    }
+
+    void TearDown() override {
+        if (writer_) {
+            writer_stop_.request_stop();
+            writer_->flush();
+            writer_.reset();
+        }
+        reader_.reset();
+        db_.reset();
+    }
+
+    // Write-API test state.
+    std::unique_ptr<persist::DBWriter> writer_;
+    std::stop_source writer_stop_;
+    int reload_calls_ = 0;
+    int submit_calls_ = 0;
+    std::string last_cancelled_;
+    bool cancel_result_ = true;
+    std::set<std::string> submit_targets_;
 
     std::unique_ptr<SQLite::Database> db_;
     std::unique_ptr<persist::QueryReader> reader_;
@@ -869,6 +930,352 @@ jobs:
     auto arr = json::parse(after->body);
     ASSERT_EQ(arr.size(), 1u);
     EXPECT_EQ(arr[0]["name"], "hot-reload-wf");
+
+    ss.request_stop();
+    server->stop();
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  Phase 10 — Write API (Roadmap §3.8.1/§3.8.2)
+// ═══════════════════════════════════════════════════════════════════════════
+
+namespace {
+const char* kValidWfYaml = R"(name: api-made
+jobs:
+  build:
+    steps:
+      - name: compile
+        run: make all
+)";
+const char* kValidWatchYaml = R"(watch_groups:
+  - name: api-watch
+    watch_items:
+      - "/tmp/**/*.log"
+    rules:
+      - name: grew
+        condition: "event.type == 'created'"
+)";
+}  // namespace
+
+TEST_F(HttpServerTest, WriteApi_CreateWorkflowWritesFileAndReloads) {
+    kairos::testing::TempDir wf_dir, wg_dir;
+    auto server = make_write_server(18460, wf_dir.path(), wg_dir.path());
+    std::stop_source ss;
+    server->start(ss.get_token());
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+
+    httplib::Client cli("http://127.0.0.1:18460");
+    auto res = cli.Post("/api/v1/workflows", kValidWfYaml,
+                        "text/yaml");
+    ASSERT_TRUE(res);
+    EXPECT_EQ(res->status, 201);
+    auto j = json::parse(res->body);
+    EXPECT_EQ(j["name"], "api-made");
+    EXPECT_TRUE(j["reloaded"]);
+
+    auto file = wf_dir.path() / "api-made.yaml";
+    ASSERT_TRUE(std::filesystem::exists(file));
+    EXPECT_GT(reload_calls_, 0);
+
+    ss.request_stop();
+    server->stop();
+}
+
+TEST_F(HttpServerTest, WriteApi_CreateWorkflowRejectsInvalidYaml) {
+    kairos::testing::TempDir wf_dir, wg_dir;
+    auto server = make_write_server(18461, wf_dir.path(), wg_dir.path());
+    std::stop_source ss;
+    server->start(ss.get_token());
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+
+    httplib::Client cli("http://127.0.0.1:18461");
+    auto res = cli.Post("/api/v1/workflows",
+                        "name: broken\njobs: 42\n", "text/yaml");
+    ASSERT_TRUE(res);
+    EXPECT_EQ(res->status, 400);
+    auto j = json::parse(res->body);
+    EXPECT_EQ(j["error"], "validation failed");
+    EXPECT_FALSE(j["errors"].empty());
+    EXPECT_TRUE(j["errors"][0].contains("message"));
+
+    ss.request_stop();
+    server->stop();
+}
+
+TEST_F(HttpServerTest, WriteApi_CreateWorkflowConflict) {
+    kairos::testing::TempDir wf_dir, wg_dir;
+    auto server = make_write_server(18462, wf_dir.path(), wg_dir.path());
+    std::stop_source ss;
+    server->start(ss.get_token());
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+
+    httplib::Client cli("http://127.0.0.1:18462");
+    ASSERT_TRUE(cli.Post("/api/v1/workflows", kValidWfYaml, "text/yaml"));
+    auto res = cli.Post("/api/v1/workflows", kValidWfYaml, "text/yaml");
+    ASSERT_TRUE(res);
+    EXPECT_EQ(res->status, 409);
+
+    ss.request_stop();
+    server->stop();
+}
+
+TEST_F(HttpServerTest, WriteApi_UpdateWorkflowBacksUp) {
+    kairos::testing::TempDir wf_dir, wg_dir;
+    auto server = make_write_server(18463, wf_dir.path(), wg_dir.path());
+    std::stop_source ss;
+    server->start(ss.get_token());
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+
+    httplib::Client cli("http://127.0.0.1:18463");
+    ASSERT_TRUE(cli.Post("/api/v1/workflows", kValidWfYaml, "text/yaml"));
+
+    const char* updated = R"(name: api-made
+jobs:
+  build:
+    steps:
+      - name: compile2
+        run: make -j8
+)";
+    auto res = cli.Put("/api/v1/workflows/api-made", updated, "text/yaml");
+    ASSERT_TRUE(res);
+    EXPECT_EQ(res->status, 200);
+    EXPECT_TRUE(json::parse(res->body)["backup"]);
+
+    auto bak = wf_dir.path() / "api-made.yaml.bak";
+    ASSERT_TRUE(std::filesystem::exists(bak));
+    // Backup holds the ORIGINAL content.
+    std::ifstream in(bak);
+    std::string bak_content((std::istreambuf_iterator<char>(in)),
+                             std::istreambuf_iterator<char>());
+    EXPECT_NE(bak_content.find("compile\n"), std::string::npos);
+
+    std::ifstream cur(wf_dir.path() / "api-made.yaml");
+    std::string cur_content((std::istreambuf_iterator<char>(cur)),
+                            std::istreambuf_iterator<char>());
+    EXPECT_NE(cur_content.find("compile2"), std::string::npos);
+
+    ss.request_stop();
+    server->stop();
+}
+
+TEST_F(HttpServerTest, WriteApi_UpdateWorkflowRequiresNameMatch) {
+    kairos::testing::TempDir wf_dir, wg_dir;
+    auto server = make_write_server(18464, wf_dir.path(), wg_dir.path());
+    std::stop_source ss;
+    server->start(ss.get_token());
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+
+    httplib::Client cli("http://127.0.0.1:18464");
+    ASSERT_TRUE(cli.Post("/api/v1/workflows", kValidWfYaml, "text/yaml"));
+
+    auto res = cli.Put("/api/v1/workflows/other-name", kValidWfYaml,
+                       "text/yaml");
+    ASSERT_TRUE(res);
+    EXPECT_EQ(res->status, 400);
+
+    ss.request_stop();
+    server->stop();
+}
+
+TEST_F(HttpServerTest, WriteApi_DeleteWorkflowBacksUp) {
+    kairos::testing::TempDir wf_dir, wg_dir;
+    auto server = make_write_server(18465, wf_dir.path(), wg_dir.path());
+    std::stop_source ss;
+    server->start(ss.get_token());
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+
+    httplib::Client cli("http://127.0.0.1:18465");
+    ASSERT_TRUE(cli.Post("/api/v1/workflows", kValidWfYaml, "text/yaml"));
+
+    auto res = cli.Delete("/api/v1/workflows/api-made");
+    ASSERT_TRUE(res);
+    EXPECT_EQ(res->status, 200);
+    EXPECT_FALSE(std::filesystem::exists(wf_dir.path() / "api-made.yaml"));
+    EXPECT_TRUE(std::filesystem::exists(wf_dir.path() / "api-made.yaml.bak"));
+
+    auto missing = cli.Delete("/api/v1/workflows/api-made");
+    ASSERT_TRUE(missing);
+    EXPECT_EQ(missing->status, 404);
+
+    ss.request_stop();
+    server->stop();
+}
+
+TEST_F(HttpServerTest, WriteApi_WatchCrud) {
+    kairos::testing::TempDir wf_dir, wg_dir;
+    auto server = make_write_server(18466, wf_dir.path(), wg_dir.path());
+    std::stop_source ss;
+    server->start(ss.get_token());
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+
+    httplib::Client cli("http://127.0.0.1:18466");
+
+    // Create.
+    auto create = cli.Post("/api/v1/watches", kValidWatchYaml,
+                           "text/yaml");
+    ASSERT_TRUE(create);
+    EXPECT_EQ(create->status, 201);
+    EXPECT_TRUE(std::filesystem::exists(wg_dir.path() / "api-watch.yaml"));
+
+    // Update.
+    auto update = cli.Put("/api/v1/watches/api-watch", kValidWatchYaml,
+                          "text/yaml");
+    ASSERT_TRUE(update);
+    EXPECT_EQ(update->status, 200);
+    EXPECT_TRUE(std::filesystem::exists(wg_dir.path() / "api-watch.yaml.bak"));
+
+    // Delete.
+    auto del = cli.Delete("/api/v1/watches/api-watch");
+    ASSERT_TRUE(del);
+    EXPECT_EQ(del->status, 200);
+    EXPECT_FALSE(std::filesystem::exists(wg_dir.path() / "api-watch.yaml"));
+
+    ss.request_stop();
+    server->stop();
+}
+
+TEST_F(HttpServerTest, WriteApi_ValidateEndpoint) {
+    auto server = make_server(18467);
+    std::stop_source ss;
+    server->start(ss.get_token());
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+
+    httplib::Client cli("http://127.0.0.1:18467");
+
+    auto ok = cli.Post("/api/v1/config/validate?kind=workflow",
+                       kValidWfYaml, "text/yaml");
+    ASSERT_TRUE(ok);
+    EXPECT_EQ(ok->status, 200);
+    EXPECT_TRUE(json::parse(ok->body)["valid"]);
+
+    auto bad = cli.Post("/api/v1/config/validate?kind=workflow",
+                        ":::not yaml:::", "text/yaml");
+    ASSERT_TRUE(bad);
+    EXPECT_EQ(bad->status, 400);
+
+    auto watch_ok = cli.Post("/api/v1/config/validate?kind=watch",
+                             kValidWatchYaml, "text/yaml");
+    ASSERT_TRUE(watch_ok);
+    EXPECT_EQ(watch_ok->status, 200);
+    EXPECT_TRUE(json::parse(watch_ok->body)["valid"]);
+
+    ss.request_stop();
+    server->stop();
+}
+
+TEST_F(HttpServerTest, WriteApi_JobRunEndpoint) {
+    // A standalone job file (top-level steps + standalone: true).
+    set_registry_from_yaml(R"(
+name: nightly-job
+standalone: true
+steps:
+  - name: work
+    run: "true"
+)");
+    submit_targets_ = {"nightly-job"};
+
+    kairos::testing::TempDir wf_dir, wg_dir;
+    auto server = make_write_server(18468, wf_dir.path(), wg_dir.path());
+    std::stop_source ss;
+    server->start(ss.get_token());
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+
+    httplib::Client cli("http://127.0.0.1:18468");
+
+    auto ok = cli.Post("/api/v1/jobs/nightly-job/run", "", "");
+    ASSERT_TRUE(ok);
+    EXPECT_EQ(ok->status, 200);
+    auto j = json::parse(ok->body);
+    EXPECT_EQ(j["correlation_id"],
+              "run-fixedcorrelationid0000000000000");
+    // No pipeline in tests → run_id stays null, status pending.
+    EXPECT_TRUE(j["run_id"].is_null());
+    EXPECT_EQ(j["status"], "pending");
+    EXPECT_EQ(submit_calls_, 1);
+
+    auto missing = cli.Post("/api/v1/jobs/unknown/run", "", "");
+    ASSERT_TRUE(missing);
+    EXPECT_EQ(missing->status, 404);
+
+    ss.request_stop();
+    server->stop();
+}
+
+TEST_F(HttpServerTest, WriteApi_CancelRunEndpoint) {
+    seed_run("run-cccc11112222333344445555666677788899",
+             "ci-pipeline", "RUNNING");
+
+    kairos::testing::TempDir wf_dir, wg_dir;
+    auto server = make_write_server(18469, wf_dir.path(), wg_dir.path());
+    std::stop_source ss;
+    server->start(ss.get_token());
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+
+    httplib::Client cli("http://127.0.0.1:18469");
+
+    // Prefix-resolved cancel of a running run.
+    auto res = cli.Post("/api/v1/runs/run-cccc/cancel", "", "");
+    ASSERT_TRUE(res);
+    EXPECT_EQ(res->status, 200);
+    auto j = json::parse(res->body);
+    EXPECT_TRUE(j["cancelled"]);
+    EXPECT_EQ(j["run_id"],
+              "run-cccc11112222333344445555666677788899");
+    EXPECT_EQ(last_cancelled_,
+              "run-cccc11112222333344445555666677788899");
+
+    // Not-active run reports gracefully.
+    cancel_result_ = false;
+    auto inactive = cli.Post("/api/v1/runs/run-cccc/cancel", "", "");
+    ASSERT_TRUE(inactive);
+    EXPECT_FALSE(json::parse(inactive->body)["cancelled"]);
+
+    auto missing = cli.Post("/api/v1/runs/run-zzzz/cancel", "", "");
+    ASSERT_TRUE(missing);
+    EXPECT_EQ(missing->status, 404);
+
+    ss.request_stop();
+    server->stop();
+}
+
+TEST_F(HttpServerTest, WriteApi_AuditTrailRecordsMutations) {
+    kairos::testing::TempDir wf_dir, wg_dir;
+    auto server = make_write_server(18470, wf_dir.path(), wg_dir.path());
+    std::stop_source ss;
+    server->start(ss.get_token());
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+
+    httplib::Client cli("http://127.0.0.1:18470");
+    ASSERT_TRUE(cli.Post("/api/v1/workflows", kValidWfYaml, "text/yaml"));
+
+    // The audit entry is written asynchronously — poll briefly.
+    json arr = json::array();
+    for (int i = 0; i < 20; ++i) {
+        auto res = cli.Get("/api/v1/audit");
+        ASSERT_TRUE(res);
+        arr = json::parse(res->body);
+        if (!arr.empty()) break;
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    }
+    ASSERT_FALSE(arr.empty());
+    EXPECT_EQ(arr[0]["actor"], "http");
+    EXPECT_EQ(arr[0]["action"], "create_workflow");
+    EXPECT_EQ(arr[0]["target"], "api-made");
+
+    ss.request_stop();
+    server->stop();
+}
+
+TEST_F(HttpServerTest, WriteApi_DisabledWithoutDirs) {
+    auto server = make_server(18471);  // No dirs wired.
+    std::stop_source ss;
+    server->start(ss.get_token());
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+
+    httplib::Client cli("http://127.0.0.1:18471");
+    auto res = cli.Post("/api/v1/workflows", kValidWfYaml, "text/yaml");
+    ASSERT_TRUE(res);
+    EXPECT_EQ(res->status, 503);
 
     ss.request_stop();
     server->stop();

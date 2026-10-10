@@ -22,6 +22,7 @@
 #include "kairos/engine/workflow_registry.hpp"
 #include "kairos/exec/output_sink.hpp"
 #include "kairos/observability/metrics.hpp"
+#include "kairos/persist/db_writer.hpp"
 #include "kairos/persist/query_reader.hpp"
 
 #include <cstdint>
@@ -80,8 +81,23 @@ struct HttpDependencies {
     std::shared_ptr<const engine::WorkflowRegistry> registry;
     exec::RunStream* run_stream = nullptr;
 
+    /// Async DB writer for audit entries (Roadmap §3.8.2).
+    /// Null disables the audit trail (writes still succeed).
+    persist::DBWriter* db_writer = nullptr;
+
+    /// Workflow YAML directory — enables the workflow write API.
+    /// Empty path disables POST/PUT/DELETE (503).
+    std::filesystem::path workflows_dir;
+
+    /// Watch-group YAML directory — enables the watch write API.
+    std::filesystem::path watch_groups_dir;
+
     /// Submit a manual run by workflow name. Returns run_id or empty.
     std::function<std::string(const std::string& name)> submit_run;
+
+    /// Cancel an in-flight run via the CancelRegistry.
+    /// Returns false when the run is not active. Null → 501.
+    std::function<bool(const std::string& run_id)> cancel_run;
 
     /// Config reload callback.
     std::function<bool()> reload_config;

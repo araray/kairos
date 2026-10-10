@@ -803,6 +803,20 @@ int run_daemon(std::shared_ptr<const kairos::config::ConfigState> config) {
         http_deps.reader = &query_reader;
         http_deps.registry = registry;
         http_deps.run_stream = &run_stream;
+        // Write API (§3.8.1/§3.8.2): YAML dirs, audit trail, cancellation.
+        http_deps.db_writer = &db_writer;
+        http_deps.workflows_dir = resolve_yaml_dir(
+            config->config_file_path,
+            config->global.get<std::string>(
+                "kairos.workflows_dir", "workflows"));
+        http_deps.watch_groups_dir = resolve_yaml_dir(
+            config->config_file_path,
+            config->global.get<std::string>(
+                "kairos.watch_groups_dir", "watch_groups"));
+        http_deps.cancel_run = [&cancel_registry](
+            const std::string& run_id) -> bool {
+            return cancel_registry.cancel(run_id);
+        };
         http_deps.get_uptime = [uptime_start_http]() -> double {
             return std::chrono::duration<double>(
                 std::chrono::steady_clock::now() - uptime_start_http).count();

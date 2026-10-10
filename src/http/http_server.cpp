@@ -48,6 +48,7 @@
 #include "kairos/http/http_server.hpp"
 #include "kairos/http/web_catalog.hpp"
 
+#include "kairos/config/yaml_loader.hpp"
 #include "kairos/core/version.hpp"
 #include "kairos/engine/explain.hpp"
 #include "kairos/platform/timezone.hpp"
@@ -63,6 +64,7 @@
 #include <spdlog/spdlog.h>
 
 #include <algorithm>
+#include <cctype>
 #include <chrono>
 #include <cmath>
 #include <fstream>
@@ -222,6 +224,49 @@ std::vector<const engine::TimerEntry*> triggers_for_target(
             result.push_back(&t);
     }
     return result;
+}
+
+/// Reject entity names that would escape the YAML directory or create
+/// surprising files: allow [A-Za-z0-9._-]+ only, no leading dot.
+bool is_safe_entity_name(const std::string& name) {
+    if (name.empty() || name.front() == '.') return false;
+    for (char c : name) {
+        if (!(std::isalnum(static_cast<unsigned char>(c)) ||
+              c == '.' || c == '_' || c == '-')) {
+            return false;
+        }
+    }
+    return name.find("..") == std::string::npos;
+}
+
+/// Write a file atomically: temp file + rename (§3.8.2 backups/writes).
+bool write_file_atomic(const std::filesystem::path& path,
+                       const std::string& content) {
+    std::error_code ec;
+    auto tmp = path;
+    tmp += ".tmp";
+    {
+        std::ofstream out(tmp, std::ios::binary | std::ios::trunc);
+        if (!out) return false;
+        out.write(content.data(),
+                  static_cast<std::streamsize>(content.size()));
+        if (!out) return false;
+    }
+#ifdef _WIN32
+    std::filesystem::remove(path, ec);  // rename fails if target exists
+#endif
+    std::filesystem::rename(tmp, path, ec);
+    return !ec;
+}
+
+/// Copy path → path + ".bak" (overwriting any previous backup).
+bool backup_file(const std::filesystem::path& path) {
+    std::error_code ec;
+    auto bak = path;
+    bak += ".bak";
+    std::filesystem::remove(bak, ec);
+    if (!std::filesystem::exists(path, ec)) return false;
+    return std::filesystem::copy_file(path, bak, ec) && !ec;
 }
 
 }  // namespace
@@ -528,6 +573,76 @@ struct HttpServer::Impl {
         return "";
     }
 
+    // ── Write API helpers (§3.8.2) ──────────────────────────────────
+
+    /// Append an audit entry (no-op without a DB writer).
+    void audit(const std::string& action, const std::string& target,
+               const std::string& detail_json = "{}") {
+        if (deps.db_writer) {
+            deps.db_writer->enqueue(persist::InsertAuditEntry{
+                .actor = "http",
+                .action = action,
+                .target = target,
+                .detail_json = detail_json,
+            });
+        }
+    }
+
+    /// Structured validation-error body (§3.8.2: errors with locations).
+    static json validation_error_body(
+        const std::vector<config::YamlError>& errors) {
+        json arr = json::array();
+        for (const auto& e : errors) {
+            arr.push_back({
+                {"file", e.file},
+                {"path", e.path},
+                {"message", e.message},
+            });
+        }
+        return {
+            {"error", "validation failed"},
+            {"errors", std::move(arr)},
+        };
+    }
+
+    /// Reload after a successful write; logs and reports failures
+    /// without failing the request (the file is already durable).
+    bool reload_after_write() {
+        if (!deps.reload_config) return false;
+        return deps.reload_config();
+    }
+
+    /// Resolve the YAML file backing a workflow by name: registry
+    /// source_path first, then the conventional <dir>/<name>.yaml.
+    std::optional<std::filesystem::path> resolve_workflow_file(
+        const std::string& name) {
+        if (auto reg = registry()) {
+            for (const auto* wf : reg->workflows()) {
+                if (wf->workflow_name == name && !wf->source_path.empty())
+                    return std::filesystem::path(wf->source_path);
+            }
+        }
+        auto candidate = deps.workflows_dir / (name + ".yaml");
+        std::error_code ec;
+        if (std::filesystem::exists(candidate, ec)) return candidate;
+        return std::nullopt;
+    }
+
+    /// Resolve the YAML file backing a watch group by name.
+    std::optional<std::filesystem::path> resolve_watch_file(
+        const std::string& name) {
+        if (auto reg = registry()) {
+            for (const auto& g : reg->watch_groups()) {
+                if (g.group_name == name && !g.source_path.empty())
+                    return std::filesystem::path(g.source_path);
+            }
+        }
+        auto candidate = deps.watch_groups_dir / (name + ".yaml");
+        std::error_code ec;
+        if (std::filesystem::exists(candidate, ec)) return candidate;
+        return std::nullopt;
+    }
+
     // ── Routes ─────────────────────────────────────────────────────
 
     void register_routes() {
@@ -535,6 +650,7 @@ struct HttpServer::Impl {
         register_static_routes();
         register_page_routes();
         register_api_routes();
+        register_write_api_routes();
         register_sse_routes();
 
         // ── CORS preflight ─────────────────────────────────────────
@@ -544,7 +660,7 @@ struct HttpServer::Impl {
                 res.set_header("Access-Control-Allow-Origin",
                                config.cors_origins);
                 res.set_header("Access-Control-Allow-Methods",
-                               "GET, POST, OPTIONS");
+                               "GET, POST, PUT, DELETE, OPTIONS");
                 res.set_header("Access-Control-Allow-Headers",
                                "Authorization, Content-Type");
                 res.status = 204;
@@ -1923,6 +2039,497 @@ struct HttpServer::Impl {
                 j["status"] = ok ? "reloaded" : "failed";
                 res.status = ok ? 200 : 500;
                 res.set_content(j.dump(), "application/json");
+                set_cors(res);
+            });
+    }
+
+    // ── Write API routes (§3.8.1/§3.8.2) ────────────────────────────
+    //
+    // Write safety contract for every mutating endpoint:
+    //   1. Validate the YAML against the Kairos schema (loaders).
+    //   2. Back up the target file to <name>.yaml.bak before touching it.
+    //   3. Write atomically (temp file + rename).
+    //   4. Trigger a config reload so the running daemon picks it up.
+    //   5. Append an audit_log entry (actor "http").
+
+    void register_write_api_routes() {
+        // ── Workflows: create ──────────────────────────────────────
+        svr.Post("/api/v1/workflows",
+            [this](const httplib::Request& req, httplib::Response& res) {
+                if (!check_auth(req, res)) return;
+                if (deps.workflows_dir.empty()) {
+                    res.status = 503;
+                    res.set_content(R"({"error":"Workflow directory not configured"})",
+                                    "application/json");
+                    return;
+                }
+
+                auto parsed = config::load_workflow_string(req.body);
+                if (!parsed.ok()) {
+                    res.status = 400;
+                    res.set_content(
+                        validation_error_body(parsed.errors).dump(2),
+                        "application/json");
+                    return;
+                }
+                if (parsed.workflows.size() != 1u) {
+                    res.status = 400;
+                    res.set_content(R"({"error":"Body must define exactly one workflow"})",
+                                    "application/json");
+                    return;
+                }
+                const auto& name =
+                    parsed.workflows[0].workflow_name;
+                if (!is_safe_entity_name(name)) {
+                    res.status = 400;
+                    res.set_content(R"({"error":"Invalid workflow name: allowed chars are letters, digits, dot, underscore, dash"})",
+                                    "application/json");
+                    return;
+                }
+
+                auto target = deps.workflows_dir / (name + ".yaml");
+                std::error_code ec;
+                if (std::filesystem::exists(target, ec)) {
+                    res.status = 409;
+                    res.set_content(R"({"error":"Workflow file already exists"})",
+                                    "application/json");
+                    return;
+                }
+
+                if (!write_file_atomic(target, req.body)) {
+                    res.status = 500;
+                    res.set_content(R"({"error":"Failed to write file"})",
+                                    "application/json");
+                    return;
+                }
+                bool reloaded = reload_after_write();
+                audit("create_workflow", name);
+                res.status = 201;
+                res.set_content(json{
+                    {"name", name},
+                    {"file", target.string()},
+                    {"reloaded", reloaded},
+                }.dump(), "application/json");
+                set_cors(res);
+            });
+
+        // ── Workflows: update ──────────────────────────────────────
+        svr.Put(R"(/api/v1/workflows/([^/]+))",
+            [this](const httplib::Request& req, httplib::Response& res) {
+                if (!check_auth(req, res)) return;
+                if (deps.workflows_dir.empty()) {
+                    res.status = 503;
+                    res.set_content(R"({"error":"Workflow directory not configured"})",
+                                    "application/json");
+                    return;
+                }
+                auto url_name = req.matches[1].str();
+
+                auto parsed = config::load_workflow_string(req.body);
+                if (!parsed.ok()) {
+                    res.status = 400;
+                    res.set_content(
+                        validation_error_body(parsed.errors).dump(2),
+                        "application/json");
+                    return;
+                }
+                if (parsed.workflows.size() != 1u ||
+                    parsed.workflows[0].workflow_name != url_name) {
+                    res.status = 400;
+                    res.set_content(R"({"error":"Body workflow name must match the URL"})",
+                                    "application/json");
+                    return;
+                }
+
+                auto target = resolve_workflow_file(url_name);
+                if (!target) {
+                    res.status = 404;
+                    res.set_content(R"({"error":"Workflow not found"})",
+                                    "application/json");
+                    return;
+                }
+
+                bool backed_up = backup_file(*target);
+                if (!write_file_atomic(*target, req.body)) {
+                    res.status = 500;
+                    res.set_content(R"({"error":"Failed to write file"})",
+                                    "application/json");
+                    return;
+                }
+                bool reloaded = reload_after_write();
+                audit("update_workflow", url_name,
+                      json{{"backup", backed_up}}.dump());
+                res.set_content(json{
+                    {"name", url_name},
+                    {"file", target->string()},
+                    {"backup", backed_up},
+                    {"reloaded", reloaded},
+                }.dump(), "application/json");
+                set_cors(res);
+            });
+
+        // ── Workflows: delete ──────────────────────────────────────
+        svr.Delete(R"(/api/v1/workflows/([^/]+))",
+            [this](const httplib::Request& req, httplib::Response& res) {
+                if (!check_auth(req, res)) return;
+                if (deps.workflows_dir.empty()) {
+                    res.status = 503;
+                    res.set_content(R"({"error":"Workflow directory not configured"})",
+                                    "application/json");
+                    return;
+                }
+                auto name = req.matches[1].str();
+
+                auto target = resolve_workflow_file(name);
+                if (!target) {
+                    res.status = 404;
+                    res.set_content(R"({"error":"Workflow not found"})",
+                                    "application/json");
+                    return;
+                }
+
+                bool backed_up = backup_file(*target);
+                std::error_code ec;
+                std::filesystem::remove(*target, ec);
+                if (ec) {
+                    res.status = 500;
+                    res.set_content(R"({"error":"Failed to delete file"})",
+                                    "application/json");
+                    return;
+                }
+                bool reloaded = reload_after_write();
+                audit("delete_workflow", name,
+                      json{{"backup", backed_up}}.dump());
+                res.set_content(json{
+                    {"name", name},
+                    {"file", target->string()},
+                    {"backup", backed_up},
+                    {"reloaded", reloaded},
+                }.dump(), "application/json");
+                set_cors(res);
+            });
+
+        // ── Watches: create (single group per file by convention) ──
+        svr.Post("/api/v1/watches",
+            [this](const httplib::Request& req, httplib::Response& res) {
+                if (!check_auth(req, res)) return;
+                if (deps.watch_groups_dir.empty()) {
+                    res.status = 503;
+                    res.set_content(R"({"error":"Watch directory not configured"})",
+                                    "application/json");
+                    return;
+                }
+
+                auto parsed = config::load_watch_groups_string(req.body);
+                if (!parsed.ok()) {
+                    res.status = 400;
+                    res.set_content(
+                        validation_error_body(parsed.errors).dump(2),
+                        "application/json");
+                    return;
+                }
+                if (parsed.watch_groups.size() != 1u) {
+                    res.status = 400;
+                    res.set_content(R"({"error":"Body must define exactly one watch group - multi-group files are managed directly"})",
+                                    "application/json");
+                    return;
+                }
+                const auto& name = parsed.watch_groups[0].group_name;
+                if (!is_safe_entity_name(name)) {
+                    res.status = 400;
+                    res.set_content(R"({"error":"Invalid watch group name: allowed chars are letters, digits, dot, underscore, dash"})",
+                                    "application/json");
+                    return;
+                }
+
+                auto target = deps.watch_groups_dir / (name + ".yaml");
+                std::error_code ec;
+                if (std::filesystem::exists(target, ec)) {
+                    res.status = 409;
+                    res.set_content(R"({"error":"Watch group file already exists"})",
+                                    "application/json");
+                    return;
+                }
+
+                if (!write_file_atomic(target, req.body)) {
+                    res.status = 500;
+                    res.set_content(R"({"error":"Failed to write file"})",
+                                    "application/json");
+                    return;
+                }
+                bool reloaded = reload_after_write();
+                audit("create_watch_group", name);
+                res.status = 201;
+                res.set_content(json{
+                    {"name", name},
+                    {"file", target.string()},
+                    {"reloaded", reloaded},
+                }.dump(), "application/json");
+                set_cors(res);
+            });
+
+        // ── Watches: update ────────────────────────────────────────
+        svr.Put(R"(/api/v1/watches/([^/]+))",
+            [this](const httplib::Request& req, httplib::Response& res) {
+                if (!check_auth(req, res)) return;
+                if (deps.watch_groups_dir.empty()) {
+                    res.status = 503;
+                    res.set_content(R"({"error":"Watch directory not configured"})",
+                                    "application/json");
+                    return;
+                }
+                auto url_name = req.matches[1].str();
+
+                auto parsed = config::load_watch_groups_string(req.body);
+                if (!parsed.ok()) {
+                    res.status = 400;
+                    res.set_content(
+                        validation_error_body(parsed.errors).dump(2),
+                        "application/json");
+                    return;
+                }
+                if (parsed.watch_groups.size() != 1u ||
+                    parsed.watch_groups[0].group_name != url_name) {
+                    res.status = 400;
+                    res.set_content(R"({"error":"Body watch group name must match the URL"})",
+                                    "application/json");
+                    return;
+                }
+
+                auto target = resolve_watch_file(url_name);
+                if (!target) {
+                    res.status = 404;
+                    res.set_content(R"({"error":"Watch group not found"})",
+                                    "application/json");
+                    return;
+                }
+
+                bool backed_up = backup_file(*target);
+                if (!write_file_atomic(*target, req.body)) {
+                    res.status = 500;
+                    res.set_content(R"({"error":"Failed to write file"})",
+                                    "application/json");
+                    return;
+                }
+                bool reloaded = reload_after_write();
+                audit("update_watch_group", url_name,
+                      json{{"backup", backed_up}}.dump());
+                res.set_content(json{
+                    {"name", url_name},
+                    {"file", target->string()},
+                    {"backup", backed_up},
+                    {"reloaded", reloaded},
+                }.dump(), "application/json");
+                set_cors(res);
+            });
+
+        // ── Watches: delete ────────────────────────────────────────
+        svr.Delete(R"(/api/v1/watches/([^/]+))",
+            [this](const httplib::Request& req, httplib::Response& res) {
+                if (!check_auth(req, res)) return;
+                if (deps.watch_groups_dir.empty()) {
+                    res.status = 503;
+                    res.set_content(R"({"error":"Watch directory not configured"})",
+                                    "application/json");
+                    return;
+                }
+                auto name = req.matches[1].str();
+
+                auto target = resolve_watch_file(name);
+                if (!target) {
+                    res.status = 404;
+                    res.set_content(R"({"error":"Watch group not found"})",
+                                    "application/json");
+                    return;
+                }
+
+                bool backed_up = backup_file(*target);
+                std::error_code ec;
+                std::filesystem::remove(*target, ec);
+                if (ec) {
+                    res.status = 500;
+                    res.set_content(R"({"error":"Failed to delete file"})",
+                                    "application/json");
+                    return;
+                }
+                bool reloaded = reload_after_write();
+                audit("delete_watch_group", name,
+                      json{{"backup", backed_up}}.dump());
+                res.set_content(json{
+                    {"name", name},
+                    {"file", target->string()},
+                    {"backup", backed_up},
+                    {"reloaded", reloaded},
+                }.dump(), "application/json");
+                set_cors(res);
+            });
+
+        // ── Validate YAML without applying (§3.8.1) ────────────────
+        // POST /api/v1/config/validate?kind=workflow|watch
+        svr.Post("/api/v1/config/validate",
+            [this](const httplib::Request& req, httplib::Response& res) {
+                if (!check_auth(req, res)) return;
+                auto kind = req.has_param("kind")
+                    ? req.get_param_value("kind") : "workflow";
+
+                if (kind == "workflow") {
+                    auto parsed = config::load_workflow_string(req.body);
+                    if (parsed.ok() && parsed.workflows.size() == 1u) {
+                        res.set_content(json{
+                            {"valid", true},
+                            {"name",
+                             parsed.workflows[0].workflow_name},
+                        }.dump(), "application/json");
+                    } else if (parsed.ok()) {
+                        res.status = 400;
+                        res.set_content(R"({"valid":false,"error":"Body must define exactly one workflow"})",
+                                        "application/json");
+                    } else {
+                        res.status = 400;
+                        res.set_content(
+                            validation_error_body(parsed.errors).dump(2),
+                            "application/json");
+                    }
+                } else if (kind == "watch") {
+                    auto parsed =
+                        config::load_watch_groups_string(req.body);
+                    if (parsed.ok() && !parsed.watch_groups.empty()) {
+                        res.set_content(json{
+                            {"valid", true},
+                            {"count", parsed.watch_groups.size()},
+                        }.dump(), "application/json");
+                    } else if (parsed.ok()) {
+                        res.status = 400;
+                        res.set_content(R"({"valid":false,"error":"No watch groups defined"})",
+                                        "application/json");
+                    } else {
+                        res.status = 400;
+                        res.set_content(
+                            validation_error_body(parsed.errors).dump(2),
+                            "application/json");
+                    }
+                } else {
+                    res.status = 400;
+                    res.set_content(R"({"error":"kind must be 'workflow' or 'watch'"})",
+                                    "application/json");
+                }
+                set_cors(res);
+            });
+
+        // ── Trigger a standalone job ───────────────────────────────
+        svr.Post(R"(/api/v1/jobs/([^/]+)/run)",
+            [this](const httplib::Request& req, httplib::Response& res) {
+                if (!check_auth(req, res)) return;
+
+                auto name = req.matches[1].str();
+                auto reg = registry();
+                if (!reg || (!reg->standalone_job(name) &&
+                             !reg->standalone_job_by_name(name))) {
+                    res.status = 404;
+                    res.set_content(R"({"error":"Standalone job not found"})",
+                                    "application/json");
+                    return;
+                }
+                if (!deps.submit_run) {
+                    res.status = 501;
+                    res.set_content(R"({"error":"Run submission not configured"})",
+                                    "application/json");
+                    return;
+                }
+
+                auto correlation = deps.submit_run(name);
+                if (correlation.empty()) {
+                    res.status = 500;
+                    res.set_content(R"({"error":"Failed to submit run"})",
+                                    "application/json");
+                    return;
+                }
+
+                std::string run_id;
+                for (int i = 0; i < 20 && run_id.empty(); ++i) {
+                    if (deps.reader) {
+                        if (auto id = deps.reader
+                                ->get_run_id_by_correlation(correlation)) {
+                            run_id = *id;
+                            break;
+                        }
+                    }
+                    std::this_thread::sleep_for(
+                        std::chrono::milliseconds(100));
+                }
+
+                audit("run_job", name);
+                res.set_content(json{
+                    {"correlation_id", correlation},
+                    {"run_id", run_id.empty() ? json(nullptr)
+                                              : json(run_id)},
+                    {"status", run_id.empty() ? "pending" : "submitted"},
+                }.dump(), "application/json");
+                set_cors(res);
+            });
+
+        // ── Cancel a run (§3.8.5) ──────────────────────────────────
+        svr.Post(R"(/api/v1/runs/([^/]+)/cancel)",
+            [this](const httplib::Request& req, httplib::Response& res) {
+                if (!check_auth(req, res)) return;
+
+                auto input = req.matches[1].str();
+                std::vector<std::string> candidates;
+                auto run_id = resolve_run_id(input, candidates);
+                if (run_id.empty()) {
+                    res.status = 404;
+                    json err = {{"error", "Run not found"},
+                                {"run_id", input}};
+                    if (!candidates.empty()) err["candidates"] = candidates;
+                    res.set_content(err.dump(), "application/json");
+                    return;
+                }
+
+                if (!deps.cancel_run) {
+                    res.status = 501;
+                    res.set_content(R"({"error":"Cancellation not configured"})",
+                                    "application/json");
+                    return;
+                }
+
+                bool cancelled = deps.cancel_run(run_id);
+                audit("cancel_run", run_id,
+                      json{{"was_active", cancelled}}.dump());
+                res.set_content(json{
+                    {"run_id", run_id},
+                    {"cancelled", cancelled},
+                    {"status", cancelled ? "cancelling" : "not_active"},
+                }.dump(), "application/json");
+                set_cors(res);
+            });
+
+        // ── Audit trail (read; §15.14) ─────────────────────────────
+        svr.Get("/api/v1/audit",
+            [this](const httplib::Request& req, httplib::Response& res) {
+                if (!check_auth(req, res)) return;
+                int limit = 50;
+                if (req.has_param("limit")) {
+                    try {
+                        limit = std::stoi(req.get_param_value("limit"));
+                    } catch (...) { /* keep default */ }
+                }
+                json arr = json::array();
+                if (deps.reader) {
+                    for (const auto& row :
+                         deps.reader->query_audit_log(limit)) {
+                        arr.push_back({
+                            {"id", row.id},
+                            {"timestamp",
+                             platform::format_display_time(
+                                 row.timestamp, tz)},
+                            {"actor", row.actor},
+                            {"action", row.action},
+                            {"target", row.target},
+                            {"detail", row.detail_json},
+                        });
+                    }
+                }
+                res.set_content(arr.dump(), "application/json");
                 set_cors(res);
             });
     }
