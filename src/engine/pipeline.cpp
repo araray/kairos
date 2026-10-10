@@ -105,6 +105,19 @@ RunStatus Pipeline::process_event(const TriggerEvent& event,
     ctx.trigger_id = event.trigger_id;
     ctx.correlation_id = event.correlation_id;
     ctx.now = deps_.clock->now();
+    // §10.3: capture watch-event metadata for env forwarding.
+    if (auto* fe = std::get_if<engine::FileEventPayload>(
+            &event.payload)) {
+        ctx.trigger_meta.event_type = fe->event_type;
+        ctx.trigger_meta.watch_group = fe->watch_group;
+        ctx.trigger_meta.affected_paths = fe->changed_paths;
+    } else if (auto* fd = std::get_if<engine::FileDiffPayload>(
+                   &event.payload)) {
+        ctx.trigger_meta.event_type = fd->diff_summary;
+        ctx.trigger_meta.watch_group = fd->watch_group;
+        ctx.trigger_meta.rule_name = fd->rule_name;
+        ctx.trigger_meta.affected_paths = fd->affected_paths;
+    }
     if (auto* manual = std::get_if<engine::ManualRunPayload>(
             &event.payload)) {
         ctx.dry_run = manual->dry_run;
@@ -887,6 +900,21 @@ exec::ProcessSpec Pipeline::build_process_spec(
         deps_.data_dir.string(), "");
 
     spec.environment = builder.build();
+
+    // §10.3: forward watch-event metadata as environment variables.
+    if (!ctx.trigger_meta.watch_group.empty()) {
+        auto& env = spec.environment;
+        env["KAIROS_TRIGGER_EVENT_TYPE"] = ctx.trigger_meta.event_type;
+        env["KAIROS_TRIGGER_WATCH_GROUP"] =
+            ctx.trigger_meta.watch_group;
+        env["KAIROS_TRIGGER_RULE"] = ctx.trigger_meta.rule_name;
+        std::string files;
+        for (const auto& p : ctx.trigger_meta.affected_paths) {
+            if (!files.empty()) files += ",";
+            files += p;
+        }
+        env["KAIROS_TRIGGER_AFFECTED_FILES"] = files;
+    }
 
     // §8 shared context: the step appends "KEY=VALUE" lines here;
     // the pipeline captures the file after the step completes.

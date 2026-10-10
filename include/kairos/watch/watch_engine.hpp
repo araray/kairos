@@ -128,6 +128,13 @@ public:
     void stop();
 
 private:
+    /// §10.4 per-rule cooldown state: "group/rule" → wall-clock time of
+    /// the last emitted trigger. Guarded by cooldown_mu_.
+    std::mutex cooldown_mu_;
+    std::unordered_map<std::string,
+                       std::chrono::system_clock::time_point>
+        last_trigger_at_;
+
     /// Per-group runtime state.
     struct GroupState {
         WatchGroupDef def;

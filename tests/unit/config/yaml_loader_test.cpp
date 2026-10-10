@@ -1113,4 +1113,54 @@ TEST(RetryPolicyTest, BackoffDelayMath) {
     EXPECT_EQ(p.delay_for(4), std::chrono::milliseconds(100));
 }
 
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  §10 event-trigger enhancements (Roadmap Phase 12)
+// ═══════════════════════════════════════════════════════════════════════════
+
+TEST(WatchActionTest, ParsesExplicitActionBlock) {
+    auto r = load_watch_groups_string(R"(
+watch_groups:
+  - name: dep
+    watch_items: ["/deploy/*.tar.gz"]
+    rules:
+      - name: new_package
+        condition: "event.type == 'created'"
+        action:
+          type: run_workflow
+          target: deploy_pipeline
+          cooldown: 60s
+      - name: alt_job
+        condition: "true"
+        action:
+          type: run_job
+          target: reindex
+)");
+    ASSERT_TRUE(r.ok()) << (r.errors.empty() ? "?" : r.errors[0].message);
+    const auto& rules = r.watch_groups[0].rules;
+    ASSERT_EQ(rules.size(), 2u);
+    EXPECT_EQ(*rules[0].trigger_target, "deploy_pipeline");
+    EXPECT_TRUE(rules[0].trigger_is_workflow);
+    EXPECT_EQ(rules[0].cooldown, std::chrono::seconds(60));
+    EXPECT_EQ(*rules[1].trigger_target, "reindex");
+    EXPECT_FALSE(rules[1].trigger_is_workflow);
+    EXPECT_EQ(rules[1].cooldown, std::chrono::seconds(0));
+}
+
+TEST(WatchActionTest, LegacyTriggerStillWorks) {
+    auto r = load_watch_groups_string(R"(
+watch_groups:
+  - name: old
+    watch_items: ["/x"]
+    rules:
+      - name: r1
+        condition: "true"
+        trigger:
+          workflow: legacy-flow
+)");
+    ASSERT_TRUE(r.ok());
+    EXPECT_EQ(*r.watch_groups[0].rules[0].trigger_target, "legacy-flow");
+    EXPECT_TRUE(r.watch_groups[0].rules[0].trigger_is_workflow);
+}
+
 }  // namespace kairos::config

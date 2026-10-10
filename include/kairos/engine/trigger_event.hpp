@@ -42,6 +42,7 @@ struct FileEventPayload {
 /// Payload for sample+diff filesystem events.
 struct FileDiffPayload {
     std::string watch_group;
+    std::string rule_name;      ///< §10.3: rule that fired (may be empty)
     int files_added = 0;
     int files_removed = 0;
     int files_modified = 0;

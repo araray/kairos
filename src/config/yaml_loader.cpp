@@ -922,7 +922,11 @@ WatchGroupDef parse_watch_group_node(
                 rule.event_types = read_string_vec(rule_node["events"]);
             }
 
-            // Trigger target.
+            // Trigger target — three spellings:
+            //   trigger: {workflow: name} / {job: name}   (legacy map)
+            //   target: name                              (legacy shorthand)
+            //   action: {type: run_workflow|run_job,      (§10.2 explicit
+            //           target: name, cooldown: 30s}       action block)
             if (rule_node["trigger"] && rule_node["trigger"].IsMap()) {
                 auto& trig = rule_node["trigger"];
                 if (trig["workflow"]) {
@@ -936,6 +940,27 @@ WatchGroupDef parse_watch_group_node(
                 // Shorthand: "target: workflow_name".
                 rule.trigger_target = rule_node["target"].as<std::string>();
                 rule.trigger_is_workflow = true;
+            }
+
+            if (rule_node["action"] && rule_node["action"].IsMap()) {
+                const auto& act = rule_node["action"];
+                auto type = act["type"]
+                    ? act["type"].as<std::string>("run_workflow")
+                    : "run_workflow";
+                if (act["target"] && act["target"].IsScalar()) {
+                    rule.trigger_target =
+                        act["target"].as<std::string>();
+                }
+                rule.trigger_is_workflow = (type != "run_job");
+                if (act["cooldown"]) {
+                    auto cd = parse_timeout(act, "cooldown");
+                    if (cd) rule.cooldown = *cd;
+                }
+            } else if (rule_node["cooldown"] &&
+                       rule_node["cooldown"].IsScalar()) {
+                // Cooldown also accepted at rule level without action.
+                auto cd = parse_timeout(rule_node, "cooldown");
+                if (cd) rule.cooldown = *cd;
             }
 
             group.rules.push_back(std::move(rule));

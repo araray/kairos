@@ -496,4 +496,46 @@ TEST_F(WatchEngineTest, ScanResultRecordsDuration) {
     ASSERT_EQ(results.size(), 1u);
     // Duration should be non-negative (might be 0ms for fast fake scan).
     EXPECT_GE(results[0].scan_duration.count(), 0);
+
+}
+
+// ── §10.4 rule cooldown ─────────────────────────────────────────────────
+
+TEST_F(WatchEngineTest, CooldownSuppressesRapidRetriggers) {
+    fs_.add_file("/watched/a.txt",
+                 FakeFileEntry{.size = 1, .mtime = clock_.now()});
+    FakeFilesystemScanner scanner(fs_);
+
+    WatchRuleDef rule = make_catch_all_rule("burst", "some-flow");
+    rule.cooldown = std::chrono::seconds{60};
+    auto group = make_group("cd", {"/watched"}, {rule});
+
+    WatchEngine engine(WatchEngineConfig{},
+        WatchEngine::Dependencies{.clock = &clock_, .scanner = &scanner},
+        {group});
+    int fired = 0;
+    TriggerSink sink = [&fired](TriggerEvent) { ++fired; return true; };
+
+    // Baseline + first change → fires.
+    engine.scan_once(sink);
+    fs_.add_file("/watched/b.txt",
+                 FakeFileEntry{.size = 2, .mtime = clock_.now()});
+    clock_.advance(std::chrono::seconds(60));
+    auto r1 = engine.scan_once(sink);
+    EXPECT_EQ(fired, 1);
+
+    // Second change 30s later → suppressed by cooldown.
+    fs_.add_file("/watched/c.txt",
+                 FakeFileEntry{.size = 3, .mtime = clock_.now()});
+    clock_.advance(std::chrono::seconds(30));
+    engine.scan_once(sink);
+    EXPECT_EQ(fired, 1);
+
+    // After the full cooldown elapses → fires again.
+    clock_.advance(std::chrono::seconds(31));
+    fs_.add_file("/watched/d.txt",
+                 FakeFileEntry{.size = 4, .mtime = clock_.now()});
+    clock_.advance(std::chrono::seconds(1));
+    engine.scan_once(sink);
+    EXPECT_EQ(fired, 2);
 }

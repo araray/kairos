@@ -88,6 +88,15 @@ struct RunContext {
     /// would run and succeeds immediately — no processes are spawned.
     bool dry_run = false;
 
+    /// §10.3: metadata of the triggering watch event (empty for
+    /// manual/schedule runs) — forwarded to steps as KAIROS_TRIGGER_*.
+    struct TriggerMeta {
+        std::string event_type;
+        std::string watch_group;
+        std::string rule_name;
+        std::vector<std::string> affected_paths;
+    } trigger_meta;
+
     /// §8 shared context: outputs written by completed steps via
     /// $KAIROS_OUTPUT, keyed job_name → step_name → key → value.
     /// Filled as jobs finish, so later DAG levels read earlier ones.
