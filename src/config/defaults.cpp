@@ -114,6 +114,12 @@ confy::Value build_kairos_defaults() {
                 {"stale_run_timeout_seconds", 3600},
             }},
 
+            // ─── Secrets backend (§12.2) ─────────────────────────────
+            {"security", {
+                {"backend",     ""},            // "vault" | "env"
+                {"env_prefix",  "KAIROS_SECRET_"},
+            }},
+
             // ─── Vault / Secrets (§17) ────────────────────────────────
             {"vault", {
                 {"enabled",            false},

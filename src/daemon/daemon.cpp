@@ -444,10 +444,28 @@ int run_daemon(std::shared_ptr<const kairos::config::ConfigState> config) {
         // Non-fatal — tags are a convenience feature.
     }
 
-    // ── Step 6.5: Load SecretStore (§17.1) ────────────────────────
+    // ── Step 6.5: Load SecretStore (§17.1, §12.2.3) ─────────────
     security::SecretStore secret_store;
-    bool vault_enabled = config->global.get<bool>(
-        "kairos.vault.enabled", false);
+    auto secrets_backend = config->global.get<std::string>(
+        "kairos.security.backend", "");
+    if (secrets_backend.empty()) {
+        // Legacy: kairos.vault.enabled implies the vault backend.
+        if (config->global.get<bool>("kairos.vault.enabled", false)) {
+            secrets_backend = "vault";
+        }
+    }
+
+    if (secrets_backend == "env") {
+        // §12.2.3: secrets straight from KAIROS_SECRET_* variables.
+        auto prefix = config->global.get<std::string>(
+            "kairos.security.env_prefix", "KAIROS_SECRET_");
+        auto count = secret_store.load_from_env(prefix);
+        log->info("Secrets: env backend loaded {} key(s) "
+                  "(prefix '{}')",
+                  count, prefix);
+    }
+
+    bool vault_enabled = secrets_backend == "vault";
     if (vault_enabled) {
         std::string vault_file = config->global.get<std::string>(
             "kairos.vault.file", "");

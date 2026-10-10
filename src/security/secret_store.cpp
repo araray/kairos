@@ -464,4 +464,5 @@ SecretStore::make_resolver() const {
     };
 }
 
+
 }  // namespace kairos::security
