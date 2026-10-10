@@ -897,3 +897,138 @@ TEST_F(RunContextTest, OutputGatedCondition) {
     EXPECT_NE(logs.find("condition-passed"), std::string::npos)
         << "logs: " << logs;
 }
+
+// ── §15.4 notification hooks ─────────────────────────────────────────────
+
+TEST_F(RunContextTest, CommandNotificationFiresOnSuccess) {
+    kairos::testing::TempDir dir;
+    auto marker = dir.path() / "fired.txt";
+
+    StepDef step;
+    step.step_id = "stp-n";
+    step.step_name = "work";
+    step.command = "echo doing";
+
+    JobDef job;
+    job.job_id = "job-n";
+    job.job_name = "work";
+    job.steps = {step};
+    DagNode node{.job_id = "job-n", .job_name = "work"};
+
+    auto wf = build_workflow_def("wfl-notify", "NotifyFlow",
+                                 {job}, {node});
+    NotificationDef hook;
+    hook.type = NotificationDef::Type::Command;
+    hook.command = "echo {{ workflow }}/{{ status }} >> \"" +
+        marker.string() + "\"";
+    hook.message_template = "{{ workflow }} {{ status }}";
+    wf.notifications.on_success.push_back(hook);
+
+    pool_ = std::make_unique<exec::RunnerPool>(
+        exec::RunnerPoolConfig{.worker_count = 1, .queue_capacity = 8});
+    pool_->set_process_handle_factory([](const exec::ProcessSpec&) {
+        return exec::create_process_handle();
+    });
+    pool_->start(stop_source_.get_token());
+
+    auto registry = std::make_shared<WorkflowRegistry>(
+        std::vector<WorkflowDef>{std::move(wf)},
+        std::vector<TimerEntry>{});
+    TriggerBus bus(64);
+    Pipeline pipeline(PipelineConfig{}, Pipeline::Dependencies{
+        .clock = &clock_,
+        .trigger_bus = &bus,
+        .runner_pool = pool_.get(),
+        .registry = registry,
+        .active_runs = &active_runs_,
+        .data_dir = std::filesystem::temp_directory_path(),
+        .notification_process_factory = []() {
+            return exec::create_process_handle();
+        },
+    });
+
+    auto status = pipeline.process_event(
+        make_manual_trigger("wfl-notify"), stop_source_.get_token());
+    EXPECT_EQ(status, RunStatus::Success);
+
+    // Async dispatch — poll briefly for the marker file.
+    bool fired = false;
+    for (int i = 0; i < 30; ++i) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        std::error_code ec;
+        if (std::filesystem::exists(marker, ec)) { fired = true; break; }
+    }
+    ASSERT_TRUE(fired) << "notification command never ran";
+    std::ifstream in(marker);
+    std::string content((std::istreambuf_iterator<char>(in)),
+                        std::istreambuf_iterator<char>());
+    EXPECT_NE(content.find("NotifyFlow/SUCCESS"), std::string::npos)
+        << "content: " << content;
+}
+
+TEST_F(RunContextTest, WebhookNotificationDelivered) {
+    StepDef step;
+    step.step_id = "stp-w";
+    step.step_name = "work";
+    step.command = "true";
+    JobDef job;
+    job.job_id = "job-w";
+    job.job_name = "work";
+    job.steps = {step};
+    DagNode node{.job_id = "job-w", .job_name = "work"};
+
+    auto wf = build_workflow_def("wfl-wh", "WebhookFlow",
+                                 {job}, {node});
+    NotificationDef hook;
+    hook.type = NotificationDef::Type::Webhook;
+    hook.url = "http://127.0.0.1:1/nothing";  // captured, never dialed
+    hook.message_template = "{{ workflow }} {{ status }}";
+    wf.notifications.on_success.push_back(hook);
+
+    pool_ = std::make_unique<exec::RunnerPool>(
+        exec::RunnerPoolConfig{.worker_count = 1, .queue_capacity = 8});
+    pool_->set_process_handle_factory([](const exec::ProcessSpec&) {
+        auto p = std::make_unique<kairos::testing::FakeProcessHandle>();
+        p->set_exit_code(0);
+        return p;
+    });
+    pool_->start(stop_source_.get_token());
+
+    auto registry = std::make_shared<WorkflowRegistry>(
+        std::vector<WorkflowDef>{std::move(wf)},
+        std::vector<TimerEntry>{});
+
+    std::mutex mu;
+    std::vector<std::pair<std::string, std::string>> delivered;
+    TriggerBus bus(64);
+    Pipeline pipeline(PipelineConfig{}, Pipeline::Dependencies{
+        .clock = &clock_,
+        .trigger_bus = &bus,
+        .runner_pool = pool_.get(),
+        .registry = registry,
+        .active_runs = &active_runs_,
+        .webhook_post = [&mu, &delivered](const std::string& url,
+                                          const std::string& body) {
+            std::lock_guard lock(mu);
+            delivered.emplace_back(url, body);
+        },
+    });
+
+    auto status = pipeline.process_event(
+        make_manual_trigger("wfl-wh"), stop_source_.get_token());
+    EXPECT_EQ(status, RunStatus::Success);
+
+    for (int i = 0; i < 30; ++i) {
+        {
+            std::lock_guard lock(mu);
+            if (!delivered.empty()) break;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    }
+    std::lock_guard lock(mu);
+    ASSERT_EQ(delivered.size(), 1u);
+    EXPECT_EQ(delivered[0].first, "http://127.0.0.1:1/nothing");
+    EXPECT_NE(delivered[0].second.find("WebhookFlow SUCCESS"),
+              std::string::npos)
+        << "body: " << delivered[0].second;
+}

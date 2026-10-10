@@ -91,6 +91,47 @@ std::vector<std::string> parse_tags(const YAML::Node& node) {
     return tags;
 }
 
+
+/// §15.4: parse one notification entry.
+NotificationDef parse_notification(const YAML::Node& node) {
+    NotificationDef n;
+    auto type = node["type"] ? node["type"].as<std::string>("command")
+                             : "command";
+    n.type = (type == "webhook") ? NotificationDef::Type::Webhook
+                                 : NotificationDef::Type::Command;
+    if (node["url"]) n.url = node["url"].as<std::string>();
+    if (node["webhook"]) n.url = node["webhook"].as<std::string>();
+    if (node["run"]) n.command = node["run"].as<std::string>();
+    if (node["command"]) n.command = node["command"].as<std::string>();
+    if (node["template"]) {
+        n.message_template = node["template"].as<std::string>();
+    }
+    if (node["message"]) {
+        n.message_template = node["message"].as<std::string>();
+    }
+    return n;
+}
+
+/// §15.4: parse the workflow-level notifications block.
+WorkflowNotifications parse_notifications(const YAML::Node& root) {
+    WorkflowNotifications out;
+    if (!root["notifications"] || !root["notifications"].IsMap()) {
+        return out;
+    }
+    const auto& n = root["notifications"];
+    if (n["on_success"] && n["on_success"].IsSequence()) {
+        for (const auto& e : n["on_success"]) {
+            if (e.IsMap()) out.on_success.push_back(parse_notification(e));
+        }
+    }
+    if (n["on_failure"] && n["on_failure"].IsSequence()) {
+        for (const auto& e : n["on_failure"]) {
+            if (e.IsMap()) out.on_failure.push_back(parse_notification(e));
+        }
+    }
+    return out;
+}
+
 /// Read an env map (string → string) from a YAML mapping node.
 std::unordered_map<std::string, std::string> read_env_map(
     const YAML::Node& node)
@@ -675,6 +716,9 @@ YamlLoadResult parse_workflow_node(
             std::move(dag),
             parse_tags(root)  // §6 Workflow-level tags
         };
+
+        // §15.4 notification hooks (not part of the content hash).
+        wf.notifications = parse_notifications(root);
 
         // ── Extract triggers ────────────────────────────────────
         auto triggers = parse_triggers(

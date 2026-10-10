@@ -25,6 +25,7 @@
 #include "kairos/engine/trigger_event.hpp"
 #include "kairos/engine/workflow_registry.hpp"
 #include "kairos/exec/output_sink.hpp"
+#include "kairos/exec/process_handle.hpp"
 #include "kairos/exec/runner_pool.hpp"
 #include "kairos/mcp/handler.hpp"
 #include "kairos/mcp/transport.hpp"
@@ -53,6 +54,7 @@
 
 #ifdef KAIROS_HTTP_ENABLED
 #include "kairos/http/http_server.hpp"
+#include <httplib.h>
 #endif
 
 #include <spdlog/spdlog.h>
@@ -579,8 +581,41 @@ int run_daemon(std::shared_ptr<const kairos::config::ConfigState> config) {
         .tag_store = &tag_store,
         .secret_resolver = secret_resolver,
         .data_dir = config->data_dir,
+#ifdef KAIROS_HTTP_ENABLED
+        // §15.4: wired below after the HTTP section is set up — the
+        // lambda is self-contained, so declare it here directly.
+        .webhook_post = [](const std::string& url,
+                           const std::string& body) {
+            auto scheme_end = url.find("://");
+            if (scheme_end == std::string::npos) {
+                throw std::runtime_error("bad webhook url: " + url);
+            }
+            auto host_start = scheme_end + 3;
+            auto path_start = url.find('/', host_start);
+            std::string host_port = (path_start == std::string::npos)
+                ? url.substr(host_start)
+                : url.substr(host_start, path_start - host_start);
+            std::string path = (path_start == std::string::npos)
+                ? "/" : url.substr(path_start);
+            auto colon = host_port.find(':');
+            std::string host = (colon == std::string::npos)
+                ? host_port : host_port.substr(0, colon);
+            int port = (colon == std::string::npos)
+                ? 80 : std::stoi(host_port.substr(colon + 1));
+            httplib::Client cli(host, port);
+            cli.set_connection_timeout(5, 0);
+            cli.set_read_timeout(10, 0);
+            auto res = cli.Post(path, body, "application/json");
+            if (!res) {
+                throw std::runtime_error("webhook unreachable: " + url);
+            }
+        },
+#endif
+        .notification_process_factory = []() {
+            return exec::create_process_handle();
+        },
         .secret_values = secret_values,
-    });
+});
     pipeline.start(stop_token);
     log->info("Pipeline thread started");
 

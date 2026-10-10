@@ -15,9 +15,11 @@
 #include "kairos/engine/execution_plan.hpp"
 #include "kairos/engine/trigger_event.hpp"
 #include "kairos/engine/trigger_types.hpp"
+#include "kairos/core/bounded_queue.hpp"
 #include "kairos/engine/workflow_registry.hpp"
 #include "kairos/exec/env_builder.hpp"
 #include "kairos/exec/output_sink.hpp"
+#include "kairos/exec/process_handle.hpp"
 #include "kairos/exec/runner_pool.hpp"
 #include "kairos/kel/evaluator.hpp"
 #include "kairos/persist/db_writer.hpp"
@@ -181,6 +183,20 @@ public:
         /// (<data_dir>/runs/<run_id>/outputs/…). Empty disables capture.
         std::filesystem::path data_dir;
 
+        /// §15.4: POST {"text": …} to a webhook URL. Wired by the
+        /// daemon when built with KAIROS_HTTP; null → webhook
+        /// notifications log a warning instead of firing.
+        std::function<void(const std::string& url,
+                           const std::string& body)>
+            webhook_post;
+
+        /// §15.4: process factory for command notifications. Core
+        /// cannot link the platform layer, so the host injects
+        /// exec::create_process_handle here; null → command
+        /// notifications log a warning instead of firing.
+        std::function<std::unique_ptr<exec::ProcessHandle>()>
+            notification_process_factory;
+
         /// Pre-sorted secret values for output masking (§17.3).
         /// Populated from SecretStore::values(), sorted longest-first.
         std::vector<std::string> secret_values;
@@ -208,6 +224,24 @@ public:
     void stop();
 
 private:
+    /// ── §15.4 notification dispatcher ─────────────────────────────
+    /// Fire-and-forget worker: the pipeline enqueues completed-run
+    /// notifications and never blocks on delivery. Bounded queue;
+    /// overflow drops with a log (notifications are best-effort).
+    struct NotifyTask {
+        NotificationDef def;
+        std::string workflow;
+        std::string run_id;
+        std::string status;
+        std::string trigger;
+    };
+    void notify_worker(std::stop_token stop);
+    void dispatch_notification(const NotifyTask& task);
+    void enqueue_notifications(const RunContext& ctx, RunStatus status);
+
+    core::BoundedQueue<NotifyTask> notify_queue_{64};
+    std::jthread notify_thread_;
+
     /// §8: per-step output file path.
     [[nodiscard]] std::filesystem::path output_file_path(
         const std::string& run_id, const std::string& job_id,

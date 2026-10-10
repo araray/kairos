@@ -3199,6 +3199,9 @@ int run(int argc, char** argv) {
             .db_writer = &db_writer,
             .query_reader = &query_reader,
             .data_dir = cfg->data_dir,
+            .notification_process_factory = []() {
+                return exec::create_process_handle();
+            },
         });
 
         // Create a manual trigger event for this workflow.
@@ -3812,6 +3815,9 @@ int run(int argc, char** argv) {
             .db_writer = &db_writer,
             .query_reader = &query_reader,
             .data_dir = cfg->data_dir,
+            .notification_process_factory = []() {
+                return exec::create_process_handle();
+            },
         });
 
         // Create a manual trigger event for this standalone job.

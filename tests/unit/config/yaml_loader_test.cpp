@@ -1163,4 +1163,40 @@ watch_groups:
     EXPECT_TRUE(r.watch_groups[0].rules[0].trigger_is_workflow);
 }
 
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  §15.4 notification hooks (Roadmap Phase 13)
+// ═══════════════════════════════════════════════════════════════════════════
+
+TEST(YamlLoaderTest, ParsesWorkflowNotifications) {
+    auto r = load_workflow_string(R"(
+name: notify-flow
+notifications:
+  on_failure:
+    - type: webhook
+      url: https://hooks.example.com/X
+      template: "Kairos: {{ workflow }} failed (run {{ run_id }})"
+    - type: command
+      run: notify-send 'Kairos' '{{ workflow }} failed'
+  on_success:
+    - type: command
+      command: echo ok >> /tmp/kairos-notify.log
+jobs:
+  a:
+    steps:
+      - run: "true"
+)");
+    ASSERT_TRUE(r.ok()) << (r.errors.empty() ? "?" : r.errors[0].message);
+    const auto& n = r.workflows[0].notifications;
+    ASSERT_EQ(n.on_failure.size(), 2u);
+    EXPECT_EQ(n.on_failure[0].type, NotificationDef::Type::Webhook);
+    EXPECT_EQ(n.on_failure[0].url, "https://hooks.example.com/X");
+    EXPECT_NE(n.on_failure[0].message_template.find("{{ workflow }}"),
+              std::string::npos);
+    EXPECT_EQ(n.on_failure[1].type, NotificationDef::Type::Command);
+    EXPECT_EQ(n.on_failure[1].command, "notify-send 'Kairos' '{{ workflow }} failed'");
+    ASSERT_EQ(n.on_success.size(), 1u);
+    EXPECT_EQ(n.on_success[0].command, "echo ok >> /tmp/kairos-notify.log");
+}
+
 }  // namespace kairos::config

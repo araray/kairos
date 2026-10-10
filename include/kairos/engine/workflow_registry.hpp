@@ -85,6 +85,31 @@ struct JobDef {
     std::vector<std::string> tags;  ///< §6 Tags from YAML `tags:` array
 };
 
+// ── Notifications (Roadmap §15.4) ───────────────────────────────────────
+
+/// One notification action fired when a run finishes.
+struct NotificationDef {
+    enum class Type { Webhook, Command };
+    Type type = Type::Command;
+
+    /// Webhook: POST {"text": <rendered template>} to this URL.
+    std::string url;
+
+    /// Command: shell command; the rendered template is available as
+    /// $KAIROS_NOTIFY_MESSAGE.
+    std::string command;
+
+    /// Message template with {{ workflow }} / {{ run_id }} /
+    /// {{ status }} / {{ trigger }} placeholders.
+    std::string message_template;
+};
+
+/// Per-workflow notification hooks.
+struct WorkflowNotifications {
+    std::vector<NotificationDef> on_success;
+    std::vector<NotificationDef> on_failure;
+};
+
 // ── Workflow definition (parsed from YAML) ──────────────────────────────
 
 /// A complete workflow definition with its pre-built DAG.
@@ -96,6 +121,7 @@ struct WorkflowDef {
     std::vector<std::string> tags;  ///< §6 Tags from YAML `tags:` array
     std::string source_path;     ///< YAML file loaded from ("" for inline).
                                   ///< Not part of the content ID hash.
+    WorkflowNotifications notifications;  ///< §15.4 (not in content hash).
 };
 
 // ── Workflow Registry ───────────────────────────────────────────────────

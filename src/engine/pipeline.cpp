@@ -7,9 +7,12 @@
 #include "kairos/engine/pipeline.hpp"
 #include "kairos/core/id_generator.hpp"
 #include "kairos/exec/output_sink.hpp"
+#include "kairos/exec/process_handle.hpp"
 #include "kairos/kel/errors.hpp"
 
 #include <spdlog/spdlog.h>
+
+#include <nlohmann/json.hpp>
 
 #include <algorithm>
 #include <iterator>
@@ -29,6 +32,9 @@ Pipeline::Pipeline(PipelineConfig config, Dependencies deps)
     if (!deps_.clock) {
         throw std::invalid_argument("Pipeline requires a non-null ClockSource");
     }
+    // §15.4: fire-and-forget notification worker (dies with stop()).
+    notify_thread_ = std::jthread(
+        [this](std::stop_token st) { notify_worker(st); });
 }
 
 Pipeline::~Pipeline() { stop(); }
@@ -41,6 +47,134 @@ void Pipeline::stop() {
     if (thread_.joinable()) {
         thread_.request_stop();
         thread_.join();
+    }
+    // §15.4: drain remaining notifications (each bounded by its own
+    // 10s timeout), then stop the worker.
+    if (notify_thread_.joinable()) {
+        notify_thread_.request_stop();
+        notify_thread_.join();
+    }
+}
+
+// ── §15.4 notification dispatcher ────────────────────────────────────────
+
+void Pipeline::enqueue_notifications(const RunContext& ctx,
+                                     RunStatus status) {
+    const auto* wf = deps_.registry
+        ? deps_.registry->workflow(ctx.workflow_id)
+        : nullptr;
+    if (!wf) return;
+
+    // Only SUCCESS and FAILURE fire hooks; skips/cancels stay quiet.
+    const auto& hooks =
+        status == RunStatus::Failure
+            ? wf->notifications.on_failure
+            : wf->notifications.on_success;
+
+    for (const auto& def : hooks) {
+        NotifyTask task;
+        task.def = def;
+        task.workflow = ctx.workflow_name;
+        task.run_id = ctx.run_id;
+        task.status = run_status_to_string(status);
+        task.trigger = ctx.trigger_type;
+        using namespace std::chrono_literals;
+        if (!notify_queue_.push(std::move(task), 0ms)) {
+            spdlog::warn(
+                "Run {}: notification queue full — dropping hook",
+                ctx.run_id);
+        }
+    }
+}
+
+void Pipeline::notify_worker(std::stop_token stop) {
+    while (!stop.stop_requested()) {
+        auto task = notify_queue_.pop(std::chrono::milliseconds(500));
+        if (!task) continue;
+        dispatch_notification(*task);
+    }
+}
+
+void Pipeline::dispatch_notification(const NotifyTask& task) {
+    // Template: {{ workflow }} {{ run_id }} {{ status }} {{ trigger }}.
+    std::string message = task.def.message_template;
+    auto replace_all = [&message](const std::string& token,
+                                  const std::string& value) {
+        size_t pos = 0;
+        while ((pos = message.find(token, pos)) != std::string::npos) {
+            message.replace(pos, token.size(), value);
+            pos += value.size();
+        }
+    };
+    replace_all("{{ workflow }}", task.workflow);
+    replace_all("{{workflow}}", task.workflow);
+    replace_all("{{ run_id }}", task.run_id);
+    replace_all("{{run_id}}", task.run_id);
+    replace_all("{{ status }}", task.status);
+    replace_all("{{status}}", task.status);
+    replace_all("{{ trigger }}", task.trigger);
+    replace_all("{{trigger}}", task.trigger);
+
+    // Commands get the same substitution (paths, args).
+    std::string command = task.def.command;
+    auto render = [&command](const std::string& token,
+                             const std::string& value) {
+        size_t pos = 0;
+        while ((pos = command.find(token, pos)) != std::string::npos) {
+            command.replace(pos, token.size(), value);
+            pos += value.size();
+        }
+    };
+    render("{{ workflow }}", task.workflow);
+    render("{{workflow}}", task.workflow);
+    render("{{ run_id }}", task.run_id);
+    render("{{run_id}}", task.run_id);
+    render("{{ status }}", task.status);
+    render("{{status}}", task.status);
+    render("{{ trigger }}", task.trigger);
+    render("{{trigger}}", task.trigger);
+
+    if (task.def.type == NotificationDef::Type::Webhook) {
+        if (!deps_.webhook_post) {
+            spdlog::warn(
+                "Webhook notification skipped (no delivery hook "
+                "configured): {}", message);
+            return;
+        }
+        nlohmann::json body;
+        body["text"] = message;
+        try {
+            deps_.webhook_post(task.def.url, body.dump());
+        } catch (const std::exception& e) {
+            spdlog::warn("Webhook notification failed: {}", e.what());
+        }
+        return;
+    }
+
+    // Command: fire-and-forget with a 10s budget (§15.4). The
+    // rendered message rides along as KAIROS_NOTIFY_MESSAGE.
+    if (!deps_.notification_process_factory) {
+        spdlog::warn(
+            "Command notification skipped (no process factory): {}",
+            message);
+        return;
+    }
+    exec::ProcessSpec spec;
+    spec.command_line = command;
+    spec.use_shell = true;
+    spec.timeout = std::chrono::seconds(10);
+    spec.environment["KAIROS_NOTIFY_MESSAGE"] = message;
+    spec.environment["KAIROS_RUN_ID"] = task.run_id;
+    spec.environment["KAIROS_WORKFLOW"] = task.workflow;
+
+    try {
+        auto handle = deps_.notification_process_factory();
+        if (handle->spawn(spec)) {
+            std::stop_source src;  // never stopped — spec.timeout bounds it
+            handle->wait(src.get_token());
+        }
+    } catch (const std::exception& e) {
+        spdlog::warn("Command notification failed: {}", e.what());
     }
 }
 
@@ -156,6 +290,11 @@ RunStatus Pipeline::process_event(const TriggerEvent& event,
     ctx.run_status = status;
 
     persist_run_complete(ctx);
+
+    // §15.4: fire notification hooks (async, best-effort).
+    if (!ctx.dry_run) {
+        enqueue_notifications(ctx, status);
+    }
 
     // Close RunStream subscribers for this run (§14.7).
     // Any live followers (CLI --follow, MCP, SSE) will see
