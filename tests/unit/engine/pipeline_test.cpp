@@ -416,3 +416,46 @@ TEST_F(PipelineTest, RunStatusStrings) {
     EXPECT_EQ(run_status_to_string(RunStatus::Cancelled), "CANCELLED");
     EXPECT_EQ(run_status_to_string(RunStatus::TimedOut), "TIMED_OUT");
 }
+
+// ── §15.1 dry-run mode ──────────────────────────────────────────────────
+
+TEST_F(PipelineTest, DryRunExecutesWithoutSpawningProcesses) {
+    // The factory produces processes that FAIL loudly (exit 77) and
+    // print a marker — if a dry-run ever spawned one, the run would
+    // fail and the test catches it.
+    pool_ = std::make_unique<exec::RunnerPool>(
+        exec::RunnerPoolConfig{.worker_count = 1, .queue_capacity = 8});
+    pool_->set_process_handle_factory([](const exec::ProcessSpec&) {
+        auto p = std::make_unique<kairos::testing::FakeProcessHandle>();
+        p->set_exit_code(77);
+        p->set_stdout_data("SPAWNED!\n");
+        return p;
+    });
+    pool_->start(stop_source_.get_token());
+
+    auto wf = make_single_job_workflow(
+        "wfl-dry", "Dry", "job-1", "one", "dangerous-command --rm-everything");
+
+    auto registry = std::make_shared<WorkflowRegistry>(
+        std::vector<WorkflowDef>{std::move(wf)},
+        std::vector<TimerEntry>{});
+
+    TriggerBus bus(64);
+    Pipeline pipeline(PipelineConfig{}, Pipeline::Dependencies{
+        .clock = &clock_,
+        .trigger_bus = &bus,
+        .runner_pool = pool_.get(),
+        .registry = registry,
+        .active_runs = &active_runs_,
+    });
+
+    auto event = make_manual_trigger("wfl-dry");
+    auto* manual = std::get_if<engine::ManualRunPayload>(
+        &event.payload);
+    ASSERT_NE(manual, nullptr);
+    manual->dry_run = true;
+
+    auto status = pipeline.process_event(event, stop_source_.get_token());
+    // No process ran (exit-77 trap) → the dry-run path succeeded.
+    EXPECT_EQ(status, RunStatus::Success);
+}

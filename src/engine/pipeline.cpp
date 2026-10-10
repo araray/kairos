@@ -101,6 +101,11 @@ RunStatus Pipeline::process_event(const TriggerEvent& event,
     ctx.trigger_id = event.trigger_id;
     ctx.correlation_id = event.correlation_id;
     ctx.now = deps_.clock->now();
+    if (auto* manual = std::get_if<engine::ManualRunPayload>(
+            &event.payload)) {
+        ctx.dry_run = manual->dry_run;
+        if (ctx.dry_run) ctx.trigger_type = "dry-run";
+    }
 
     if (deps_.active_runs) deps_.active_runs->increment(event.target_id);
 
@@ -462,6 +467,33 @@ RunStatus Pipeline::execute_job(const std::string& job_id, RunContext& ctx,
                         ctx.run_id, job_id, step.step_id,
                         chunk, is_stderr);
                 });
+        }
+
+        // §15.1 dry-run: no process is spawned — log what would run,
+        // then treat the step as an immediate success.
+        if (ctx.dry_run) {
+            std::string cwd = proc_spec.working_dir.empty()
+                ? std::string("(inherit)")
+                : proc_spec.working_dir.string();
+            std::string line = "[dry-run] step '" + step.step_name +
+                "' would run: " + step.command +
+                "  (cwd: " + cwd +
+                ", timeout: " +
+                (step.timeout ? std::to_string(step.timeout->count()) + "s"
+                              : std::string("default")) +
+                ")\n";
+            output_mux.deliver(line, false);
+
+            if (deps_.db_writer) {
+                deps_.db_writer->enqueue(persist::InsertStepRun{
+                    .run_id = ctx.run_id, .job_id = job_id,
+                    .step_id = step.step_id, .step_name = step.step_name,
+                    .command = step.command,
+                    .status = "SUCCESS",
+                    .start_ts = format_iso8601(deps_.clock->now()),
+                });
+            }
+            continue;  // Next step — nothing failed, nothing ran.
         }
 
         // Submit to runner pool and wait for completion.

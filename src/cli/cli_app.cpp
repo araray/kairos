@@ -752,6 +752,9 @@ int run(int argc, char** argv) {
         "Workflow ID or name")->required();
     workflows_run->add_flag("-f,--follow", workflows_run_follow,
         "Follow log output until completion");
+    bool workflows_run_dry_run = false;
+    workflows_run->add_flag("--dry-run", workflows_run_dry_run,
+        "Execute the workflow with all steps as no-ops (\u00a715.1)");
 
     auto* workflows_explain = cmd_workflows->add_subcommand("explain",
         "Explain execution plan (dry-run)");
@@ -3203,6 +3206,12 @@ int run(int argc, char** argv) {
             found_wf->workflow_id,
             engine::TriggerEvent::TargetKind::Workflow,
             correlation_id, "cli");
+        if (workflows_run_dry_run) {
+            auto* payload = std::get_if<engine::ManualRunPayload>(
+                &event.payload);
+            if (payload) payload->dry_run = true;
+            std::cout << "Dry-run: no commands will be executed\n";
+        }
 
         // Execute synchronously via the pipeline.
         auto status = pipeline.process_event(event, stop_token);

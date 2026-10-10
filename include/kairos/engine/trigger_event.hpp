@@ -53,6 +53,7 @@ struct FileDiffPayload {
 struct ManualRunPayload {
     std::string invoked_by;      ///< "cli" or "mcp"
     std::string extra_args;      ///< Any additional CLI arguments
+    bool dry_run = false;        ///< §15.1: no-op execution
 };
 
 /// Payload for config reload events.

@@ -82,6 +82,10 @@ struct RunContext {
     /// Stored here so execute_job can set it on each WorkItem.
     std::stop_token cancel_token;
 
+    /// §15.1 dry-run: full pipeline execution, but every step logs what
+    /// would run and succeeds immediately — no processes are spawned.
+    bool dry_run = false;
+
     /// Status of each job in this run.
     struct JobStatus {
         RunStatus status = RunStatus::Evaluating;
