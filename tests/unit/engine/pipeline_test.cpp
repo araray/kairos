@@ -611,11 +611,10 @@ TEST_F(PipelineTest, StepOutputsCapturedAndPersisted) {
     produce.step_id = "stp-produce";
     produce.step_name = "produce";
 #ifdef _WIN32
-    // cmd.exe: %VAR% expansion; no-space && chains (spaces around &
-    // leak into the echoed value; multi-line is not supported by
-    // cmd /C); `echo x>>file` without space → no trailing space.
+    // cmd.exe: first echo overwrites (>), second appends (>>);
+    // no-space && chains; `echo x>>file` without space → clean value.
     produce.command =
-        "echo VERSION=9.9.9>>%KAIROS_OUTPUT%"
+        "echo VERSION=9.9.9>%KAIROS_OUTPUT%"
         "&&echo COMMIT_SHA=abc123>>%KAIROS_OUTPUT%";
     StepDef consume;
     consume.step_id = "stp-consume";
@@ -710,7 +709,7 @@ TEST_F(PipelineTest, InvalidOutputKeysAreDropped) {
     produce.step_name = "bad";
 #ifdef _WIN32
     produce.command =
-        "echo GOOD=1>>%KAIROS_OUTPUT%"
+        "echo GOOD=1>%KAIROS_OUTPUT%"
         "&&echo bad-key!!=2>>%KAIROS_OUTPUT%";
 #else
     produce.command =
