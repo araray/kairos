@@ -16,6 +16,9 @@
 #include "kairos/persist/query_reader.hpp"
 
 #include <gtest/gtest.h>
+
+#include <chrono>
+#include <thread>
 #include <SQLiteCpp/SQLiteCpp.h>
 
 #include <memory>
@@ -941,10 +944,21 @@ TEST_F(McpToolsTest, RunJobWritesAuditEntry) {
     auto result = call_tool("kairos.runJob", {{"job_id", "job-backup"}});
     (void)result;
 
+    // Poll briefly — the async writer's first batch can lag a cold
+    // fixture start.
+    persist::QueryReader reader(*db_);
+    std::vector<persist::QueryReader::AuditRow> entries;
+    for (int i = 0; i < 20 && entries.empty(); ++i) {
+        writer_->flush();
+        entries = reader.query_audit_log(5);
+        if (!entries.empty()) break;
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    }
     writer_stop_.request_stop();
     writer_->flush();
-    persist::QueryReader reader(*db_);
-    auto entries = reader.query_audit_log(5);
+    if (entries.empty()) {
+        entries = reader.query_audit_log(5);
+    }
     ASSERT_GE(entries.size(), 1u);
     EXPECT_EQ(entries[0].actor, "mcp");
     EXPECT_EQ(entries[0].action, "run_job");
