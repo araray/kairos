@@ -611,11 +611,10 @@ TEST_F(PipelineTest, StepOutputsCapturedAndPersisted) {
     produce.step_id = "stp-produce";
     produce.step_name = "produce";
 #ifdef _WIN32
-    // cmd.exe: %VAR% expansion, `echo x>>file` (no space → no trailing
-    // space in the value). Inner quotes break cmd /C's redirect — the
-    // temp path has no spaces so they're omitted.
+    // cmd.exe: %VAR% expansion; & chains (no multi-line in cmd /C);
+    // `echo x>>file` without space → no trailing space in the value.
     produce.command =
-        "echo VERSION=9.9.9>>%KAIROS_OUTPUT%\n"
+        "echo VERSION=9.9.9>>%KAIROS_OUTPUT% & "
         "echo COMMIT_SHA=abc123>>%KAIROS_OUTPUT%";
     StepDef consume;
     consume.step_id = "stp-consume";
