@@ -15,6 +15,7 @@
 #include <mutex>
 #include <optional>
 #include <stop_token>
+#include <vector>
 
 namespace kairos::core {
 
