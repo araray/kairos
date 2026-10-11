@@ -32,11 +32,14 @@
 #ifdef _WIN32
 // cmd.exe /C breaks nested quotes in redirect targets — the temp
 // paths these tests use have no spaces, so no inner quotes needed.
-#define KAIROS_TEST_OUT_APPEND(var, kv) \
-    "echo " kv ">>" var
+// %VAR% is cmd's sigil; POSIX shells use $VAR.
+#define KAIROS_TEST_OUT_REF(name) "%" name "%"
+#define KAIROS_TEST_OUT_APPEND(name, kv) \
+    "echo " kv ">>%KAIROS_OUTPUT%"
 #else
-#define KAIROS_TEST_OUT_APPEND(var, kv) \
-    "echo " kv " >> \"" var "\""
+#define KAIROS_TEST_OUT_REF(name) "$" name
+#define KAIROS_TEST_OUT_APPEND(name, kv) \
+    "echo " kv " >> $KAIROS_OUTPUT"
 #endif
 
 using namespace kairos;
