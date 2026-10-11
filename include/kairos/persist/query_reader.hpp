@@ -209,6 +209,8 @@ public:
     [[nodiscard]] std::string run_status_by_id(
         const std::string& run_id) const;
 
+
+
     /// Query the database file size in bytes.
     /// @param db_path  Path to the SQLite database file.
     [[nodiscard]] static int64_t query_db_size(
@@ -332,6 +334,24 @@ public:
         int64_t after_id = 0,
         int limit = 100) const;
 
+    // ── Export bundles (Roadmap §15.9) ────────────────────────────
+
+    /// One exported run with all nested job/step/log rows.
+    struct ExportedRun {
+        RunSummary run;
+        std::vector<JobDetail> jobs;   // steps nested inside
+        std::vector<LogChunk> logs;
+    };
+
+    /// Export runs (optionally since a cutoff) as full nested bundles.
+    [[nodiscard]] std::vector<ExportedRun> export_runs(
+        const std::string& since = "") const;
+
+    /// Export watch events (optionally since a cutoff, newest last).
+    [[nodiscard]] std::vector<WatchEventRow> export_events(
+        const std::string& since = "") const;
+
+
     // ── Metrics snapshot queries (§20.5) ────────────────────────
 
     /// A metrics snapshot row.
@@ -397,6 +417,10 @@ public:
     /// Query recent audit entries, newest first.
     [[nodiscard]] std::vector<AuditRow> query_audit_log(
         int limit = 50) const;
+
+    /// Export audit entries oldest-first (§15.9 bundles).
+    [[nodiscard]] std::vector<AuditRow> export_audit(
+        int limit = 10000) const;
 
 private:
     SQLite::Database& db_;

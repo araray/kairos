@@ -666,6 +666,26 @@ int run(int argc, char** argv) {
     auto* secrets_rotate = cmd_secrets->add_subcommand(
         "rotate-password", "Re-encrypt under a new master password");
 
+    // ── export/import (§15.9) ────────────────────────────────────
+    auto* cmd_export = app.add_subcommand("export",
+        "Export run history, events, and audit to a JSON bundle");
+    std::string export_since;
+    cmd_export->add_option("--since", export_since,
+        "Only records after this ISO-8601 timestamp");
+    std::string export_output;
+    cmd_export->add_option("--output,-o", export_output,
+        "Output file")->required();
+    auto* cmd_import = app.add_subcommand("import",
+        "Import a JSON bundle produced by kairos export");
+    std::string import_file;
+    cmd_import->add_option("file", import_file,
+        "Bundle file path")->required();
+    bool import_merge = false;
+    cmd_import->add_flag("--merge", import_merge,
+        "Keep existing rows; insert only missing run_ids");
+
+
+
     auto* cmd_config = app.add_subcommand("config",
         "Configuration management");
     cmd_config->require_subcommand(1);
@@ -2127,6 +2147,251 @@ int run(int argc, char** argv) {
             }
         } catch (const std::exception& e) {
             std::cerr << "Error: " << e.what() << "\n";
+            return 1;
+        }
+        return 0;
+    }
+
+    // ── export (§15.9) ───────────────────────────────────────────
+    if (cmd_export->parsed()) {
+        setup_logging(log_level, json_output, false);
+        auto cfg = load_config_or_die(config_path, {});
+        if (!cfg) return static_cast<int>(ExitCode::kConfigError);
+        try {
+            auto db = persist::open_database(cfg->db_path);
+            persist::QueryReader reader(*db);
+
+            json bundle;
+            bundle["format"] = "kairos-export";
+            bundle["version"] = 1;
+
+            json runs_arr = json::array();
+            int64_t log_count = 0;
+            for (auto& er : reader.export_runs(export_since)) {
+                json rj;
+                rj["run_id"] = er.run.run_id;
+                rj["target_type"] = er.run.target_type;
+                rj["target_id"] = er.run.target_id;
+                rj["target_name"] = er.run.target_name;
+                rj["trigger_type"] = er.run.trigger_type;
+                rj["status"] = er.run.status;
+                rj["exit_code"] = er.run.exit_code;
+                rj["start_ts"] = er.run.start_ts;
+                rj["end_ts"] = er.run.end_ts;
+                rj["duration_ms"] = er.run.duration_ms;
+                rj["tags"] = er.run.tags_json;
+                json jobs_arr = json::array();
+                for (const auto& jd : er.jobs) {
+                    json jj;
+                    jj["job_id"] = jd.job_id;
+                    jj["job_name"] = jd.job_name;
+                    jj["status"] = jd.status;
+                    jj["exit_code"] = jd.exit_code;
+                    jj["start_ts"] = jd.start_ts;
+                    jj["end_ts"] = jd.end_ts;
+                    jj["duration_ms"] = jd.duration_ms;
+                    json steps_arr = json::array();
+                    for (const auto& st : jd.steps) {
+                        steps_arr.push_back({
+                            {"step_id", st.step_id},
+                            {"step_name", st.step_name},
+                            {"status", st.status},
+                            {"exit_code", st.exit_code},
+                            {"command", st.command},
+                            {"duration_ms", st.duration_ms},
+                        });
+                    }
+                    jj["steps"] = std::move(steps_arr);
+                    jobs_arr.push_back(std::move(jj));
+                }
+                rj["jobs"] = std::move(jobs_arr);
+                json log_arr = json::array();
+                for (const auto& lc : er.logs) {
+                    log_arr.push_back({
+                        {"job_id", lc.job_id},
+                        {"step_id", lc.step_id},
+                        {"stream", lc.stream},
+                        {"content", lc.content},
+                    });
+                    ++log_count;
+                }
+                rj["logs"] = std::move(log_arr);
+                runs_arr.push_back(std::move(rj));
+            }
+            bundle["runs"] = std::move(runs_arr);
+
+            json ev_arr = json::array();
+            for (const auto& e : reader.export_events(export_since)) {
+                ev_arr.push_back({
+                    {"watch_group", e.watch_group},
+                    {"rule_name", e.rule_name},
+                    {"event_type", e.event_type},
+                    {"severity", e.severity},
+                    {"affected_files", e.affected_files_json},
+                    {"created_at", e.created_at},
+                });
+            }
+            bundle["events"] = std::move(ev_arr);
+
+            json audit_arr = json::array();
+            for (const auto& a : reader.export_audit()) {
+                audit_arr.push_back({
+                    {"timestamp", a.timestamp},
+                    {"actor", a.actor},
+                    {"action", a.action},
+                    {"target", a.target},
+                    {"detail", a.detail_json},
+                });
+            }
+            bundle["audit"] = std::move(audit_arr);
+
+            bundle["counts"] = {
+                {"runs", bundle["runs"].size()},
+                {"events", bundle["events"].size()},
+                {"audit", bundle["audit"].size()},
+                {"log_chunks", log_count},
+            };
+
+            std::ofstream out(export_output, std::ios::trunc);
+            if (!out) {
+                std::cerr << "Cannot write " << export_output << "\n";
+                return 1;
+            }
+            out << bundle.dump(2) << "\n";
+            std::cout << "Exported to " << export_output << ": "
+                      << bundle["counts"].dump() << "\n";
+        } catch (const std::exception& e) {
+            std::cerr << "Export failed: " << e.what() << "\n";
+            return 1;
+        }
+        return 0;
+    }
+
+    // ── import (§15.9) ───────────────────────────────────────────
+    if (cmd_import->parsed()) {
+        setup_logging(log_level, json_output, false);
+        auto cfg = load_config_or_die(config_path, {});
+        if (!cfg) return static_cast<int>(ExitCode::kConfigError);
+        try {
+            std::ifstream in(import_file);
+            if (!in) {
+                std::cerr << "Cannot read " << import_file << "\n";
+                return 1;
+            }
+            auto bundle = json::parse(in);
+            if (bundle.value("format", "") != "kairos-export") {
+                std::cerr << "Not a kairos export bundle\n";
+                return 1;
+            }
+
+            auto db = persist::open_database(cfg->db_path);
+            int imported = 0, skipped = 0, log_count = 0;
+            int events = 0;
+
+            SQLite::Statement ins_run(*db,
+                "INSERT OR IGNORE INTO runs (run_id, target_type, "
+                "target_id, target_name, trigger_type, trigger_id, "
+                "correlation_id, status, exit_code, start_ts, end_ts, "
+                "duration_ms, tags_json) VALUES "
+                "(?,?,?,?,?,'imported','',?,?,?,?,?,?)");
+            SQLite::Statement ins_job(*db,
+                "INSERT OR IGNORE INTO job_runs (run_id, job_id, "
+                "job_name, status, exit_code, start_ts, end_ts, "
+                "duration_ms) VALUES (?,?,?,?,?,?,?,?)");
+            SQLite::Statement ins_step(*db,
+                "INSERT OR IGNORE INTO step_runs (run_id, job_id, "
+                "step_id, step_name, status, exit_code, command, "
+                "duration_ms) VALUES (?,?,?,?,?,?,?,?)");
+            SQLite::Statement ins_log(*db,
+                "INSERT INTO log_chunks (run_id, job_id, step_id, "
+                "stream, chunk_index, content) VALUES "
+                "(?,?,?,?, (SELECT COALESCE(MAX(chunk_index),-1)+1 "
+                "FROM log_chunks WHERE run_id = ?), ?)");
+            SQLite::Statement ins_event(*db,
+                "INSERT INTO watch_events (watch_group, event_type, "
+                "file_path, rule_name, details_json, action_taken) "
+                "VALUES (?,?,?,?,?,?)");
+
+            db->exec("BEGIN");
+            for (const auto& r :
+                 bundle.value("runs", json::array())) {
+                ins_run.reset();
+                ins_run.bind(1, r.value("run_id", ""));
+                ins_run.bind(2, r.value("target_type", "workflow"));
+                ins_run.bind(3, r.value("target_id", ""));
+                ins_run.bind(4, r.value("target_name", ""));
+                ins_run.bind(5, r.value("trigger_type", "import"));
+                ins_run.bind(6, r.value("status", ""));
+                ins_run.bind(7, r.value("exit_code", 0));
+                ins_run.bind(8, r.value("start_ts", ""));
+                ins_run.bind(9, r.value("end_ts", ""));
+                ins_run.bind(10, r.value("duration_ms", 0));
+                ins_run.bind(11, r.value("tags", "[]"));
+                if (ins_run.exec() > 0) ++imported; else ++skipped;
+
+                for (const auto& j :
+                     r.value("jobs", json::array())) {
+                    ins_job.reset();
+                    ins_job.bind(1, r.value("run_id", ""));
+                    ins_job.bind(2, j.value("job_id", ""));
+                    ins_job.bind(3, j.value("job_name", ""));
+                    ins_job.bind(4, j.value("status", ""));
+                    ins_job.bind(5, j.value("exit_code", 0));
+                    ins_job.bind(6, j.value("start_ts", ""));
+                    ins_job.bind(7, j.value("end_ts", ""));
+                    ins_job.bind(8, j.value("duration_ms", 0));
+                    ins_job.exec();
+
+                    for (const auto& st :
+                         j.value("steps", json::array())) {
+                        ins_step.reset();
+                        ins_step.bind(1, r.value("run_id", ""));
+                        ins_step.bind(2, j.value("job_id", ""));
+                        ins_step.bind(3, st.value("step_id", ""));
+                        ins_step.bind(4, st.value("step_name", ""));
+                        ins_step.bind(5, st.value("status", ""));
+                        ins_step.bind(6, st.value("exit_code", 0));
+                        ins_step.bind(7, st.value("command", ""));
+                        ins_step.bind(8,
+                            st.value("duration_ms", 0));
+                        ins_step.exec();
+                    }
+                }
+
+                for (const auto& lc :
+                     r.value("logs", json::array())) {
+                    ins_log.reset();
+                    ins_log.bind(1, r.value("run_id", ""));
+                    ins_log.bind(2, lc.value("job_id", ""));
+                    ins_log.bind(3, lc.value("step_id", ""));
+                    ins_log.bind(4, lc.value("stream", "stdout"));
+                    ins_log.bind(5, r.value("run_id", ""));
+                    ins_log.bind(6, lc.value("content", ""));
+                    ins_log.exec();
+                    ++log_count;
+                }
+            }
+
+            for (const auto& e :
+                 bundle.value("events", json::array())) {
+                ins_event.reset();
+                ins_event.bind(1, e.value("watch_group", ""));
+                ins_event.bind(2, e.value("event_type", ""));
+                ins_event.bind(3, e.value("affected_files", "[]"));
+                ins_event.bind(4, e.value("rule_name", ""));
+                ins_event.bind(5, e.value("details", "{}"));
+                ins_event.bind(6, e.value("severity", "info"));
+                ins_event.exec();
+                ++events;
+            }
+            db->exec("COMMIT");
+
+            std::cout << "Imported runs=" << imported
+                      << " skipped=" << skipped
+                      << " log_chunks=" << log_count
+                      << " events=" << events << "\n";
+        } catch (const std::exception& e) {
+            std::cerr << "Import failed: " << e.what() << "\n";
             return 1;
         }
         return 0;

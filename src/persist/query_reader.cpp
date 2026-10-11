@@ -1125,6 +1125,70 @@ std::string QueryReader::run_status_by_id(
     return "";
 }
 
+std::vector<QueryReader::ExportedRun> QueryReader::export_runs(
+    const std::string& since) const
+{
+    std::vector<ExportedRun> out;
+    auto summaries = query_recent_runs(100000, "", "", since);
+    for (auto& sum : summaries) {
+        ExportedRun er;
+        er.run = std::move(sum);
+        auto detail = get_run_detail(er.run.run_id);
+        if (detail) er.jobs = std::move(detail->jobs);
+        er.logs = get_log_chunks(er.run.run_id, 0, 100000);
+        out.push_back(std::move(er));
+    }
+    return out;
+}
+
+std::vector<QueryReader::WatchEventRow> QueryReader::export_events(
+    const std::string& since) const
+{
+    std::string sql =
+        "SELECT id, watch_group, rule_name, event_type, action_taken, "
+        "file_path, details_json, created_at FROM watch_events ";
+    if (!since.empty()) sql += "WHERE created_at >= ? ";
+    sql += "ORDER BY id ASC";
+    SQLite::Statement q(db_, sql);
+    if (!since.empty()) q.bind(1, since);
+
+    std::vector<WatchEventRow> out;
+    while (q.executeStep()) {
+        WatchEventRow row;
+        row.event_uid = std::to_string(q.getColumn(0).getInt64());
+        row.watch_group = q.getColumn(1).getString();
+        row.rule_name = q.getColumn(2).getString();
+        row.event_type = q.getColumn(3).getString();
+        row.severity = q.getColumn(4).getString();
+        row.affected_files_json = q.getColumn(5).getString();
+        row.details_json = q.getColumn(6).getString();
+        row.created_at = q.getColumn(7).getString();
+        out.push_back(std::move(row));
+    }
+    return out;
+}
+
+std::vector<QueryReader::AuditRow> QueryReader::export_audit(
+    int limit) const
+{
+    std::vector<AuditRow> out;
+    SQLite::Statement q(db_,
+        "SELECT id, timestamp, actor, action, target, detail_json "
+        "FROM audit_log ORDER BY id ASC LIMIT ?");
+    q.bind(1, limit);
+    while (q.executeStep()) {
+        out.push_back(AuditRow{
+            q.getColumn(0).getInt64(),
+            q.getColumn(1).getString(),
+            q.getColumn(2).getString(),
+            q.getColumn(3).getString(),
+            q.getColumn(4).getString(),
+            q.getColumn(5).getString(),
+        });
+    }
+    return out;
+}
+
 std::vector<QueryReader::AuditRow> QueryReader::query_audit_log(
     int limit) const
 {
