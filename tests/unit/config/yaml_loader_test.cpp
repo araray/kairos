@@ -10,6 +10,8 @@
 
 #include <gtest/gtest.h>
 
+#include "test_helpers.hpp"
+
 #include <filesystem>
 #include <fstream>
 
@@ -1198,6 +1200,117 @@ jobs:
     EXPECT_EQ(n.on_failure[1].command, "notify-send 'Kairos' '{{ workflow }} failed'");
     ASSERT_EQ(n.on_success.size(), 1u);
     EXPECT_EQ(n.on_success[0].command, "echo ok >> /tmp/kairos-notify.log");
+}
+
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  §15.3 templates & composition (Roadmap Phase 15)
+// ═══════════════════════════════════════════════════════════════════════════
+
+class TemplateCompositionTest : public ::testing::Test {
+protected:
+    kairos::testing::TempDir dir_;
+
+    void write_template(const std::string& name,
+                        const std::string& yaml) {
+        std::filesystem::create_directories(
+            dir_.path() / "templates");
+        std::ofstream(dir_.path() / "templates" / (name + ".yaml"))
+            << yaml;
+    }
+};
+
+TEST_F(TemplateCompositionTest, UsesExpandsParams) {
+    write_template("standard_build", R"yaml(
+name: standard_build_template
+jobs:
+  build:
+    steps:
+      - name: compile
+        run: make build-${{ params.language }}
+  test:
+    needs: [build]
+    steps:
+      - name: unit
+        run: ${{ params.test_command }}
+        env:
+          LANG: ${{ params.language }}
+)yaml");
+
+    std::ofstream(dir_.path() / "my_app.yaml") << R"yaml(
+name: my_app
+uses: standard_build
+with:
+  language: cpp
+  test_command: ctest --output-on-failure
+)yaml";
+
+    auto r = load_workflow_file(dir_.path() / "my_app.yaml");
+    ASSERT_TRUE(r.ok())
+        << (r.errors.empty() ? "?" : r.errors[0].message);
+    ASSERT_EQ(r.workflows.size(), 1u);
+    EXPECT_EQ(r.workflows[0].workflow_name, "my_app");
+    ASSERT_EQ(r.workflows[0].jobs.size(), 2u);
+    EXPECT_EQ(r.workflows[0].jobs[0].steps[0].command,
+              "make build-cpp");
+    EXPECT_EQ(r.workflows[0].jobs[1].steps[0].command,
+              "ctest --output-on-failure");
+    EXPECT_EQ(r.workflows[0].jobs[1].steps[0].env.at("LANG"), "cpp");
+}
+
+TEST_F(TemplateCompositionTest, MissingParamIsAnError) {
+    write_template("picky", R"yaml(
+name: picky_template
+jobs:
+  a:
+    steps:
+      - run: echo ${{ params.required }}
+)yaml");
+    std::ofstream(dir_.path() / "caller.yaml") << R"yaml(
+name: caller
+uses: picky
+with:
+  other: value
+)yaml";
+
+    auto r = load_workflow_file(dir_.path() / "caller.yaml");
+    EXPECT_FALSE(r.ok());
+    bool found = false;
+    for (const auto& e : r.errors) {
+        if (e.message.find("required") != std::string::npos) {
+            found = true;
+        }
+    }
+    EXPECT_TRUE(found);
+}
+
+TEST_F(TemplateCompositionTest, UnknownTemplateIsAnError) {
+    std::ofstream(dir_.path() / "caller.yaml") << R"yaml(
+name: caller
+uses: does_not_exist
+with: {}
+)yaml";
+    auto r = load_workflow_file(dir_.path() / "caller.yaml");
+    EXPECT_FALSE(r.ok());
+}
+
+TEST_F(TemplateCompositionTest, DefaultsUsedWhenParamOmitted) {
+    write_template("with_default", R"yaml(
+name: default_template
+jobs:
+  a:
+    steps:
+      - run: echo ${{ params.language }}
+)yaml");
+    // `with:` omitted entirely — every param missing → error path,
+    // which is the documented v1 behavior (no defaults in templates;
+    // callers provide all values).
+    std::ofstream(dir_.path() / "caller.yaml") << R"yaml(
+name: caller2
+uses: with_default
+)yaml";
+    auto r = load_workflow_file(dir_.path() / "caller.yaml");
+    EXPECT_FALSE(r.ok());
 }
 
 }  // namespace kairos::config

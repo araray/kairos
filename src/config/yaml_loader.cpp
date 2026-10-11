@@ -240,6 +240,106 @@ std::string workflow_hash_input(const std::string& name,
     return buf;
 }
 
+
+// ── §15.3 templates & composition ────────────────────────────────
+
+/// Replace {{ params.<name> }} / ${{ params.<name> }} tokens in text
+/// using the values map. Unknown params throw with the token name.
+std::string expand_params(const std::string& text,
+                          const YAML::Node& with,
+                          const std::string& file,
+                          const std::string& path,
+                          std::vector<YamlError>& errors) {
+    std::string out;
+    static const std::regex re(
+        R"regex(\$\{\{\s*params\.([A-Za-z_][A-Za-z0-9_]*)\s*\}\})regex");
+    auto begin = std::sregex_iterator(text.begin(), text.end(), re);
+    auto end = std::sregex_iterator();
+    size_t last = 0;
+    bool ok = true;
+    for (auto it = begin; it != end; ++it) {
+        const auto& m = *it;
+        out.append(text, last,
+                   static_cast<size_t>(m.position()) - last);
+        const std::string key = m[1].str();
+        if (with && with[key]) {
+            out += with[key].as<std::string>();
+        } else {
+            errors.push_back({file, path,
+                "missing value for template param '" + key + "'"});
+            ok = false;
+        }
+        last = static_cast<size_t>(m.position() + m.length());
+    }
+    out.append(text, last, text.size() - last);
+    return ok ? out : text;
+}
+
+/// Load a template file and expand it with the given `with` values.
+/// Returns an empty optional on error (errors vector populated).
+std::optional<YAML::Node> expand_template(
+    const fs::path& templates_dir,
+    const std::string& template_name,
+    const YAML::Node& with,
+    const std::string& file,
+    const std::string& path,
+    std::vector<YamlError>& errors) {
+    for (const auto& suffix : {".yaml", ".yml"}) {
+        auto candidate = templates_dir / (template_name + suffix);
+        std::error_code ec;
+        if (!fs::is_regular_file(candidate, ec) || ec) continue;
+
+        YAML::Node tpl;
+        try {
+            tpl = YAML::LoadFile(candidate.string());
+        } catch (const YAML::Exception& e) {
+            errors.push_back({candidate.string(), "",
+                "Template parse error: " + std::string(e.what())});
+            return std::nullopt;
+        }
+
+        // Sanity: the template must not itself use `uses` (no nesting
+        // in v1 — keeps expansion single-level and predictable).
+        if (tpl["uses"]) {
+            errors.push_back({candidate.string(), "",
+                "Templates cannot use other templates (v1)"});
+            return std::nullopt;
+        }
+
+        // Expand params in every scalar command/env value.
+        for (const auto& job : tpl["jobs"]) {
+            const auto job_key = job.first.as<std::string>();
+            if (job.second["steps"] && job.second["steps"].IsSequence()) {
+                for (auto step : job.second["steps"]) {
+                    for (const char* key : {"run", "command"}) {
+                        if (step[key] && step[key].IsScalar()) {
+                            step[key] = expand_params(
+                                step[key].as<std::string>(), with,
+                                file,
+                                path + ".jobs." + job_key, errors);
+                        }
+                    }
+                    if (step["env"] && step["env"].IsMap()) {
+                        for (auto ev : step["env"]) {
+                            if (ev.second.IsScalar()) {
+                                ev.second = expand_params(
+                                    ev.second.as<std::string>(),
+                                    with, file,
+                                    path + ".jobs." + job_key + ".env",
+                                    errors);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        return tpl;
+    }
+    errors.push_back({file, path,
+        "template not found: " + template_name});
+    return std::nullopt;
+}
+
 }  // anonymous namespace
 
 // ── Parse a single step from YAML ───────────────────────────────────────
@@ -619,6 +719,31 @@ YamlLoadResult parse_workflow_node(
         result.triggers = std::move(triggers);
         result.standalone_jobs.push_back(std::move(job));
         return result;
+    }
+
+    // §15.3: template composition — `uses: <template>` + `with:`.
+    if (root["uses"] && root["uses"].IsScalar()) {
+        auto templates_dir = fs::path(file).parent_path() / "templates";
+        auto expanded = expand_template(
+            templates_dir, root["uses"].as<std::string>(),
+            root["with"], file, "uses", result.errors);
+        if (expanded && result.errors.empty()) {
+            // The template becomes the workflow body; the composer's
+            // name (and tags/notifications/triggers if given) win.
+            auto name = root["name"]
+                ? root["name"].as<std::string>() : std::string();
+            auto tags = parse_tags(root);
+            (*expanded)["name"] = name.empty()
+                ? root["uses"].as<std::string>() : name;
+            if (!tags.empty()) {
+                YAML::Node tags_node;
+                for (const auto& t : tags) tags_node.push_back(t);
+                (*expanded)["tags"] = tags_node;
+            }
+            // Recurse: parse the expanded node as a normal workflow.
+            return parse_workflow_node(*expanded, file);
+        }
+        return result;  // errors populated.
     }
 
     // ── Jobs (multi-job workflow) ───────────────────────────────
