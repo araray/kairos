@@ -6,7 +6,7 @@
 cmake_minimum_required(VERSION 3.22)
 
 project(kairos
-    VERSION 0.1.0
+    VERSION 0.2.0
     DESCRIPTION "Unified orchestration daemon — scheduling, workflows, and filesystem monitoring"
     HOMEPAGE_URL "https://github.com/araray/kairos"
     LANGUAGES CXX

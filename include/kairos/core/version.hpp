@@ -11,7 +11,7 @@ namespace kairos {
 /// Kairos version string (set by CMake).
 /// Falls back to "dev" if not built via CMake.
 #ifndef KAIROS_VERSION
-#define KAIROS_VERSION "dev"
+#define KAIROS_VERSION "0.2.0"
 #endif
 
 constexpr std::string_view kVersion = KAIROS_VERSION;
@@ -21,7 +21,7 @@ constexpr std::string_view kVersion = KAIROS_VERSION;
 #define KAIROS_VERSION_MAJOR 0
 #endif
 #ifndef KAIROS_VERSION_MINOR
-#define KAIROS_VERSION_MINOR 0
+#define KAIROS_VERSION_MINOR 2
 #endif
 #ifndef KAIROS_VERSION_PATCH
 #define KAIROS_VERSION_PATCH 0
