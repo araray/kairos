@@ -25,18 +25,25 @@
 #include "kairos/engine/trigger_event.hpp"
 #include "kairos/engine/workflow_registry.hpp"
 #include "kairos/exec/output_sink.hpp"
+#include "kairos/exec/process_handle.hpp"
 #include "kairos/exec/runner_pool.hpp"
 #include "kairos/mcp/handler.hpp"
 #include "kairos/mcp/transport.hpp"
 #include "kairos/observability/logging.hpp"
+#include "kairos/observability/health.hpp"
 #include "kairos/observability/metrics.hpp"
 #include "kairos/observability/tracer.hpp"
 #include "kairos/persist/database.hpp"
 #include "kairos/persist/db_writer.hpp"
 #include "kairos/persist/migration.hpp"
 #include "kairos/persist/query_reader.hpp"
+#include "kairos/persist/stale_recovery.hpp"
+#include "kairos/persist/tag_store.hpp"
 #include "kairos/platform/platform.hpp"
+#include "kairos/platform/sd_notify.hpp"
+#include "kairos/platform/environment.hpp"
 #include "kairos/platform/timezone.hpp"
+#include "kairos/security/native_secret_file.hpp"
 #include "kairos/security/secret_store.hpp"
 #include "kairos/testing/fake_clock.hpp"
 #include "kairos/watch/real_scanner.hpp"
@@ -49,6 +56,7 @@
 
 #ifdef KAIROS_HTTP_ENABLED
 #include "kairos/http/http_server.hpp"
+#include <httplib.h>
 #endif
 
 #include <spdlog/spdlog.h>
@@ -223,7 +231,11 @@ static bool perform_config_reload(
     engine::Pipeline& pipeline,
     watch::WatchEngine& watch_engine,
     std::shared_ptr<spdlog::logger> log,
-    mcp::McpHandler* mcp_handler = nullptr)
+    mcp::McpHandler* mcp_handler = nullptr,
+    persist::TagStore* tag_store = nullptr,
+    const std::function<void(
+        const std::shared_ptr<const engine::WorkflowRegistry>&)>&
+        registry_notify = {})
 {
     log->info("Config reload: re-parsing {}", config_path.string());
 
@@ -240,6 +252,55 @@ static bool perform_config_reload(
     // Reload YAML workflows and watch groups.
     auto new_registry = load_registry_from_yaml(result.state, log);
 
+    // Phase 8.5: Sync tags from reloaded registry into DB.
+    if (tag_store) {
+        try {
+            // Collect workflow tags.
+            std::vector<persist::EntityTagSet> wf_tags;
+            for (const auto* wf : new_registry->workflows()) {
+                if (!wf->tags.empty()) {
+                    wf_tags.push_back({persist::TagEntityType::Workflow,
+                                       wf->workflow_id, wf->tags});
+                }
+            }
+            tag_store->sync_all_tags(persist::TagEntityType::Workflow, wf_tags);
+
+            // Collect job tags (workflow + standalone).
+            std::vector<persist::EntityTagSet> job_tags;
+            for (const auto* wf : new_registry->workflows()) {
+                for (const auto& j : wf->jobs) {
+                    if (!j.tags.empty()) {
+                        job_tags.push_back({persist::TagEntityType::Job,
+                                            j.job_id, j.tags});
+                    }
+                }
+            }
+            for (const auto* sj : new_registry->standalone_jobs()) {
+                if (!sj->tags.empty()) {
+                    job_tags.push_back({persist::TagEntityType::Job,
+                                        sj->job_id, sj->tags});
+                }
+            }
+            tag_store->sync_all_tags(persist::TagEntityType::Job, job_tags);
+
+            // Collect watch group tags.
+            std::vector<persist::EntityTagSet> wg_tags;
+            for (const auto& wg : new_registry->watch_groups()) {
+                if (!wg.tags.empty()) {
+                    wg_tags.push_back({persist::TagEntityType::WatchGroup,
+                                       wg.group_id, wg.tags});
+                }
+            }
+            tag_store->sync_all_tags(persist::TagEntityType::WatchGroup, wg_tags);
+
+            log->info("Tag sync complete: {} wf, {} job, {} wg tags",
+                      wf_tags.size(), job_tags.size(), wg_tags.size());
+        } catch (const std::exception& e) {
+            log->warn("Tag sync failed during reload: {}", e.what());
+            // Non-fatal — tags are a convenience feature.
+        }
+    }
+
     // Propagate to engines.
     scheduler.request_reload(new_registry);
     pipeline.request_reload(new_registry);
@@ -248,6 +309,12 @@ static bool perform_config_reload(
     // Propagate to MCP handler if available (Phase 4 Batch 3).
     if (mcp_handler) {
         mcp_handler->update_registry(new_registry);
+    }
+
+    // Propagate to the HTTP server if running (Phase 9 — keeps the Web
+    // UI's workflow/job/watch views fresh across reloads).
+    if (registry_notify) {
+        registry_notify(new_registry);
     }
 
     log->info("Config reload complete");
@@ -279,6 +346,19 @@ int run_daemon(std::shared_ptr<const kairos::config::ConfigState> config) {
     } catch (const std::exception& e) {
         log->error("Failed to open database: {}", e.what());
         return 1;
+    }
+
+    // ── Step 2.5: Recover stale runs from previous crash ──────────
+    // If the daemon was killed (SIGKILL, OOM, systemd timeout, power
+    // loss), any in-flight runs are left with status='RUNNING' in the
+    // database.  Mark them as INTERRUPTED before engines start so that
+    // KEL conditions, max_instances, and `kairos status` are accurate.
+    {
+        auto recovery = persist::recover_stale_runs(*db);
+        if (recovery.runs_recovered > 0) {
+            log->warn("Recovered {} stale run(s) from unclean shutdown",
+                      recovery.runs_recovered);
+        }
     }
 
     // ── Step 3: Log startup banner ─────────────────────────────────
@@ -317,10 +397,104 @@ int run_daemon(std::shared_ptr<const kairos::config::ConfigState> config) {
     // ── Step 6: Load workflow/watch-group definitions ──────────────
     auto registry = load_registry_from_yaml(config, log);
 
-    // ── Step 6.5: Load SecretStore (§17.1) ────────────────────────
+    // ── Step 6.1: Sync tags into DB (Phase 8.5) ──────────────────
+    persist::TagStore tag_store(*db);
+    try {
+        // Collect workflow tags.
+        std::vector<persist::EntityTagSet> wf_tags;
+        for (const auto* wf : registry->workflows()) {
+            if (!wf->tags.empty()) {
+                wf_tags.push_back({persist::TagEntityType::Workflow,
+                                   wf->workflow_id, wf->tags});
+            }
+        }
+        tag_store.sync_all_tags(persist::TagEntityType::Workflow, wf_tags);
+
+        // Collect job tags (workflow jobs + standalone).
+        std::vector<persist::EntityTagSet> job_tags;
+        for (const auto* wf : registry->workflows()) {
+            for (const auto& j : wf->jobs) {
+                if (!j.tags.empty()) {
+                    job_tags.push_back({persist::TagEntityType::Job,
+                                        j.job_id, j.tags});
+                }
+            }
+        }
+        for (const auto* sj : registry->standalone_jobs()) {
+            if (!sj->tags.empty()) {
+                job_tags.push_back({persist::TagEntityType::Job,
+                                    sj->job_id, sj->tags});
+            }
+        }
+        tag_store.sync_all_tags(persist::TagEntityType::Job, job_tags);
+
+        // Collect watch group tags.
+        std::vector<persist::EntityTagSet> wg_tags;
+        for (const auto& wg : registry->watch_groups()) {
+            if (!wg.tags.empty()) {
+                wg_tags.push_back({persist::TagEntityType::WatchGroup,
+                                   wg.group_id, wg.tags});
+            }
+        }
+        tag_store.sync_all_tags(persist::TagEntityType::WatchGroup, wg_tags);
+
+        log->info("Initial tag sync: {} wf, {} job, {} wg tag sets",
+                  wf_tags.size(), job_tags.size(), wg_tags.size());
+    } catch (const std::exception& e) {
+        log->warn("Initial tag sync failed: {}", e.what());
+        // Non-fatal — tags are a convenience feature.
+    }
+
+    // ── Step 6.5: Load SecretStore (§17.1, §12.2.3) ─────────────
     security::SecretStore secret_store;
-    bool vault_enabled = config->global.get<bool>(
-        "kairos.vault.enabled", false);
+    auto secrets_backend = config->global.get<std::string>(
+        "kairos.security.backend", "");
+    if (secrets_backend.empty()) {
+        // Legacy: kairos.vault.enabled implies the vault backend.
+        if (config->global.get<bool>("kairos.vault.enabled", false)) {
+            secrets_backend = "vault";
+        }
+    }
+
+    if (secrets_backend == "file") {
+        // §12.2.1: native AES-256-GCM store at <data_dir>/secrets.enc.
+        auto secrets_file = config->data_dir /
+            security::NativeSecretFile::kDefaultName;
+        if (!security::NativeSecretFile::exists(secrets_file)) {
+            log->error("Secrets backend 'file' but {} is missing — "
+                       "run 'kairos secrets init' first",
+                       secrets_file.string());
+            return 1;
+        }
+        auto pw = platform::get_env("KAIROS_SECRETS_PASSWORD");
+        if (!pw || pw->empty()) {
+            log->error("Secrets backend 'file' requires the "
+                       "KAIROS_SECRETS_PASSWORD env var");
+            return 1;
+        }
+        try {
+            secret_store.load_from_map(
+                security::NativeSecretFile::load(secrets_file, *pw));
+            log->info("Secrets: native file backend loaded {} key(s) "
+                      "from {}",
+                      secret_store.size(), secrets_file.string());
+        } catch (const std::exception& e) {
+            log->error("Native secrets load failed: {}", e.what());
+            return 1;
+        }
+    }
+
+    if (secrets_backend == "env") {
+        // §12.2.3: secrets straight from KAIROS_SECRET_* variables.
+        auto prefix = config->global.get<std::string>(
+            "kairos.security.env_prefix", "KAIROS_SECRET_");
+        auto count = secret_store.load_from_env(prefix);
+        log->info("Secrets: env backend loaded {} key(s) "
+                  "(prefix '{}')",
+                  count, prefix);
+    }
+
+    bool vault_enabled = secrets_backend == "vault";
     if (vault_enabled) {
         std::string vault_file = config->global.get<std::string>(
             "kairos.vault.file", "");
@@ -347,13 +521,13 @@ int run_daemon(std::shared_ptr<const kairos::config::ConfigState> config) {
                 vault_password.pop_back();
             }
         } else {
-            const char* pw = std::getenv(password_env.c_str());
-            if (!pw || pw[0] == '\0') {
+            auto pw = platform::get_env(password_env.c_str());
+            if (!pw || pw->empty()) {
                 log->error("Vault enabled but {} env var is empty/unset",
                            password_env);
                 return 1;
             }
-            vault_password = pw;
+            vault_password = *pw;
         }
 
         try {
@@ -452,9 +626,44 @@ int run_daemon(std::shared_ptr<const kairos::config::ConfigState> config) {
         .query_reader = &query_reader,
         .run_stream = &run_stream,
         .cancel_registry = &cancel_registry,
+        .tag_store = &tag_store,
         .secret_resolver = secret_resolver,
+        .data_dir = config->data_dir,
+#ifdef KAIROS_HTTP_ENABLED
+        // §15.4: wired below after the HTTP section is set up — the
+        // lambda is self-contained, so declare it here directly.
+        .webhook_post = [](const std::string& url,
+                           const std::string& body) {
+            auto scheme_end = url.find("://");
+            if (scheme_end == std::string::npos) {
+                throw std::runtime_error("bad webhook url: " + url);
+            }
+            auto host_start = scheme_end + 3;
+            auto path_start = url.find('/', host_start);
+            std::string host_port = (path_start == std::string::npos)
+                ? url.substr(host_start)
+                : url.substr(host_start, path_start - host_start);
+            std::string path = (path_start == std::string::npos)
+                ? "/" : url.substr(path_start);
+            auto colon = host_port.find(':');
+            std::string host = (colon == std::string::npos)
+                ? host_port : host_port.substr(0, colon);
+            int port = (colon == std::string::npos)
+                ? 80 : std::stoi(host_port.substr(colon + 1));
+            httplib::Client cli(host, port);
+            cli.set_connection_timeout(5, 0);
+            cli.set_read_timeout(10, 0);
+            auto res = cli.Post(path, body, "application/json");
+            if (!res) {
+                throw std::runtime_error("webhook unreachable: " + url);
+            }
+        },
+#endif
+        .notification_process_factory = []() {
+            return exec::create_process_handle();
+        },
         .secret_values = secret_values,
-    });
+});
     pipeline.start(stop_token);
     log->info("Pipeline thread started");
 
@@ -508,6 +717,7 @@ int run_daemon(std::shared_ptr<const kairos::config::ConfigState> config) {
             .db_writer = &db_writer,
             .native_watcher = native_watcher.get(),
             .tracer = tracer.get(),
+            .tag_store = &tag_store,
         },
         registry->watch_groups());
 
@@ -523,6 +733,29 @@ int run_daemon(std::shared_ptr<const kairos::config::ConfigState> config) {
     // Dependencies are wired to live engine state.
     bool mcp_enabled = config->global.get<bool>(
         "kairos.mcp.enabled", false);
+
+    // Registry-reload notifier for the HTTP server (Phase 9): declared
+    // before the MCP wiring so every reload path can thread it through;
+    // populated in Step 15.9 when the HTTP server exists, null otherwise.
+    std::function<void(
+        const std::shared_ptr<const engine::WorkflowRegistry>&)>
+        registry_reload_notify;
+#ifdef KAIROS_HTTP_ENABLED
+    // Declared early (constructed in Step 15.9) so the notify lambda can
+    // safely capture it before any thread that triggers reloads starts.
+    std::unique_ptr<http::HttpServer> http_server;
+    // Current-registry holder for the HTTP submit path (name→id/kind
+    // resolution); kept in sync with the engines on every reload.
+    auto current_registry = std::make_shared<
+        std::atomic<std::shared_ptr<const engine::WorkflowRegistry>>>(
+            std::shared_ptr<const engine::WorkflowRegistry>(registry));
+    registry_reload_notify =
+        [&http_server, current_registry](
+            const std::shared_ptr<const engine::WorkflowRegistry>& reg) {
+            current_registry->store(reg);
+            if (http_server) http_server->update_registry(reg);
+        };
+#endif
 
     // MCP handler and transport (kept alive for the daemon's lifetime).
     std::unique_ptr<mcp::McpHandler> mcp_handler;
@@ -541,6 +774,7 @@ int run_daemon(std::shared_ptr<const kairos::config::ConfigState> config) {
         // Phase 4 Batch 3: wire workflow/run dependencies.
         mcp_deps.registry = registry;
         mcp_deps.query_reader = &query_reader;
+        mcp_deps.db_writer = &db_writer;
         mcp_deps.submit_run =
             [&trigger_bus](const std::string& target_id,
                            engine::TriggerEvent::TargetKind kind)
@@ -564,11 +798,13 @@ int run_daemon(std::shared_ptr<const kairos::config::ConfigState> config) {
 
         // Config reload callback: delegates to the daemon's reload logic.
         mcp_deps.reload_config =
-            [&config, &scheduler, &pipeline, &watch_engine, &log]
+            [&config, &scheduler, &pipeline, &watch_engine, &log,
+             &tag_store, &registry_reload_notify]
             (std::vector<std::string>& errors) -> bool {
                 bool ok = perform_config_reload(
                     config->config_file_path,
-                    scheduler, pipeline, watch_engine, log);
+                    scheduler, pipeline, watch_engine, log,
+                    nullptr, &tag_store, registry_reload_notify);
                 if (!ok) {
                     errors.push_back("Config reload failed — see logs");
                 }
@@ -607,22 +843,43 @@ int run_daemon(std::shared_ptr<const kairos::config::ConfigState> config) {
 
     // ── Step 15.9: Start HTTP server (optional, §26) ─────────────
 #ifdef KAIROS_HTTP_ENABLED
-    std::unique_ptr<http::HttpServer> http_server;
     bool http_enabled = config->global.get<bool>(
         "kairos.http.enabled", false);
 
     if (http_enabled) {
         http::HttpConfig http_cfg;
-        http_cfg.listen_addr = config->global.get<std::string>(
-            "kairos.http.host", "127.0.0.1");
+        // Keys follow the documented names (listen_addr / listen_port /
+        // api_token — see deploy/kairos.toml.example). The host/port/
+        // auth_token spellings are honored as legacy fallbacks.
+        http_cfg.listen_addr =
+            config->global.get<std::string>("kairos.http.listen_addr",
+                config->global.get<std::string>(
+                    "kairos.http.host", "127.0.0.1"));
         http_cfg.listen_port = static_cast<uint16_t>(
-            config->global.get<int>("kairos.http.port", 8420));
-        http_cfg.api_token = config->global.get<std::string>(
-            "kairos.http.auth_token", "");
+            config->global.get<int>("kairos.http.listen_port",
+                config->global.get<int>("kairos.http.port", 8420)));
+        http_cfg.api_token =
+            config->global.get<std::string>("kairos.http.api_token",
+                config->global.get<std::string>(
+                    "kairos.http.auth_token", ""));
         http_cfg.enable_cors = config->global.get<bool>(
             "kairos.http.cors_enabled", false);
+        http_cfg.read_timeout_seconds = config->global.get<int>(
+            "kairos.http.read_timeout_s", 30);
         http_cfg.timezone = config->global.get<std::string>(
             "kairos.timezone", "local");
+
+        // Web asset root (Roadmap §3.1): explicit override, else
+        // <data_dir>/web when present; otherwise embedded assets only.
+        http_cfg.web_root = config->global.get<std::string>(
+            "kairos.http.web_root", "");
+        if (http_cfg.web_root.empty()) {
+            auto web_candidate = config->data_dir / "web";
+            std::error_code web_ec;
+            if (std::filesystem::is_directory(web_candidate, web_ec)) {
+                http_cfg.web_root = web_candidate.string();
+            }
+        }
 
         auto uptime_start_http = std::chrono::steady_clock::now();
 
@@ -631,27 +888,81 @@ int run_daemon(std::shared_ptr<const kairos::config::ConfigState> config) {
         http_deps.reader = &query_reader;
         http_deps.registry = registry;
         http_deps.run_stream = &run_stream;
+        // Write API (§3.8.1/§3.8.2): YAML dirs, audit trail, cancellation.
+        http_deps.db_writer = &db_writer;
+        http_deps.tag_store = &tag_store;
+        http_deps.workflows_dir = resolve_yaml_dir(
+            config->config_file_path,
+            config->global.get<std::string>(
+                "kairos.workflows_dir", "workflows"));
+        http_deps.watch_groups_dir = resolve_yaml_dir(
+            config->config_file_path,
+            config->global.get<std::string>(
+                "kairos.watch_groups_dir", "watch_groups"));
+        http_deps.cancel_run = [&cancel_registry](
+            const std::string& run_id) -> bool {
+            return cancel_registry.cancel(run_id);
+        };
         http_deps.get_uptime = [uptime_start_http]() -> double {
             return std::chrono::duration<double>(
                 std::chrono::steady_clock::now() - uptime_start_http).count();
         };
-        http_deps.submit_run = [&trigger_bus](
+
+        // §15.5: full health snapshot for GET /health.
+        http_deps.get_health = [&config, &query_reader, &trigger_bus]() {
+            auto hcfg = observability::parse_health_config(config->global);
+            return observability::compute_health(
+                hcfg, config->db_path, &query_reader,
+                static_cast<int64_t>(trigger_bus.size()));
+        };
+        http_deps.submit_run = [&trigger_bus, current_registry](
             const std::string& name) -> std::string {
+            // Resolve the name (or raw ID) to a registry target first —
+            // the pipeline resolves targets by ID, not by name.
+            auto reg = current_registry->load();
+            if (!reg) return {};
+
+            std::string target_id;
+            engine::TriggerEvent::TargetKind kind;
+            if (const auto* wf = reg->workflow_by_name(name)) {
+                target_id = wf->workflow_id;
+                kind = engine::TriggerEvent::TargetKind::Workflow;
+            } else if (const auto* sj =
+                           reg->standalone_job_by_name(name)) {
+                target_id = sj->job_id;
+                kind = engine::TriggerEvent::TargetKind::StandaloneJob;
+            } else if (const auto* wfbid = reg->workflow(name)) {
+                target_id = wfbid->workflow_id;
+                kind = engine::TriggerEvent::TargetKind::Workflow;
+            } else if (const auto* sjbid = reg->standalone_job(name)) {
+                target_id = sjbid->job_id;
+                kind = engine::TriggerEvent::TargetKind::StandaloneJob;
+            } else {
+                return {};  // Unknown target → 404 at the API layer.
+            }
+
             auto run_id = core::generate_run_id();
             engine::TriggerEvent evt;
             evt.type = engine::TriggerType::ManualRun;
-            evt.target_id = name;
+            evt.target_id = target_id;
+            evt.target_kind = kind;
             evt.trigger_id = "http-api";
             evt.correlation_id = run_id;
+            evt.fire_time = std::chrono::system_clock::now();
+            evt.mono_time = std::chrono::steady_clock::now();
+            evt.payload = engine::ManualRunPayload{
+                .invoked_by = "http"};
             bool ok = trigger_bus.push(std::move(evt),
                 std::chrono::milliseconds(5000));
             return ok ? run_id : std::string{};
         };
         http_deps.reload_config = [&config, &scheduler, &pipeline,
-                                    &watch_engine, &log]() -> bool {
+                                    &watch_engine, &log, &tag_store,
+                                    &registry_reload_notify]() -> bool {
             return perform_config_reload(
                 config->config_file_path,
-                scheduler, pipeline, watch_engine, log);
+                scheduler, pipeline, watch_engine, log,
+                nullptr, &tag_store, registry_reload_notify);
         };
 
         http_server = std::make_unique<http::HttpServer>(
@@ -681,12 +992,42 @@ int run_daemon(std::shared_ptr<const kairos::config::ConfigState> config) {
     // ── Step 17: Startup complete ──────────────────────────────────
     log->info("Kairos v{} started — daemon ready", std::string(kairos::kVersion));
 
+    // ── Step 17.5: Notify systemd we're ready (§27.4) ─────────────
+    // On Linux with Type=notify, this tells systemd to transition from
+    // "activating (start)" → "active (running)".  No-op elsewhere.
+    platform::sd_notify_ready();
+    platform::sd_notify_status("Kairos daemon ready");
+
+    // Watchdog: ping at half the configured interval per sd_notify(7).
+    // $WATCHDOG_USEC is set by systemd when WatchdogSec= is configured.
+    int watchdog_full_s = platform::sd_watchdog_interval_s();
+    int watchdog_ping_s = (watchdog_full_s > 0) ? watchdog_full_s / 2 : 0;
+    auto last_watchdog_ping = std::chrono::steady_clock::now();
+    if (watchdog_ping_s > 0) {
+        log->info("systemd watchdog: interval={}s, pinging every {}s",
+                  watchdog_full_s, watchdog_ping_s);
+    }
+
     auto uptime_start = std::chrono::steady_clock::now();
 
     // Metrics snapshot interval (§20.5).
     int snapshot_interval_s = config->global.get<int>(
         "kairos.telemetry.metrics_snapshot_interval_seconds", 60);
     auto last_snapshot = std::chrono::steady_clock::now();
+
+    // §15.5 periodic self-check: log degraded checks (health state is
+    // always available via GET /health and `status --health`).
+    auto health_cfg_daemon =
+        observability::parse_health_config(config->global);
+    auto last_health_check = std::chrono::steady_clock::now();
+    if (health_cfg_daemon.enabled) {
+        log->info("Health checks: every {}s (db {} MiB limit, "
+                  "queue depth {}, stale runs {}s)",
+                  health_cfg_daemon.check_interval_s,
+                  health_cfg_daemon.max_db_size_mb,
+                  health_cfg_daemon.max_queue_depth,
+                  health_cfg_daemon.stale_run_timeout_s);
+    }
 
     // Metrics snapshot pruning interval — prune old snapshots
     // periodically. Default: 7 days retention (§16.8).
@@ -781,6 +1122,27 @@ int run_daemon(std::shared_ptr<const kairos::config::ConfigState> config) {
             }
         }
 
+        // §15.5 periodic self-check: log degraded checks.
+        if (health_cfg_daemon.enabled &&
+            std::chrono::duration<double>(
+                now - last_health_check).count() >=
+                static_cast<double>(
+                    health_cfg_daemon.check_interval_s)) {
+            last_health_check = now;
+            auto snapshot = observability::compute_health(
+                health_cfg_daemon, config->db_path, &query_reader,
+                static_cast<int64_t>(trigger_bus.size()));
+            if (snapshot["status"] == "degraded") {
+                for (const auto& check : snapshot["checks"]) {
+                    if (!check["ok"].get<bool>()) {
+                        log->warn("Health: {} — {}",
+                                  check["name"].get<std::string>(),
+                                  check["detail"].get<std::string>());
+                    }
+                }
+            }
+        }
+
         // Periodic metrics snapshot pruning (§16.8).
         // Run once per hour — prune snapshots older than retention_days.
         {
@@ -825,6 +1187,21 @@ int run_daemon(std::shared_ptr<const kairos::config::ConfigState> config) {
                 db_writer.enqueue(persist::PruneOlderThan{
                     .cutoff_date = cutoff_date,
                 });
+
+                // §15.11: per-workflow retention overrides.
+                for (const auto* wf :
+                     registry->workflows()) {
+                    const auto& rt = wf->retention;
+                    if (rt.max_runs > 0 || rt.max_age_days > 0) {
+                        db_writer.enqueue(
+                            persist::PruneWorkflowRetention{
+                                .target_name = wf->workflow_name,
+                                .max_runs = rt.max_runs,
+                                .max_age_days = rt.max_age_days,
+                                .keep_failures = rt.keep_failures,
+                            });
+                    }
+                }
 
                 // 2. Prune old watch events.
                 // Uses the same cutoff as runs.
@@ -886,7 +1263,7 @@ int run_daemon(std::shared_ptr<const kairos::config::ConfigState> config) {
             bool ok = perform_config_reload(
                 config->config_file_path,
                 scheduler, pipeline, watch_engine, log,
-                mcp_handler.get());
+                mcp_handler.get(), &tag_store, registry_reload_notify);
             if (ok) {
                 counter_reloads_ok->increment();
             } else {
@@ -900,6 +1277,12 @@ int run_daemon(std::shared_ptr<const kairos::config::ConfigState> config) {
             switch (cmd.type) {
                 case daemon::Command::Type::Cancel:
                     log->info("Command: cancel run '{}'", cmd.run_id);
+                    db_writer.enqueue(persist::InsertAuditEntry{
+                        .actor = "cli",
+                        .action = "cancel_run",
+                        .target = cmd.run_id,
+                        .detail_json = "{}",
+                    });
                     // Request cancellation of the in-flight run via
                     // CancelRegistry. This fires the per-run stop_token,
                     // which propagates to ProcessHandle::wait() in the
@@ -915,12 +1298,31 @@ int run_daemon(std::shared_ptr<const kairos::config::ConfigState> config) {
                     break;
                 case daemon::Command::Type::Reload:
                     log->info("Command: config reload (via CLI)");
+                    db_writer.enqueue(persist::InsertAuditEntry{
+                        .actor = "cli",
+                        .action = "reload_config",
+                        .target = "",
+                        .detail_json = "{}",
+                    });
                     platform::g_reload_requested.store(true);
                     break;
                 default:
                     log->warn("Unknown command type from file: {}",
                               cmd.source_file);
                     break;
+            }
+        }
+
+        // ── systemd watchdog ping (§27.4) ──────────────────────────
+        // Per sd_notify(7), ping at half the WatchdogSec interval.
+        // The main loop runs every 5s, so for WatchdogSec=60 we ping
+        // every 30s — well within the deadline.
+        if (watchdog_ping_s > 0) {
+            auto since_ping = std::chrono::duration<double>(
+                now - last_watchdog_ping).count();
+            if (since_ping >= static_cast<double>(watchdog_ping_s)) {
+                platform::sd_notify_watchdog();
+                last_watchdog_ping = now;
             }
         }
 
@@ -932,6 +1334,10 @@ int run_daemon(std::shared_ptr<const kairos::config::ConfigState> config) {
     // Shutdown in reverse-dependency order per §27.7:
     //   Scheduler → WatchEngine → TriggerBus → Pipeline →
     //   RunnerPool → DBWriter → DB → Lock
+
+    // Notify systemd that we're stopping (§27.4).
+    platform::sd_notify_stopping();
+
     log->info("Kairos shutting down...");
 
     // Start shutdown watchdog.

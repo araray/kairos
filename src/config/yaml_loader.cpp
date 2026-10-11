@@ -70,6 +70,68 @@ std::vector<std::string> read_string_vec(const YAML::Node& node) {
     return result;
 }
 
+/// §6 Tags: Parse a `tags:` array from a YAML node.
+/// Returns empty vector if the key is missing or not a sequence.
+/// Tags are sorted and deduplicated.
+std::vector<std::string> parse_tags(const YAML::Node& node) {
+    std::vector<std::string> tags;
+    if (!node["tags"] || !node["tags"].IsSequence()) {
+        return tags;
+    }
+    for (const auto& tag_node : node["tags"]) {
+        if (tag_node.IsScalar()) {
+            auto tag = tag_node.as<std::string>("");
+            if (!tag.empty()) {
+                tags.push_back(tag);
+            }
+        }
+    }
+    std::sort(tags.begin(), tags.end());
+    tags.erase(std::unique(tags.begin(), tags.end()), tags.end());
+    return tags;
+}
+
+
+/// §15.4: parse one notification entry.
+NotificationDef parse_notification(const YAML::Node& node) {
+    NotificationDef n;
+    auto type = node["type"] ? node["type"].as<std::string>("command")
+                             : "command";
+    n.type = (type == "webhook") ? NotificationDef::Type::Webhook
+                                 : NotificationDef::Type::Command;
+    if (node["url"]) n.url = node["url"].as<std::string>();
+    if (node["webhook"]) n.url = node["webhook"].as<std::string>();
+    if (node["run"]) n.command = node["run"].as<std::string>();
+    if (node["command"]) n.command = node["command"].as<std::string>();
+    if (node["template"]) {
+        n.message_template = node["template"].as<std::string>();
+    }
+    if (node["message"]) {
+        n.message_template = node["message"].as<std::string>();
+    }
+    return n;
+}
+
+/// §15.4: parse the workflow-level notifications block.
+WorkflowNotifications parse_notifications(const YAML::Node& root) {
+    WorkflowNotifications out;
+    if (!root["notifications"] || !root["notifications"].IsMap()) {
+        return out;
+    }
+    const auto& n = root["notifications"];
+    if (n["on_success"] && n["on_success"].IsSequence()) {
+        for (const auto& e : n["on_success"]) {
+            if (e.IsMap()) out.on_success.push_back(parse_notification(e));
+        }
+    }
+    if (n["on_failure"] && n["on_failure"].IsSequence()) {
+        for (const auto& e : n["on_failure"]) {
+            if (e.IsMap()) out.on_failure.push_back(parse_notification(e));
+        }
+    }
+    return out;
+}
+
 /// Read an env map (string → string) from a YAML mapping node.
 std::unordered_map<std::string, std::string> read_env_map(
     const YAML::Node& node)
@@ -138,6 +200,10 @@ std::string step_hash_input(const StepDef& step, const std::string& job_id) {
     buf += step.command;
     buf += '\0';
     buf += step.working_dir.string();
+    if (step.retry && step.retry->enabled()) {
+        buf += '\0';
+        buf += "retry:" + std::to_string(step.retry->max_attempts);
+    }
     return buf;
 }
 
@@ -151,6 +217,12 @@ std::string job_hash_input(const JobDef& job, const std::string& workflow_id) {
     for (const auto& step : job.steps) {
         buf += '\0';
         buf += step.command;
+    }
+    // §11: env files affect execution → different IDs when they change.
+    for (const auto& f : job.env_files) {
+        buf += '\0';
+        buf += "env_file:";
+        buf += f;
     }
     return buf;
 }
@@ -166,6 +238,106 @@ std::string workflow_hash_input(const std::string& name,
         buf += jn;
     }
     return buf;
+}
+
+
+// ── §15.3 templates & composition ────────────────────────────────
+
+/// Replace {{ params.<name> }} / ${{ params.<name> }} tokens in text
+/// using the values map. Unknown params throw with the token name.
+std::string expand_params(const std::string& text,
+                          const YAML::Node& with,
+                          const std::string& file,
+                          const std::string& path,
+                          std::vector<YamlError>& errors) {
+    std::string out;
+    static const std::regex re(
+        R"regex(\$\{\{\s*params\.([A-Za-z_][A-Za-z0-9_]*)\s*\}\})regex");
+    auto begin = std::sregex_iterator(text.begin(), text.end(), re);
+    auto end = std::sregex_iterator();
+    size_t last = 0;
+    bool ok = true;
+    for (auto it = begin; it != end; ++it) {
+        const auto& m = *it;
+        out.append(text, last,
+                   static_cast<size_t>(m.position()) - last);
+        const std::string key = m[1].str();
+        if (with && with[key]) {
+            out += with[key].as<std::string>();
+        } else {
+            errors.push_back({file, path,
+                "missing value for template param '" + key + "'"});
+            ok = false;
+        }
+        last = static_cast<size_t>(m.position() + m.length());
+    }
+    out.append(text, last, text.size() - last);
+    return ok ? out : text;
+}
+
+/// Load a template file and expand it with the given `with` values.
+/// Returns an empty optional on error (errors vector populated).
+std::optional<YAML::Node> expand_template(
+    const fs::path& templates_dir,
+    const std::string& template_name,
+    const YAML::Node& with,
+    const std::string& file,
+    const std::string& path,
+    std::vector<YamlError>& errors) {
+    for (const auto& suffix : {".yaml", ".yml"}) {
+        auto candidate = templates_dir / (template_name + suffix);
+        std::error_code ec;
+        if (!fs::is_regular_file(candidate, ec) || ec) continue;
+
+        YAML::Node tpl;
+        try {
+            tpl = YAML::LoadFile(candidate.string());
+        } catch (const YAML::Exception& e) {
+            errors.push_back({candidate.string(), "",
+                "Template parse error: " + std::string(e.what())});
+            return std::nullopt;
+        }
+
+        // Sanity: the template must not itself use `uses` (no nesting
+        // in v1 — keeps expansion single-level and predictable).
+        if (tpl["uses"]) {
+            errors.push_back({candidate.string(), "",
+                "Templates cannot use other templates (v1)"});
+            return std::nullopt;
+        }
+
+        // Expand params in every scalar command/env value.
+        for (const auto& job : tpl["jobs"]) {
+            const auto job_key = job.first.as<std::string>();
+            if (job.second["steps"] && job.second["steps"].IsSequence()) {
+                for (auto step : job.second["steps"]) {
+                    for (const char* key : {"run", "command"}) {
+                        if (step[key] && step[key].IsScalar()) {
+                            step[key] = expand_params(
+                                step[key].as<std::string>(), with,
+                                file,
+                                path + ".jobs." + job_key, errors);
+                        }
+                    }
+                    if (step["env"] && step["env"].IsMap()) {
+                        for (auto ev : step["env"]) {
+                            if (ev.second.IsScalar()) {
+                                ev.second = expand_params(
+                                    ev.second.as<std::string>(),
+                                    with, file,
+                                    path + ".jobs." + job_key + ".env",
+                                    errors);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        return tpl;
+    }
+    errors.push_back({file, path,
+        "template not found: " + template_name});
+    return std::nullopt;
 }
 
 }  // anonymous namespace
@@ -210,6 +382,32 @@ StepDef parse_step(const YAML::Node& node, const std::string& job_id,
     // Shell mode (default true per spec §14.4).
     step.use_shell = opt_bool(node, "use_shell", true);
 
+    // §15.2 retry policy.
+    if (node["retry"] && node["retry"].IsMap()) {
+        const auto& r = node["retry"];
+        RetryPolicy policy;
+        policy.max_attempts = r["max_attempts"]
+            ? r["max_attempts"].as<int>(1) : 1;
+        if (r["delay"]) {
+            auto d = parse_timeout(r, "delay");
+            if (d) policy.delay = std::chrono::milliseconds(*d);
+        }
+        if (r["backoff"] && r["backoff"].IsScalar()) {
+            auto b = r["backoff"].as<std::string>("fixed");
+            if (b == "linear") policy.backoff =
+                RetryPolicy::Backoff::Linear;
+            else if (b == "exponential") policy.backoff =
+                RetryPolicy::Backoff::Exponential;
+        }
+        if (r["retry_on"] && r["retry_on"].IsSequence()) {
+            for (const auto& code : r["retry_on"]) {
+                if (code.IsScalar())
+                    policy.retry_on.push_back(code.as<int>(-1));
+            }
+        }
+        if (policy.max_attempts >= 1) step.retry = policy;
+    }
+
     // Generate content-addressable ID.
     step.step_id = generate_content_id(
         EntityType::kStep, step_hash_input(step, job_id));
@@ -242,8 +440,28 @@ JobDef parse_job(const std::string& job_key, const YAML::Node& node,
     // continue_on_error.
     job.continue_on_error = opt_bool(node, "continue_on_error", false);
 
+    // §6 Tags.
+    job.tags = parse_tags(node);
+
     // Job-level env.
     job.env = read_env_map(node["env"]);
+
+    // §11 env_file: one path or a list, loaded at execution time.
+    // Later files override earlier; inline `env` overrides all.
+    if (node["env_file"]) {
+        if (node["env_file"].IsSequence()) {
+            for (const auto& f : node["env_file"]) {
+                if (f.IsScalar())
+                    job.env_files.push_back(f.as<std::string>());
+            }
+        } else if (node["env_file"].IsScalar()) {
+            job.env_files.push_back(
+                node["env_file"].as<std::string>());
+        } else {
+            errors.push_back({file, path + ".env_file",
+                              "env_file must be a path or list of paths"});
+        }
+    }
 
     // Working directory.
     job.working_dir = opt_string(node, "working_dir", "");
@@ -484,6 +702,10 @@ YamlLoadResult parse_workflow_node(
         if (root["continue_on_error"]) {
             job_node["continue_on_error"] = root["continue_on_error"];
         }
+        // §6 Tags: forward tags to the synthetic job node.
+        if (root["tags"] && root["tags"].IsSequence()) {
+            job_node["tags"] = root["tags"];
+        }
 
         auto job = parse_job(wf_name, job_node, standalone_wf_id,
                              result.errors, file);
@@ -497,6 +719,31 @@ YamlLoadResult parse_workflow_node(
         result.triggers = std::move(triggers);
         result.standalone_jobs.push_back(std::move(job));
         return result;
+    }
+
+    // §15.3: template composition — `uses: <template>` + `with:`.
+    if (root["uses"] && root["uses"].IsScalar()) {
+        auto templates_dir = fs::path(file).parent_path() / "templates";
+        auto expanded = expand_template(
+            templates_dir, root["uses"].as<std::string>(),
+            root["with"], file, "uses", result.errors);
+        if (expanded && result.errors.empty()) {
+            // The template becomes the workflow body; the composer's
+            // name (and tags/notifications/triggers if given) win.
+            auto name = root["name"]
+                ? root["name"].as<std::string>() : std::string();
+            auto tags = parse_tags(root);
+            (*expanded)["name"] = name.empty()
+                ? root["uses"].as<std::string>() : name;
+            if (!tags.empty()) {
+                YAML::Node tags_node;
+                for (const auto& t : tags) tags_node.push_back(t);
+                (*expanded)["tags"] = tags_node;
+            }
+            // Recurse: parse the expanded node as a normal workflow.
+            return parse_workflow_node(*expanded, file);
+        }
+        return result;  // errors populated.
     }
 
     // ── Jobs (multi-job workflow) ───────────────────────────────
@@ -591,8 +838,39 @@ YamlLoadResult parse_workflow_node(
             wf_id,
             wf_name,
             std::move(jobs),
-            std::move(dag)
+            std::move(dag),
+            parse_tags(root)  // §6 Workflow-level tags
         };
+
+        // §15.4 notification hooks (not part of the content hash).
+        wf.notifications = parse_notifications(root);
+
+        // §15.11 per-workflow retention override.
+        if (root["retention"] && root["retention"].IsMap()) {
+            const auto& r = root["retention"];
+            if (r["max_runs"]) {
+                wf.retention.max_runs = r["max_runs"].as<int>(0);
+            }
+            if (r["max_age"]) {
+                wf.retention.max_age_days =
+                    r["max_age"].as<std::string>("0") == "7d"
+                        ? 7  // tolerate the roadmap's "7d" spelling
+                        : r["max_age"].as<int>(0);
+                // Also accept plain "N" days via the int cast above;
+                // duration strings like "7d":
+                if (r["max_age"].IsScalar()) {
+                    auto v = r["max_age"].as<std::string>("0");
+                    if (v.size() > 1 && v.back() == 'd') {
+                        wf.retention.max_age_days =
+                            std::stoi(v.substr(0, v.size() - 1));
+                    }
+                }
+            }
+            if (r["keep_failures"]) {
+                wf.retention.keep_failures =
+                    r["keep_failures"].as<bool>(true);
+            }
+        }
 
         // ── Extract triggers ────────────────────────────────────
         auto triggers = parse_triggers(
@@ -634,6 +912,11 @@ YamlLoadResult load_workflow_file(const fs::path& path) {
         result.standalone_jobs = std::move(r.standalone_jobs);
         result.triggers = std::move(r.triggers);
         result.errors = std::move(r.errors);
+
+        // Record provenance for the /yaml API endpoints (Roadmap §3.8.1).
+        for (auto& wf : result.workflows) {
+            wf.source_path = path.string();
+        }
 
     } catch (const YAML::Exception& e) {
         result.errors.push_back({path.string(), "",
@@ -835,7 +1118,11 @@ WatchGroupDef parse_watch_group_node(
                 rule.event_types = read_string_vec(rule_node["events"]);
             }
 
-            // Trigger target.
+            // Trigger target — three spellings:
+            //   trigger: {workflow: name} / {job: name}   (legacy map)
+            //   target: name                              (legacy shorthand)
+            //   action: {type: run_workflow|run_job,      (§10.2 explicit
+            //           target: name, cooldown: 30s}       action block)
             if (rule_node["trigger"] && rule_node["trigger"].IsMap()) {
                 auto& trig = rule_node["trigger"];
                 if (trig["workflow"]) {
@@ -851,9 +1138,33 @@ WatchGroupDef parse_watch_group_node(
                 rule.trigger_is_workflow = true;
             }
 
+            if (rule_node["action"] && rule_node["action"].IsMap()) {
+                const auto& act = rule_node["action"];
+                auto type = act["type"]
+                    ? act["type"].as<std::string>("run_workflow")
+                    : "run_workflow";
+                if (act["target"] && act["target"].IsScalar()) {
+                    rule.trigger_target =
+                        act["target"].as<std::string>();
+                }
+                rule.trigger_is_workflow = (type != "run_job");
+                if (act["cooldown"]) {
+                    auto cd = parse_timeout(act, "cooldown");
+                    if (cd) rule.cooldown = *cd;
+                }
+            } else if (rule_node["cooldown"] &&
+                       rule_node["cooldown"].IsScalar()) {
+                // Cooldown also accepted at rule level without action.
+                auto cd = parse_timeout(rule_node, "cooldown");
+                if (cd) rule.cooldown = *cd;
+            }
+
             group.rules.push_back(std::move(rule));
         }
     }
+
+    // §6 Tags.
+    group.tags = parse_tags(node);
 
     // Generate content-addressable ID.
     std::string hash_input = group.group_name;
@@ -899,6 +1210,8 @@ YamlLoadResult load_watch_groups_file(const fs::path& path) {
         for (const auto& node : groups_node) {
             auto group = parse_watch_group_node(
                 node, result.errors, path.string());
+            // Record provenance for the /yaml API endpoint (§3.8.1).
+            group.source_path = path.string();
             result.watch_groups.push_back(std::move(group));
         }
 

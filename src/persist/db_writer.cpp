@@ -62,13 +62,14 @@ void DBWriter::release_statements() {
     stmt_insert_watch_sample_.reset();
     stmt_insert_watch_event_.reset();
     stmt_insert_metrics_snapshot_.reset();
+    stmt_insert_audit_.reset();
 }
 
 void DBWriter::prepare_statements() {
     stmt_insert_run_ = std::make_unique<SQLite::Statement>(db_,
         "INSERT INTO runs (run_id, target_type, target_id, target_name, "
-        "trigger_type, trigger_id, correlation_id, status, start_ts) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)");
+        "trigger_type, trigger_id, correlation_id, status, start_ts, tags_json) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
 
     stmt_update_run_ = std::make_unique<SQLite::Statement>(db_,
         "UPDATE runs SET status = ?, end_ts = ?, exit_code = ?, "
@@ -84,8 +85,8 @@ void DBWriter::prepare_statements() {
 
     stmt_insert_step_run_ = std::make_unique<SQLite::Statement>(db_,
         "INSERT INTO step_runs (run_id, job_id, step_id, step_name, "
-        "command, status, start_ts) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?)");
+        "command, status, start_ts, attempt) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)");
 
     stmt_update_step_ = std::make_unique<SQLite::Statement>(db_,
         "UPDATE step_runs SET status = ?, end_ts = ?, exit_code = ?, "
@@ -113,6 +114,10 @@ void DBWriter::prepare_statements() {
     stmt_insert_metrics_snapshot_ = std::make_unique<SQLite::Statement>(db_,
         "INSERT INTO metrics_snapshots (metric_name, metric_type, value, "
         "labels_json) VALUES (?, ?, ?, ?)");
+
+    stmt_insert_audit_ = std::make_unique<SQLite::Statement>(db_,
+        "INSERT INTO audit_log (actor, action, target, detail_json) "
+        "VALUES (?, ?, ?, ?)");
 }
 
 void DBWriter::start(std::stop_token stop) {
@@ -214,6 +219,11 @@ void DBWriter::execute_request(const DBWriteRequest& req) {
             stmt_insert_run_->bind(7, r.correlation_id);
             stmt_insert_run_->bind(8, r.status);
             stmt_insert_run_->bind(9, r.start_ts);
+            if (r.tags_json.empty()) {
+                stmt_insert_run_->bind(10);  // NULL
+            } else {
+                stmt_insert_run_->bind(10, r.tags_json);
+            }
             stmt_insert_run_->exec();
 
         } else if constexpr (std::is_same_v<T, UpdateRunComplete>) {
@@ -254,6 +264,7 @@ void DBWriter::execute_request(const DBWriteRequest& req) {
             stmt_insert_step_run_->bind(5, r.command);
             stmt_insert_step_run_->bind(6, r.status);
             stmt_insert_step_run_->bind(7, r.start_ts);
+            stmt_insert_step_run_->bind(8, r.attempt);
             stmt_insert_step_run_->exec();
 
         } else if constexpr (std::is_same_v<T, UpdateStepComplete>) {
@@ -308,10 +319,81 @@ void DBWriter::execute_request(const DBWriteRequest& req) {
             stmt_insert_watch_event_->bind(6, r.severity);
             stmt_insert_watch_event_->exec();
 
+        } else if constexpr (std::is_same_v<T, InsertAuditEntry>) {
+            stmt_insert_audit_->reset();
+            stmt_insert_audit_->bind(1, r.actor);
+            stmt_insert_audit_->bind(2, r.action);
+            stmt_insert_audit_->bind(3, r.target);
+            stmt_insert_audit_->bind(4, r.detail_json);
+            stmt_insert_audit_->exec();
+
+        } else if constexpr (std::is_same_v<T, BatchInsertRunOutputs>) {
+            if (!r.entries.empty()) {
+                SQLite::Statement insert(db_,
+                    "INSERT OR REPLACE INTO run_outputs "
+                    "(run_id, job_id, step_id, key, value) "
+                    "VALUES (?, ?, ?, ?, ?)");
+                for (const auto& [k, v] : r.entries) {
+                    insert.reset();
+                    insert.bind(1, r.run_id);
+                    insert.bind(2, r.job_id);
+                    insert.bind(3, r.step_id);
+                    insert.bind(4, k);
+                    insert.bind(5, v);
+                    insert.exec();
+                }
+            }
+
+        } else if constexpr (std::is_same_v<T, UpdateRunPinned>) {
+            SQLite::Statement up(db_,
+                "UPDATE runs SET pinned = ? WHERE run_id = ?");
+            up.bind(1, r.pinned ? 1 : 0);
+            up.bind(2, r.run_id);
+            up.exec();
+
+        } else if constexpr (std::is_same_v<T,
+                                            PruneWorkflowRetention>) {
+            // §15.11: count-based rule — keep the newest max_runs.
+            if (r.max_runs > 0) {
+                SQLite::Statement cutoff(db_,
+                    "SELECT MIN(start_ts) FROM ("
+                    " SELECT start_ts FROM runs"
+                    " WHERE target_name = ? AND pinned = 0"
+                    " ORDER BY start_ts DESC LIMIT ?)");
+                cutoff.bind(1, r.target_name);
+                cutoff.bind(2, r.max_runs);
+                if (cutoff.executeStep() &&
+                    !cutoff.getColumn(0).isNull()) {
+                    auto keep_from = cutoff.getColumn(0).getString();
+                    SQLite::Statement del(db_,
+                        "DELETE FROM runs WHERE target_name = ? "
+                        "AND pinned = 0 AND start_ts < ?");
+                    del.bind(1, r.target_name);
+                    del.bind(2, keep_from);
+                    del.exec();
+                }
+            }
+
+            // Age-based rule — with an optional failure exemption.
+            if (r.max_age_days > 0) {
+                // Compute the cutoff in SQL from Unix epoch days.
+                SQLite::Statement del(db_,
+                    "DELETE FROM runs WHERE target_name = ? "
+                    "AND pinned = 0 "
+                    "AND start_ts < strftime('%Y-%m-%dT%H:%M:%SZ', "
+                    "'now', ? || ' days') "
+                    "AND (? OR status != 'FAILURE')");
+                del.bind(1, r.target_name);
+                del.bind(2, std::to_string(-r.max_age_days));
+                del.bind(3, r.keep_failures ? 0 : 1);
+                del.exec();
+            }
+
         } else if constexpr (std::is_same_v<T, PruneOlderThan>) {
             // Prune runs older than cutoff.
             SQLite::Statement prune_runs(db_,
-                "DELETE FROM runs WHERE start_ts < ?");
+                "DELETE FROM runs WHERE start_ts < ? "
+                "AND pinned = 0");
             prune_runs.bind(1, r.cutoff_date);
             int deleted = prune_runs.exec();
             spdlog::info("Pruned {} runs older than {}",

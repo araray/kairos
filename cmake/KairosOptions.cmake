@@ -5,6 +5,7 @@
 # Feature flags.
 option(KAIROS_HTTP        "Build HTTP server and Web UI"       OFF)
 option(KAIROS_OTEL        "Build with OpenTelemetry tracing"   OFF)
+option(KAIROS_OTEL_SYSTEM "Prefer system-installed OTel SDK (enables OTLP). OFF = FetchContent (ostream only, no protobuf deps)" OFF)
 option(KAIROS_VAULT       "Build with Ansible Vault support"   OFF)
 option(KAIROS_DOCKER      "Build with Docker runner support"   OFF)
 option(KAIROS_ANSIBLE     "Build with Ansible runner support"  OFF)

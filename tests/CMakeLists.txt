@@ -125,6 +125,7 @@ kairos_discover_tests(test_runner_pool)
 # DBWriter + QueryReader tests
 add_executable(test_db_writer
     unit/persist/db_writer_test.cpp
+    unit/persist/audit_log_test.cpp
 )
 target_link_libraries(test_db_writer PRIVATE kairos_test_helpers)
 kairos_discover_tests(test_db_writer)
@@ -134,6 +135,8 @@ kairos_discover_tests(test_db_writer)
 # Metrics registry tests
 add_executable(test_metrics
     unit/observability/metrics_test.cpp
+    unit/observability/health_test.cpp
+    ${CMAKE_SOURCE_DIR}/src/observability/health.cpp
 )
 target_link_libraries(test_metrics PRIVATE kairos_test_helpers)
 kairos_discover_tests(test_metrics)
@@ -548,19 +551,33 @@ kairos_discover_tests(test_command_reader)
 
 # ── HTTP server tests (conditional on KAIROS_HTTP) ───────────
 
+# Generated web resources are shared by both HTTP test targets in this
+# directory (the custom command is directory-scoped, so one call serves both).
+if(KAIROS_HTTP)
+    include(${CMAKE_SOURCE_DIR}/cmake/KairosWebResources.cmake)
+    kairos_embed_web_resources(TEST_WEB_GENERATED_SRC)
+endif()
+
 add_executable(test_http_server
     unit/http/http_server_test.cpp
+    unit/http/web_catalog_test.cpp
 )
 target_link_libraries(test_http_server PRIVATE kairos_test_helpers)
 if(KAIROS_HTTP)
     target_compile_definitions(test_http_server PRIVATE KAIROS_HTTP_ENABLED)
     target_sources(test_http_server PRIVATE
         ${CMAKE_SOURCE_DIR}/src/http/http_server.cpp
+        ${CMAKE_SOURCE_DIR}/src/http/web_catalog.cpp
+        ${CMAKE_SOURCE_DIR}/src/http/dag_svg.cpp
+        ${TEST_WEB_GENERATED_SRC}
     )
     target_link_libraries(test_http_server PRIVATE httplib::httplib)
     target_include_directories(test_http_server PRIVATE
         ${inja_SOURCE_DIR}/include
     )
+    if(MSVC)
+        target_compile_options(test_http_server PRIVATE /utf-8)
+    endif()
 endif()
 kairos_discover_tests(test_http_server)
 
@@ -613,12 +630,18 @@ if(KAIROS_HTTP)
     target_compile_definitions(test_http_integration PRIVATE KAIROS_HTTP_ENABLED)
     target_sources(test_http_integration PRIVATE
         ${CMAKE_SOURCE_DIR}/src/http/http_server.cpp
+        ${CMAKE_SOURCE_DIR}/src/http/web_catalog.cpp
+        ${CMAKE_SOURCE_DIR}/src/http/dag_svg.cpp
+        ${TEST_WEB_GENERATED_SRC}
     )
     target_link_libraries(test_http_integration PRIVATE httplib::httplib)
     # inja include path for template rendering.
     target_include_directories(test_http_integration PRIVATE
         ${inja_SOURCE_DIR}/include
     )
+    if(MSVC)
+        target_compile_options(test_http_integration PRIVATE /utf-8)
+    endif()
 endif()
 kairos_discover_tests(test_http_integration)
 
@@ -635,12 +658,12 @@ if(KAIROS_OTEL)
         ${CMAKE_SOURCE_DIR}/src/observability/otel_tracer.cpp
     )
     target_link_libraries(test_otel_tracer PRIVATE
-        opentelemetry-cpp::trace
-        opentelemetry-cpp::ostream_span_exporter
+        ${KAIROS_OTEL_TRACE_LIB}
+        ${KAIROS_OTEL_OSTREAM_LIB}
     )
     if(KAIROS_OTEL_OTLP)
         target_link_libraries(test_otel_tracer PRIVATE
-            opentelemetry-cpp::otlp_http_exporter
+            ${KAIROS_OTEL_OTLP_LIB}
         )
         target_compile_definitions(test_otel_tracer PRIVATE KAIROS_OTEL_OTLP)
     endif()
@@ -655,6 +678,7 @@ kairos_discover_tests(test_otel_tracer)
 
 add_executable(test_secret_store
     unit/security/secret_store_test.cpp
+    unit/security/native_secret_file_test.cpp
 )
 target_link_libraries(test_secret_store PRIVATE kairos_test_helpers)
 if(KAIROS_VAULT)
@@ -731,4 +755,94 @@ kairos_discover_tests(test_tui
     PROPERTIES
         LABELS "tui"
         TIMEOUT 60
+)
+
+# ── Phase 6: Critical Fixes & Quick Wins ──────────────────────────────
+
+# Run ID prefix matching, Table --no-header, platform::get_env,
+# cron preview, affected files summary
+add_executable(test_phase6
+    unit/phase6_test.cpp
+)
+target_link_libraries(test_phase6 PRIVATE kairos_test_helpers)
+kairos_discover_tests(test_phase6
+    PROPERTIES
+        LABELS "phase6"
+        TIMEOUT 30
+)
+
+# Phase 7 tests: CLI filter, KEL eval, interactive selector
+add_executable(test_phase7
+    unit/phase7_test.cpp
+    ${CMAKE_SOURCE_DIR}/src/cli/interactive_selector.cpp
+)
+target_link_libraries(test_phase7 PRIVATE kairos_test_helpers)
+kairos_discover_tests(test_phase7
+    PROPERTIES
+        LABELS "phase7"
+        TIMEOUT 30
+)
+
+# ══════════════════════════════════════════════════════════════════════════
+# Phase 8: Tags & Search
+# ══════════════════════════════════════════════════════════════════════════
+
+# ── TagStore CRUD, AND/OR filtering, JSON helpers, migration v2 ─────────
+
+add_executable(test_tags
+    unit/persist/tags_test.cpp
+)
+target_link_libraries(test_tags PRIVATE kairos_test_helpers)
+kairos_discover_tests(test_tags
+    PROPERTIES
+        LABELS "phase8;tags"
+        TIMEOUT 30
+)
+
+# ── DAG graph ASCII rendering, JSON output, topological sort ────────────
+
+add_executable(test_dag_graph
+    unit/cli/dag_graph_test.cpp
+)
+target_link_libraries(test_dag_graph PRIVATE kairos_test_helpers)
+kairos_discover_tests(test_dag_graph
+    PROPERTIES
+        LABELS "phase8;cli"
+        TIMEOUT 30
+)
+
+# ── Phase 8 integration: tag lifecycle, run propagation, config reload ──
+
+add_executable(test_phase8
+    unit/phase8_test.cpp
+)
+target_link_libraries(test_phase8 PRIVATE kairos_test_helpers)
+kairos_discover_tests(test_phase8
+    PROPERTIES
+        LABELS "phase8"
+        TIMEOUT 30
+)
+
+# ── Phase 8.5 integration: has_tag KEL wiring, tag sync ─────────────────
+
+add_executable(test_phase85
+    unit/phase8_5_test.cpp
+)
+target_link_libraries(test_phase85 PRIVATE kairos_test_helpers)
+kairos_discover_tests(test_phase85
+    PROPERTIES
+        LABELS "phase85"
+        TIMEOUT 30
+)
+
+# ── Stale run recovery on startup ─────────────────────────────────────────
+
+add_executable(test_stale_recovery
+    unit/persist/stale_recovery_test.cpp
+)
+target_link_libraries(test_stale_recovery PRIVATE kairos_test_helpers)
+kairos_discover_tests(test_stale_recovery
+    PROPERTIES
+        LABELS "persist;recovery"
+        TIMEOUT 30
 )

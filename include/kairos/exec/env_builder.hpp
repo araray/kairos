@@ -15,6 +15,7 @@
 // ╚════════════════════════════════════════════════════════════════════════════╝
 #pragma once
 
+#include <filesystem>
 #include <functional>
 #include <optional>
 #include <string>
@@ -78,6 +79,14 @@ public:
         const std::string& data_dir,
         const std::string& db_path);
 
+    /// §9.3: in-step query variables — sequential run number and the
+    /// previous run's status/id for this target. Call after
+    /// add_kairos_vars; empty values are skipped.
+    EnvBuilder& add_query_vars(
+        int64_t run_number,
+        const std::string& prev_run_status,
+        const std::string& prev_run_id);
+
     /// Build the final environment map.
     [[nodiscard]] std::unordered_map<std::string, std::string>
     build() const;
@@ -101,5 +110,24 @@ private:
 /// Capture the current process environment as a map.
 /// Used by inherit_parent() and by tests.
 std::unordered_map<std::string, std::string> capture_current_env();
+
+/// Parse .env file content (Roadmap §11): KEY=VALUE lines, `#` comments,
+/// blank lines skipped, surrounding single/double quotes stripped, an
+/// optional `export ` prefix tolerated. Invalid lines are ignored —
+/// .env files are conventionally forgiving.
+/// @return The parsed key→value map, in file order (callers merge in
+///         order so later files override earlier ones).
+[[nodiscard]] std::unordered_map<std::string, std::string>
+parse_env_file_content(const std::string& content);
+
+/// Load and parse a .env file from disk.
+/// @param path       File path (absolute or relative to base_dir).
+/// @param base_dir   Directory used to resolve relative paths (the
+///                   effective working directory of the step's job).
+/// @throw std::runtime_error when the file cannot be read — env files
+///        are fail-closed by design (a typo'd path fails the job).
+[[nodiscard]] std::unordered_map<std::string, std::string>
+load_env_file(const std::filesystem::path& path,
+              const std::filesystem::path& base_dir);
 
 }  // namespace kairos::exec

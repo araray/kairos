@@ -278,6 +278,7 @@ Color status_color(const std::string& status) {
     if (status == "FAILED")    return Color::Red;
     if (status == "RUNNING")   return Color::Cyan;
     if (status == "CANCELLED") return Color::Yellow;
+    if (status == "INTERRUPTED") return Color::Magenta;
     if (status == "TIMED_OUT") return Color::Red;
     return Color::White;
 }
@@ -499,9 +500,56 @@ int run_dashboard(const DashboardConfig& config) {
     DashboardState state;
     state.config_path = config.config_path.string();
     std::mutex state_mutex;
+
+
     std::atomic<bool> should_quit{false};
     std::atomic<bool> force_refresh{false};
     bool show_logs = true;
+
+    // Phase 8.5: Filter bar state (§4.1 TUI search/filter).
+    std::string filter_text;
+    bool filter_active = false;
+
+    // §4.2/§4.3: selection + modal state for the events panel.
+    int event_selection = 0;
+    int event_modal = 0;  // >0 while open: index+1; 0 = closed.
+
+    // §4.2/§4.3: events that pass the current filter (shared by the
+    // renderer and the keyboard navigation handler). Takes the mutex
+    // itself; callers must not hold it.
+    auto matches_filter_events =
+        [&state = state, &filter_text](void) -> std::vector<EventInfo> {
+        std::string lower_filter = filter_text;
+        std::transform(lower_filter.begin(), lower_filter.end(),
+                       lower_filter.begin(),
+                       [](unsigned char c) {
+                           return std::tolower(c);
+                       });
+        std::vector<EventInfo> out;
+        for (const auto& ev : state.events) {
+            if (lower_filter.empty()) {
+                out.push_back(ev);
+                continue;
+            }
+            bool hit = false;
+            for (const std::string* field :
+                 {&ev.event_uid, &ev.watch_group, &ev.rule_name,
+                  &ev.event_type, &ev.affected_files}) {
+                std::string lower(*field);
+                std::transform(lower.begin(), lower.end(),
+                               lower.begin(),
+                               [](unsigned char c) {
+                                   return std::tolower(c);
+                               });
+                if (lower.find(lower_filter) != std::string::npos) {
+                    hit = true;
+                    break;
+                }
+            }
+            if (hit) out.push_back(ev);
+        }
+        return out;
+    };
 
     // Initial refresh.
     refresh_state(state, config);
@@ -510,6 +558,28 @@ int run_dashboard(const DashboardConfig& config) {
 
     auto renderer = Renderer([&] {
         std::lock_guard<std::mutex> lock(state_mutex);
+
+        // Phase 8.5: Case-insensitive substring filter matcher.
+        auto matches_filter = [&](const std::string& text) -> bool {
+            if (!filter_active || filter_text.empty()) return true;
+            // Case-insensitive search.
+            std::string lower_text = text;
+            std::string lower_filter = filter_text;
+            std::transform(lower_text.begin(), lower_text.end(),
+                           lower_text.begin(),
+                           [](unsigned char c) { return std::tolower(c); });
+            std::transform(lower_filter.begin(), lower_filter.end(),
+                           lower_filter.begin(),
+                           [](unsigned char c) { return std::tolower(c); });
+            return lower_text.find(lower_filter) != std::string::npos;
+        };
+
+        // Helper: check if any field in a RunInfo matches.
+        auto run_matches = [&](const RunInfo& r) -> bool {
+            return matches_filter(r.run_id) ||
+                   matches_filter(r.workflow) ||
+                   matches_filter(r.status);
+        };
 
         // ── Header bar ───────────────────────────────────────────
         auto status_indicator = state.daemon_running
@@ -532,7 +602,7 @@ int run_dashboard(const DashboardConfig& config) {
                 | color(Color::GrayLight),
             filler(),
             text(state.last_refresh + " ") | color(Color::GrayDark),
-            text("q=quit r=refresh l=logs") | dim,
+            text("q=quit r=refresh l=logs /=filter j/k=select ⏎=detail") | dim,
         }) | borderLight;
 
         // ── Error banner ─────────────────────────────────────────
@@ -548,6 +618,7 @@ int run_dashboard(const DashboardConfig& config) {
             active_items.push_back(text("  No active runs") | dim);
         } else {
             for (const auto& r : state.active_runs) {
+                if (!run_matches(r)) continue;
                 active_items.push_back(hbox({
                     text("  ● ") | color(Color::Cyan),
                     text(r.workflow) | bold,
@@ -555,6 +626,8 @@ int run_dashboard(const DashboardConfig& config) {
                     text("(" + r.duration + ")") | dim,
                 }));
             }
+            if (active_items.empty())
+                active_items.push_back(text("  (filtered)") | dim);
         }
         auto active_panel = vbox(std::move(active_items))
             | borderLight | size(HEIGHT, LESS_THAN, 8);
@@ -572,6 +645,10 @@ int run_dashboard(const DashboardConfig& config) {
                 text("  No trigger history") | dim);
         } else {
             for (const auto& t : state.trigger_fires) {
+                if (!matches_filter(t.trigger_id) &&
+                    !matches_filter(t.trigger_type) &&
+                    !matches_filter(t.target_id))
+                    continue;
                 auto short_id = t.trigger_id.size() > 16
                     ? t.trigger_id.substr(0, 16) : t.trigger_id;
                 trigger_items.push_back(hbox({
@@ -581,6 +658,8 @@ int run_dashboard(const DashboardConfig& config) {
                     text(t.fired_at) | dim,
                 }));
             }
+            if (trigger_items.empty())
+                trigger_items.push_back(text("  (filtered)") | dim);
         }
         auto trigger_panel = vbox(std::move(trigger_items))
             | borderLight | size(HEIGHT, LESS_THAN, 8);
@@ -606,6 +685,7 @@ int run_dashboard(const DashboardConfig& config) {
             run_rows.push_back(text("  No completed runs") | dim);
         } else {
             for (const auto& r : state.recent_runs) {
+                if (!run_matches(r)) continue;
                 auto short_id = r.run_id.size() > 12
                     ? r.run_id.substr(0, 12) : r.run_id;
                 auto short_wf = r.workflow.size() > 18
@@ -632,6 +712,7 @@ int run_dashboard(const DashboardConfig& config) {
             wg_items.push_back(text("  No watch groups") | dim);
         } else {
             for (const auto& wg : state.watch_groups) {
+                if (!matches_filter(wg.name)) continue;
                 wg_items.push_back(hbox({
                     text("  " + wg.name) | bold,
                     filler(),
@@ -640,6 +721,8 @@ int run_dashboard(const DashboardConfig& config) {
                     text("  " + wg.last_scan) | dim,
                 }));
             }
+            if (wg_items.empty())
+                wg_items.push_back(text("  (filtered)") | dim);
         }
         auto watch_panel = vbox({
             text(" Watch Groups (" +
@@ -653,22 +736,90 @@ int run_dashboard(const DashboardConfig& config) {
         if (state.events.empty()) {
             event_items.push_back(text("  No events") | dim);
         } else {
+            int visible_idx = 0;
+            int selected_visible = -1;
+            const EventInfo* selected_event = nullptr;
             for (const auto& ev : state.events) {
+                if (!matches_filter(ev.watch_group) &&
+                    !matches_filter(ev.rule_name) &&
+                    !matches_filter(ev.event_type) &&
+                    !matches_filter(ev.affected_files))
+                    continue;
+                bool is_selected =
+                    (visible_idx == event_selection);
+                if (is_selected) {
+                    selected_visible = visible_idx;
+                    selected_event = &ev;
+                }
                 auto short_uid = ev.event_uid.size() > 8
                     ? ev.event_uid.substr(0, 8) : ev.event_uid;
                 auto short_group = ev.watch_group.size() > 14
                     ? ev.watch_group.substr(0, 14) : ev.watch_group;
-                event_items.push_back(hbox({
-                    text("  " + short_uid) | dim
-                        | size(WIDTH, EQUAL, 11),
+                auto row = hbox({
+                    text((is_selected ? " > " : "  ") + short_uid)
+                        | (is_selected ? bold | color(Color::Cyan)
+                                       : dim)
+                        | size(WIDTH, EQUAL, 13),
                     text(short_group)
+                        | (is_selected ? bold : nothing)
                         | size(WIDTH, EQUAL, 16),
                     text(ev.event_type)
                         | color(Color::Yellow)
                         | size(WIDTH, EQUAL, 10),
                     text(ev.affected_files) | dim | flex,
                     text("  " + ev.created_at) | dim,
-                }));
+                });
+                event_items.push_back(
+                    is_selected
+                        ? row | inverted
+                        : std::move(row));
+                ++visible_idx;
+            }
+            if (event_items.empty()) {
+                event_items.push_back(text("  (filtered)") | dim);
+            } else if (event_modal > 0 && selected_visible >= 0 &&
+                       event_modal - 1 < static_cast<int>(
+                           event_items.size())) {
+                // §4.2: event detail modal over the panel — full
+                // affected files, one per line.
+                const auto& ev = *selected_event;
+                Elements files;
+                std::istringstream files_stream(ev.affected_files);
+                std::string f;
+                while (std::getline(files_stream, f, ',')) {
+                    if (!f.empty() && f.front() == ' ') {
+                        f.erase(0, 1);
+                    }
+                    files.push_back(text("  " + f) | dim);
+                }
+                if (files.empty()) {
+                    files.push_back(text("  (none)") | dim);
+                }
+                auto modal = window(
+                    vbox({
+                        text(" Event Detail") | bold
+                            | color(Color::Yellow),
+                        separator(),
+                        hbox({text(" UID     ") | dim,
+                              text(ev.event_uid)}),
+                        hbox({text(" Group   ") | dim,
+                              text(ev.watch_group)}),
+                        hbox({text(" Rule    ") | dim,
+                              text(ev.rule_name)}),
+                        hbox({text(" Type    ") | dim,
+                              text(ev.event_type)}),
+                        hbox({text(" Time    ") | dim,
+                              text(ev.created_at)}),
+                        separator(),
+                        text(" Affected files") | dim,
+                        vbox(std::move(files)),
+                    }) | size(WIDTH, GREATER_THAN, 44),
+                    text(" any key closes ") | dim | center);
+                auto base = std::move(event_items[event_modal - 1]);
+                auto overlay = modal | hcenter |
+                               size(HEIGHT, LESS_THAN, 20);
+                event_items[event_modal - 1] =
+                    dbox(std::move(base), std::move(overlay));
             }
         }
         auto events_panel = vbox({
@@ -705,6 +856,18 @@ int run_dashboard(const DashboardConfig& config) {
             });
         }
 
+        // ── Filter bar (Phase 8.5) ────────────────────────────────
+        Element filter_bar = text("");
+        if (filter_active) {
+            filter_bar = hbox({
+                text(" / ") | bold | color(Color::Cyan),
+                text(filter_text) | bold | color(Color::White),
+                text("█") | blink | color(Color::Cyan),
+                filler(),
+                text("[Esc] clear  [Enter] keep") | dim,
+            }) | borderLight | color(Color::Cyan);
+        }
+
         // ── Compose the full layout ──────────────────────────────
         return vbox({
             header,
@@ -719,13 +882,52 @@ int run_dashboard(const DashboardConfig& config) {
                 watch_panel | flex,
                 log_panel   | flex,
             }),
+            filter_bar,
         });
     });
 
     // ── Keyboard handler ─────────────────────────────────────────
     auto component = CatchEvent(renderer, [&](Event event) {
-        if (event == Event::Character('q') ||
-            event == Event::Escape) {
+        // Phase 8.5: Filter mode input handling.
+        if (filter_active) {
+            if (event == Event::Escape) {
+                // Clear filter and exit filter mode.
+                filter_text.clear();
+                filter_active = false;
+                return true;
+            }
+            if (event == Event::Return) {
+                // Keep filter text, exit filter mode.
+                filter_active = false;
+                return true;
+            }
+            if (event == Event::Backspace) {
+                if (!filter_text.empty()) {
+                    filter_text.pop_back();
+                }
+                return true;
+            }
+            // Accept printable characters into the filter.
+            if (event.is_character()) {
+                filter_text += event.character();
+                return true;
+            }
+            return false;
+        }
+
+        // Event-detail modal open: any key closes it (§4.2).
+        if (event_modal > 0) {
+            event_modal = 0;
+            return true;
+        }
+
+        // Normal mode key handling.
+        if (event == Event::Character('q')) {
+            should_quit = true;
+            screen.Exit();
+            return true;
+        }
+        if (event == Event::Escape) {
             should_quit = true;
             screen.Exit();
             return true;
@@ -737,6 +939,43 @@ int run_dashboard(const DashboardConfig& config) {
         if (event == Event::Character('l')) {
             show_logs = !show_logs;
             return true;
+        }
+        if (event == Event::Character('/')) {
+            filter_active = true;
+            filter_text.clear();
+            return true;
+        }
+
+        // §4.3 vim-style navigation over the events panel.
+        {
+            int event_count = static_cast<int>(
+                matches_filter_events().size());
+            if (event == Event::Character('j') ||
+                event == Event::ArrowDown) {
+                if (event_selection < event_count - 1) ++event_selection;
+                return true;
+            }
+            if (event == Event::Character('k') ||
+                event == Event::ArrowUp) {
+                if (event_selection > 0) --event_selection;
+                return true;
+            }
+            if (event == Event::Character('g')) {
+                event_selection = 0;
+                return true;
+            }
+            if (event == Event::Character('G')) {
+                event_selection = std::max(0, event_count - 1);
+                return true;
+            }
+            if ((event == Event::Return ||
+                 event == Event::Character(' ')) &&
+                event_count > 0) {
+                event_selection =
+                    std::min(event_selection, event_count - 1);
+                event_modal = event_selection + 1;
+                return true;
+            }
         }
         return false;
     });

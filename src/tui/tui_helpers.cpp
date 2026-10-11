@@ -62,6 +62,7 @@ std::string status_icon(const std::string& status) {
     if (status == "FAILED")    return "✗";
     if (status == "RUNNING")   return "●";
     if (status == "CANCELLED") return "⊘";
+    if (status == "INTERRUPTED") return "⚡";
     if (status == "SKIPPED")   return "○";
     if (status == "TIMED_OUT") return "⏱";
     return "?";

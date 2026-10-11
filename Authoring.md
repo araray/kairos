@@ -249,6 +249,11 @@ jobs:
 
 This produces the DAG:
 
+![Parallel Execution](assets/diagrams/repository/authoring-parallel-execution.svg)
+
+<details>
+<summary>Text version</summary>
+
 ```
 Level 0:  fetch-data    fetch-config
               ↓   ↘          ↓
@@ -256,6 +261,8 @@ Level 1:  validate   transform
               ↓       ↓
 Level 2:      load
 ```
+
+</details>
 
 ### Cycle Detection
 

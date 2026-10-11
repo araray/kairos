@@ -78,7 +78,8 @@ protected:
                 duration_ms INTEGER DEFAULT 0,
                 plan_json TEXT DEFAULT '',
                 error_message TEXT DEFAULT '',
-                created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+                created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+                tags_json TEXT
             )
         )");
 
@@ -112,6 +113,7 @@ protected:
                 start_ts TEXT DEFAULT '',
                 end_ts TEXT DEFAULT '',
                 duration_ms INTEGER DEFAULT 0,
+                attempt INTEGER NOT NULL DEFAULT 1,
                 PRIMARY KEY (run_id, job_id, step_id)
             )
         )");

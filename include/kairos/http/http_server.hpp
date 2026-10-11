@@ -22,12 +22,16 @@
 #include "kairos/engine/workflow_registry.hpp"
 #include "kairos/exec/output_sink.hpp"
 #include "kairos/observability/metrics.hpp"
+#include "kairos/persist/db_writer.hpp"
 #include "kairos/persist/query_reader.hpp"
+#include "kairos/persist/tag_store.hpp"
 
 #include <cstdint>
 #include <filesystem>
 #include <functional>
 #include <memory>
+#include <mutex>
+#include <nlohmann/json.hpp>
 #include <stop_token>
 #include <string>
 
@@ -62,6 +66,12 @@ struct HttpConfig {
     /// Timezone for display in HTML pages (e.g., "UTC", "local", "+05:30").
     /// JSON API always returns UTC.
     std::string timezone = "local";
+
+    /// External web asset root (Roadmap §3.1). When the directory exists,
+    /// templates and static files are served from it (hot-editable);
+    /// otherwise the compiled-in web/ assets are used. Empty = embedded
+    /// only.
+    std::string web_root;
 };
 
 // ── Shared dependencies ───────────────────────────────────────────────────
@@ -73,14 +83,37 @@ struct HttpDependencies {
     std::shared_ptr<const engine::WorkflowRegistry> registry;
     exec::RunStream* run_stream = nullptr;
 
+    /// Async DB writer for audit entries (Roadmap §3.8.2).
+    /// Null disables the audit trail (writes still succeed).
+    persist::DBWriter* db_writer = nullptr;
+
+    /// Optional tag store — enables has_tag() in the KEL playground
+    /// (§3.8.7). Null degrades gracefully.
+    persist::TagStore* tag_store = nullptr;
+
+    /// Workflow YAML directory — enables the workflow write API.
+    /// Empty path disables POST/PUT/DELETE (503).
+    std::filesystem::path workflows_dir;
+
+    /// Watch-group YAML directory — enables the watch write API.
+    std::filesystem::path watch_groups_dir;
+
     /// Submit a manual run by workflow name. Returns run_id or empty.
     std::function<std::string(const std::string& name)> submit_run;
+
+    /// Cancel an in-flight run via the CancelRegistry.
+    /// Returns false when the run is not active. Null → 501.
+    std::function<bool(const std::string& run_id)> cancel_run;
 
     /// Config reload callback.
     std::function<bool()> reload_config;
 
     /// Daemon uptime (seconds).
     std::function<double()> get_uptime;
+
+    /// §15.5: full health snapshot (checks + status). Null → /health
+    /// stays minimal (status + uptime only).
+    std::function<nlohmann::json()> get_health;
 };
 
 // ── HTTP Server ───────────────────────────────────────────────────────────
@@ -108,6 +141,12 @@ public:
 
     /// Gracefully stop the server.
     void stop();
+
+    /// Swap in a new (immutable) workflow registry after a config reload.
+    /// Thread-safe; request threads pick up the new snapshot on their
+    /// next registry access.
+    void update_registry(
+        std::shared_ptr<const engine::WorkflowRegistry> registry);
 
     /// @return The listen address (e.g., "127.0.0.1:8420").
     [[nodiscard]] std::string listen_address() const;

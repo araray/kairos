@@ -218,6 +218,97 @@ CREATE TABLE IF NOT EXISTS config_snapshots (
     created_at      TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
 );
         )SQL"
+    },
+    {
+        2,
+        "Tags system — entity_tags table and runs.tags_json column",
+        R"SQL(
+-- ╔════════════════════════════════════════════════════════════════╗
+-- ║  ENTITY_TAGS — Tag associations for all entity types          ║
+-- ║  §6 Tags System (Roadmap Phase 8)                             ║
+-- ╚════════════════════════════════════════════════════════════════╝
+
+CREATE TABLE IF NOT EXISTS entity_tags (
+    entity_type  TEXT NOT NULL,
+    entity_id    TEXT NOT NULL,
+    tag          TEXT NOT NULL,
+    created_at   TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    PRIMARY KEY (entity_type, entity_id, tag)
+);
+
+CREATE INDEX IF NOT EXISTS idx_tags_tag
+    ON entity_tags (tag);
+
+CREATE INDEX IF NOT EXISTS idx_tags_entity
+    ON entity_tags (entity_type, entity_id);
+
+-- Add tags_json column to runs for historical tag propagation.
+-- Stores a JSON array of strings, e.g. '["deploy","production"]'.
+-- NULL for runs created before this migration.
+ALTER TABLE runs ADD COLUMN tags_json TEXT;
+        )SQL"
+    },
+    {
+        3,
+        "Audit log — audit_log table for all mutations (Roadmap §15.14)",
+        R"SQL(
+-- ╔════════════════════════════════════════════════════════════════╗
+-- ║  AUDIT_LOG — who changed what, when (write API safety §3.8.2) ║
+-- ╚════════════════════════════════════════════════════════════════╝
+
+CREATE TABLE IF NOT EXISTS audit_log (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    timestamp   TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    actor       TEXT NOT NULL,    -- 'cli' | 'mcp' | 'http' | 'watch_engine' …
+    action      TEXT NOT NULL,    -- 'create_workflow' | 'cancel_run' …
+    target      TEXT,             -- entity name/ID
+    detail_json TEXT              -- additional context
+);
+
+CREATE INDEX IF NOT EXISTS idx_audit_timestamp
+    ON audit_log (timestamp);
+        )SQL"
+    },
+    {
+        4,
+        "Step retries — attempt column on step_runs (Roadmap §15.2)",
+        R"SQL(
+-- Each retry attempt persists as its own step_runs row; attempt 1 is
+-- the first try. Existing rows predate the column → default 1.
+ALTER TABLE step_runs ADD COLUMN attempt INTEGER NOT NULL DEFAULT 1;
+        )SQL"
+    },
+    {
+        5,
+        "Run context — run_outputs table (Roadmap §8)",
+        R"SQL(
+-- ╔════════════════════════════════════════════════════════════════╗
+-- ║  RUN_OUTPUTS — step variables written via $KAIROS_OUTPUT      ║
+-- ║  (Roadmap §8 shared context & variable passing)               ║
+-- ╚════════════════════════════════════════════════════════════════╝
+
+CREATE TABLE IF NOT EXISTS run_outputs (
+    run_id     TEXT NOT NULL,
+    job_id     TEXT NOT NULL,
+    step_id    TEXT NOT NULL,
+    key        TEXT NOT NULL,
+    value      TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    PRIMARY KEY (run_id, job_id, step_id, key)
+);
+
+CREATE INDEX IF NOT EXISTS idx_run_outputs_run
+    ON run_outputs (run_id);
+        )SQL"
+    },
+    {
+        6,
+        "Run pinning — runs.pinned column (Roadmap §15.6)",
+        R"SQL(
+-- Pinned runs survive retention pruning. 0 = unpinned (default for
+-- all pre-existing rows).
+ALTER TABLE runs ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0;
+        )SQL"
     }
 };
 

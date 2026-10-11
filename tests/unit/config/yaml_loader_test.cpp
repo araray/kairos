@@ -10,6 +10,8 @@
 
 #include <gtest/gtest.h>
 
+#include "test_helpers.hpp"
+
 #include <filesystem>
 #include <fstream>
 
@@ -17,6 +19,8 @@ namespace kairos::config {
 namespace {
 
 namespace fs = std::filesystem;
+using kairos::engine::NotificationDef;
+using kairos::engine::RetryPolicy;
 
 // ── Helpers ─────────────────────────────────────────────────────────────
 
@@ -993,4 +997,320 @@ watch_groups:
 }
 
 }  // anonymous namespace
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  §11 env_file parsing (Roadmap Phase 12)
+// ═══════════════════════════════════════════════════════════════════════════
+
+TEST(YamlLoaderTest, ParsesJobEnvFiles) {
+    auto r = load_workflow_string(R"(
+name: envfiles
+jobs:
+  build:
+    env_file: .env
+    steps:
+      - run: "true"
+  deploy:
+    env_file:
+      - .env
+      - .env.production
+      - /etc/kairos/global.env
+    steps:
+      - run: "true"
+)");
+    ASSERT_TRUE(r.ok()) << (r.errors.empty() ? "?" : r.errors[0].message);
+    ASSERT_EQ(r.workflows.size(), 1u);
+
+    const auto& jobs = r.workflows[0].jobs;
+    ASSERT_EQ(jobs.size(), 2u);
+    ASSERT_EQ(jobs[0].env_files.size(), 1u);
+    EXPECT_EQ(jobs[0].env_files[0], ".env");
+    ASSERT_EQ(jobs[1].env_files.size(), 3u);
+    EXPECT_EQ(jobs[1].env_files[2], "/etc/kairos/global.env");
+}
+
+TEST(YamlLoaderTest, EnvFileAffectsJobId) {
+    auto base = load_workflow_string(R"(
+name: ids
+jobs:
+  a:
+    steps:
+      - run: "true"
+)");
+    auto with_file = load_workflow_string(R"(
+name: ids
+jobs:
+  a:
+    env_file: extra.env
+    steps:
+      - run: "true"
+)");
+    ASSERT_TRUE(base.ok());
+    ASSERT_TRUE(with_file.ok());
+    EXPECT_NE(base.workflows[0].jobs[0].job_id,
+              with_file.workflows[0].jobs[0].job_id);
+}
+
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  §15.2 step retry policies (Roadmap Phase 12)
+// ═══════════════════════════════════════════════════════════════════════════
+
+TEST(YamlLoaderTest, ParsesRetryPolicy) {
+    auto r = load_workflow_string(R"(
+name: retry-flow
+jobs:
+  flaky:
+    steps:
+      - name: call
+        run: curl https://api
+        retry:
+          max_attempts: 3
+          delay: 5s
+          backoff: exponential
+          retry_on: [1, 2]
+)");
+    ASSERT_TRUE(r.ok()) << (r.errors.empty() ? "?" : r.errors[0].message);
+    const auto& step = r.workflows[0].jobs[0].steps[0];
+    ASSERT_TRUE(step.retry.has_value());
+    EXPECT_EQ(step.retry->max_attempts, 3);
+    EXPECT_EQ(step.retry->delay, std::chrono::seconds(5));
+    EXPECT_EQ(step.retry->backoff, RetryPolicy::Backoff::Exponential);
+    ASSERT_EQ(step.retry->retry_on.size(), 2u);
+    EXPECT_EQ(step.retry->retry_on[0], 1);
+    EXPECT_EQ(step.retry->retry_on[1], 2);
+}
+
+TEST(YamlLoaderTest, RetryDefaultsWhenPartial) {
+    auto r = load_workflow_string(R"(
+name: retry-defaults
+jobs:
+  a:
+    steps:
+      - run: "true"
+        retry:
+          max_attempts: 2
+)");
+    ASSERT_TRUE(r.ok());
+    const auto& step = r.workflows[0].jobs[0].steps[0];
+    ASSERT_TRUE(step.retry.has_value());
+    EXPECT_EQ(step.retry->max_attempts, 2);
+    EXPECT_EQ(step.retry->backoff, RetryPolicy::Backoff::Fixed);
+    EXPECT_TRUE(step.retry->retry_on.empty());
+    EXPECT_EQ(step.retry->delay_for(1), std::chrono::milliseconds(0));
+}
+
+TEST(RetryPolicyTest, BackoffDelayMath) {
+    RetryPolicy p;
+    p.delay = std::chrono::milliseconds(100);
+    p.backoff = RetryPolicy::Backoff::Exponential;
+    EXPECT_EQ(p.delay_for(1), std::chrono::milliseconds(100));
+    EXPECT_EQ(p.delay_for(2), std::chrono::milliseconds(200));
+    EXPECT_EQ(p.delay_for(3), std::chrono::milliseconds(400));
+
+    p.backoff = RetryPolicy::Backoff::Linear;
+    EXPECT_EQ(p.delay_for(1), std::chrono::milliseconds(100));
+    EXPECT_EQ(p.delay_for(3), std::chrono::milliseconds(300));
+
+    p.backoff = RetryPolicy::Backoff::Fixed;
+    EXPECT_EQ(p.delay_for(4), std::chrono::milliseconds(100));
+}
+
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  §10 event-trigger enhancements (Roadmap Phase 12)
+// ═══════════════════════════════════════════════════════════════════════════
+
+TEST(WatchActionTest, ParsesExplicitActionBlock) {
+    auto r = load_watch_groups_string(R"(
+watch_groups:
+  - name: dep
+    watch_items: ["/deploy/*.tar.gz"]
+    rules:
+      - name: new_package
+        condition: "event.type == 'created'"
+        action:
+          type: run_workflow
+          target: deploy_pipeline
+          cooldown: 60s
+      - name: alt_job
+        condition: "true"
+        action:
+          type: run_job
+          target: reindex
+)");
+    ASSERT_TRUE(r.ok()) << (r.errors.empty() ? "?" : r.errors[0].message);
+    const auto& rules = r.watch_groups[0].rules;
+    ASSERT_EQ(rules.size(), 2u);
+    EXPECT_EQ(*rules[0].trigger_target, "deploy_pipeline");
+    EXPECT_TRUE(rules[0].trigger_is_workflow);
+    EXPECT_EQ(rules[0].cooldown, std::chrono::seconds(60));
+    EXPECT_EQ(*rules[1].trigger_target, "reindex");
+    EXPECT_FALSE(rules[1].trigger_is_workflow);
+    EXPECT_EQ(rules[1].cooldown, std::chrono::seconds(0));
+}
+
+TEST(WatchActionTest, LegacyTriggerStillWorks) {
+    auto r = load_watch_groups_string(R"(
+watch_groups:
+  - name: old
+    watch_items: ["/x"]
+    rules:
+      - name: r1
+        condition: "true"
+        trigger:
+          workflow: legacy-flow
+)");
+    ASSERT_TRUE(r.ok());
+    EXPECT_EQ(*r.watch_groups[0].rules[0].trigger_target, "legacy-flow");
+    EXPECT_TRUE(r.watch_groups[0].rules[0].trigger_is_workflow);
+}
+
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  §15.4 notification hooks (Roadmap Phase 13)
+// ═══════════════════════════════════════════════════════════════════════════
+
+TEST(YamlLoaderTest, ParsesWorkflowNotifications) {
+    auto r = load_workflow_string(R"yaml(
+name: notify-flow
+notifications:
+  on_failure:
+    - type: webhook
+      url: https://hooks.example.com/X
+      template: "Kairos: {{ workflow }} failed (run {{ run_id }})"
+    - type: command
+      run: notify-send 'Kairos' '{{ workflow }} failed'
+  on_success:
+    - type: command
+      command: echo ok >> /tmp/kairos-notify.log
+jobs:
+  a:
+    steps:
+      - run: "true"
+)yaml");
+    ASSERT_TRUE(r.ok()) << (r.errors.empty() ? "?" : r.errors[0].message);
+    const auto& n = r.workflows[0].notifications;
+    ASSERT_EQ(n.on_failure.size(), 2u);
+    EXPECT_EQ(n.on_failure[0].type, NotificationDef::Type::Webhook);
+    EXPECT_EQ(n.on_failure[0].url, "https://hooks.example.com/X");
+    EXPECT_NE(n.on_failure[0].message_template.find("{{ workflow }}"),
+              std::string::npos);
+    EXPECT_EQ(n.on_failure[1].type, NotificationDef::Type::Command);
+    EXPECT_EQ(n.on_failure[1].command, "notify-send 'Kairos' '{{ workflow }} failed'");
+    ASSERT_EQ(n.on_success.size(), 1u);
+    EXPECT_EQ(n.on_success[0].command, "echo ok >> /tmp/kairos-notify.log");
+}
+
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  §15.3 templates & composition (Roadmap Phase 15)
+// ═══════════════════════════════════════════════════════════════════════════
+
+class TemplateCompositionTest : public ::testing::Test {
+protected:
+    kairos::testing::TempDir dir_;
+
+    void write_template(const std::string& name,
+                        const std::string& yaml) {
+        std::filesystem::create_directories(
+            dir_.path() / "templates");
+        std::ofstream(dir_.path() / "templates" / (name + ".yaml"))
+            << yaml;
+    }
+};
+
+TEST_F(TemplateCompositionTest, UsesExpandsParams) {
+    write_template("standard_build", R"yaml(
+name: standard_build_template
+jobs:
+  build:
+    steps:
+      - name: compile
+        run: make build-${{ params.language }}
+  test:
+    needs: [build]
+    steps:
+      - name: unit
+        run: ${{ params.test_command }}
+        env:
+          LANG: ${{ params.language }}
+)yaml");
+
+    std::ofstream(dir_.path() / "my_app.yaml") << R"yaml(
+name: my_app
+uses: standard_build
+with:
+  language: cpp
+  test_command: ctest --output-on-failure
+)yaml";
+
+    auto r = load_workflow_file(dir_.path() / "my_app.yaml");
+    ASSERT_TRUE(r.ok())
+        << (r.errors.empty() ? "?" : r.errors[0].message);
+    ASSERT_EQ(r.workflows.size(), 1u);
+    EXPECT_EQ(r.workflows[0].workflow_name, "my_app");
+    ASSERT_EQ(r.workflows[0].jobs.size(), 2u);
+    EXPECT_EQ(r.workflows[0].jobs[0].steps[0].command,
+              "make build-cpp");
+    EXPECT_EQ(r.workflows[0].jobs[1].steps[0].command,
+              "ctest --output-on-failure");
+    EXPECT_EQ(r.workflows[0].jobs[1].steps[0].env.at("LANG"), "cpp");
+}
+
+TEST_F(TemplateCompositionTest, MissingParamIsAnError) {
+    write_template("picky", R"yaml(
+name: picky_template
+jobs:
+  a:
+    steps:
+      - run: echo ${{ params.required }}
+)yaml");
+    std::ofstream(dir_.path() / "caller.yaml") << R"yaml(
+name: caller
+uses: picky
+with:
+  other: value
+)yaml";
+
+    auto r = load_workflow_file(dir_.path() / "caller.yaml");
+    EXPECT_FALSE(r.ok());
+    bool found = false;
+    for (const auto& e : r.errors) {
+        if (e.message.find("required") != std::string::npos) {
+            found = true;
+        }
+    }
+    EXPECT_TRUE(found);
+}
+
+TEST_F(TemplateCompositionTest, UnknownTemplateIsAnError) {
+    std::ofstream(dir_.path() / "caller.yaml") << R"yaml(
+name: caller
+uses: does_not_exist
+with: {}
+)yaml";
+    auto r = load_workflow_file(dir_.path() / "caller.yaml");
+    EXPECT_FALSE(r.ok());
+}
+
+TEST_F(TemplateCompositionTest, DefaultsUsedWhenParamOmitted) {
+    write_template("with_default", R"yaml(
+name: default_template
+jobs:
+  a:
+    steps:
+      - run: echo ${{ params.language }}
+)yaml");
+    // `with:` omitted entirely — every param missing → error path,
+    // which is the documented v1 behavior (no defaults in templates;
+    // callers provide all values).
+    std::ofstream(dir_.path() / "caller.yaml") << R"yaml(
+name: caller2
+uses: with_default
+)yaml";
+    auto r = load_workflow_file(dir_.path() / "caller.yaml");
+    EXPECT_FALSE(r.ok());
+}
+
 }  // namespace kairos::config

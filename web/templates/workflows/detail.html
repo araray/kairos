@@ -1,0 +1,136 @@
+<!-- Workflow detail (wrapped by base.html) -->
+<!-- Data: wf{name, id, tags[], source_path}, triggers[{type, expression}],
+     jobs[{name, level, needs[], needs_names, condition, steps[{name, command}], tags[]}],
+     plan[{job_name, level, action, reason}], last_runs[] -->
+
+<nav aria-label="breadcrumb">
+  <ol class="breadcrumb">
+    <li class="breadcrumb-item"><a href="/workflows">Workflows</a></li>
+    <li class="breadcrumb-item active">{{ wf.name }}</li>
+  </ol>
+</nav>
+
+<div class="page-header">
+  <div>
+    <h4 class="mb-1">{{ wf.name }}</h4>
+    <code>{{ wf.workflow_id }}</code>
+    {% for t in wf.tags %}<span class="kairos-tag">{{ t }}</span>{% endfor %}
+  </div>
+  <div class="d-flex gap-2">
+    <button class="btn btn-info btn-sm" type="button" data-kairos-action="run-workflow" data-name="{{ wf.name }}">▶ Run now</button>
+    <a href="/workflows/{{ wf.name }}/edit" class="btn btn-outline-info btn-sm">Edit</a>
+    <button class="btn btn-outline-danger btn-sm" type="button" data-kairos-action="delete-entity" data-kind="workflow" data-name="{{ wf.name }}">Delete</button>
+    <a href="/api/v1/workflows/{{ wf.name }}/yaml" class="btn btn-outline-info btn-sm">YAML</a>
+    <a href="/api/v1/explain/{{ wf.name }}" class="btn btn-outline-info btn-sm">Explain JSON</a>
+    <a href="/runs?workflow={{ wf.name }}" class="btn btn-outline-info btn-sm">Run History</a>
+  </div>
+</div>
+
+<div class="card p-3 mb-4" data-kairos-nofilter>
+  <h5>DAG</h5>
+  <div class="table-responsive">{{ dag_svg }}</div>
+</div>
+
+<div class="row g-4">
+  <div class="col-lg-7">
+    <div class="card p-3 mb-4">
+      <h5>Jobs <span class="text-muted small">({{ wf.job_count }})</span></h5>
+      <div class="table-responsive">
+        <table class="table table-sm table-hover mb-0">
+          <thead>
+            <tr><th>Level</th><th>Job</th><th>Needs</th><th>Condition</th><th>Steps</th></tr>
+          </thead>
+          <tbody>
+{% for job in jobs %}
+            <tr>
+              <td class="fit text-muted">{{ job.level }}</td>
+              <td>
+                <a href="/jobs/{{ job.id }}"><strong>{{ job.name }}</strong></a>
+                {% for t in job.tags %}<span class="kairos-tag">{{ t }}</span>{% endfor %}
+              </td>
+              <td class="text-muted">{{ job.needs_names }}</td>
+              <td><code class="d-block" style="max-width: 260px; white-space: normal;">{{ job.condition }}</code></td>
+              <td class="text-muted">
+{% for s in job.steps %}
+                <div>{{ s.name }} — <code>{{ s.command }}</code></div>
+{% endfor %}
+              </td>
+            </tr>
+{% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <div class="card p-3">
+      <h5>Execution Plan <span class="text-muted small">(what would run now)</span></h5>
+      <div class="table-responsive">
+        <table class="table table-sm table-hover mb-0">
+          <thead>
+            <tr><th>Level</th><th>Job</th><th>Action</th><th>Why</th></tr>
+          </thead>
+          <tbody>
+{% for p in plan %}
+            <tr>
+              <td class="fit text-muted">{{ p.level }}</td>
+              <td>{{ p.job_name }}</td>
+              <td class="fit">
+{% if p.action == "RUN" %}<span class="badge badge-success">RUN</span>
+{% else if p.action == "SKIP" %}<span class="badge badge-warning">SKIP</span>
+{% else if p.action == "PEND" %}<span class="badge badge-secondary">PEND</span>
+{% else %}<span class="badge badge-danger">{{ p.action }}</span>{% endif %}
+              </td>
+              <td class="text-muted">{{ p.reason }}</td>
+            </tr>
+{% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
+  <div class="col-lg-5">
+    <div class="card p-3 mb-4">
+      <h5>Triggers</h5>
+{% if length(wf.triggers) > 0 %}
+      <ul class="list-unstyled mb-0">
+{% for t in wf.triggers %}
+        <li class="mb-2">
+          <span class="badge badge-primary">{{ t.type }}</span>
+          <code>{{ t.schedule }}</code>
+        </li>
+{% endfor %}
+      </ul>
+{% else %}
+      <p class="text-muted mb-0">Manual only — no schedule triggers target this workflow.</p>
+{% endif %}
+    </div>
+
+    <div class="card p-3 mb-4">
+      <h5>Recent Runs</h5>
+      <div class="table-responsive">
+        <table class="table table-sm table-hover mb-0">
+          <thead><tr><th>Run</th><th>Status</th><th>Started</th></tr></thead>
+          <tbody>
+{% for r in last_runs %}
+            <tr>
+              <td><a href="/runs/{{ r.run_id }}"><code>{{ r.run_id_short }}</code></a></td>
+              <td><span class="badge badge-{{ r.badge }}">{{ r.status }}</span></td>
+              <td class="fit">{{ r.start_ts }}</td>
+            </tr>
+{% endfor %}
+{% if length(last_runs) == 0 %}
+            <tr><td colspan="3" class="text-center k-empty">No runs yet</td></tr>
+{% endif %}
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <div class="card p-3">
+      <h5>Source</h5>
+      <p class="text-muted small mb-2"><code>{{ wf.source_path }}</code></p>
+      <div class="yaml-block">{{ wf.yaml }}</div>
+    </div>
+  </div>
+</div>

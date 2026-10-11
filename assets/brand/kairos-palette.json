@@ -1,0 +1,31 @@
+{
+  "name": "Kairos Cobalt Coral",
+  "color_space": "sRGB",
+  "colors": [
+    {
+      "name": "Cobalt",
+      "hex": "#203C86",
+      "role": "Primary mark, wordmark, headings and body text on porcelain"
+    },
+    {
+      "name": "Porcelain",
+      "hex": "#F4F5F1",
+      "role": "Light surfaces and reversed mark"
+    },
+    {
+      "name": "Coral",
+      "hex": "#ED765D",
+      "role": "Opportunity point and selected accents"
+    },
+    {
+      "name": "Mist",
+      "hex": "#8AABE0",
+      "role": "Secondary connectors and supporting graphics"
+    }
+  ],
+  "contrast_ratios": {
+    "cobalt_on_porcelain": 9.346,
+    "cobalt_on_coral": 3.582,
+    "cobalt_on_mist": 4.377
+  }
+}

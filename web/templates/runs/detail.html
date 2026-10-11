@@ -1,0 +1,110 @@
+<!-- Run detail (wrapped by base.html) -->
+<!-- Data: run_id, run_id_short, target_name, status, badge, trigger_type,
+     start_ts, end_ts, duration_ms, exit_code, tags[], is_running,
+     jobs[{job_name, status, badge, exit_code, duration_ms, condition,
+           steps[{step_name, status, badge, exit_code, command}]}],
+     logs[{job_id, stream, content}] -->
+
+<nav aria-label="breadcrumb">
+  <ol class="breadcrumb">
+    <li class="breadcrumb-item"><a href="/runs">Runs</a></li>
+    <li class="breadcrumb-item active">{{ run_id_short }}</li>
+  </ol>
+</nav>
+
+<div class="page-header">
+  <div>
+    <h4 class="mb-1">Run <code>{{ run_id_short }}</code></h4>
+    <span class="badge badge-{{ badge }}">{{ status }}</span>
+    {% for t in tags %}<span class="kairos-tag">{{ t }}</span>{% endfor %}
+  </div>
+  <div class="d-flex gap-2">
+{% if is_running %}
+    <button class="btn btn-outline-warning btn-sm" type="button" data-kairos-action="cancel-run" data-run="{{ run_id }}">✕ Cancel</button>
+    <span class="badge badge-primary align-self-center">● live</span>
+{% else %}
+    <button class="btn btn-info btn-sm" type="button" data-kairos-action="run-workflow" data-name="{{ target_name }}">↻ Re-run</button>
+{% endif %}
+    <a href="/api/v1/runs/{{ run_id }}" class="btn btn-outline-info btn-sm">JSON</a>
+    <a href="/api/v1/runs/{{ run_id }}/logs" class="btn btn-outline-info btn-sm">Logs API</a>
+  </div>
+</div>
+
+{% if dag_svg != "" %}
+<div class="card p-3 mb-4" data-kairos-nofilter>
+  <h5>DAG <span class="text-muted small">— jobs colored by status</span></h5>
+  <div class="table-responsive">{{ dag_svg }}</div>
+</div>
+{% endif %}
+
+<div class="row g-4">
+  <div class="col-lg-8">
+    <div class="card p-3 mb-4">
+      <h5>Jobs</h5>
+      <div class="table-responsive">
+        <table class="table table-sm table-hover mb-0">
+          <thead>
+            <tr><th>Job</th><th>Status</th><th>Exit</th><th>Duration</th><th>Condition</th></tr>
+          </thead>
+          <tbody>
+{% for job in jobs %}
+            <tr>
+              <td>{{ job.job_name }}</td>
+              <td><span class="badge badge-{{ job.badge }}">{{ job.status }}</span></td>
+              <td class="fit"><code>{{ job.exit_code }}</code></td>
+              <td class="fit">{{ job.duration_ms }}ms</td>
+              <td class="text-muted" style="max-width: 220px; white-space: normal;">{{ job.condition }}</td>
+            </tr>
+{% for step in job.steps %}
+            <tr style="font-size: 0.85em;">
+              <td style="padding-left: 2em;">↳ {{ step.step_name }}</td>
+              <td><span class="badge badge-{{ step.badge }}">{{ step.status }}</span></td>
+              <td><code>{{ step.exit_code }}</code></td>
+              <td colspan="2"><code>{{ step.command }}</code></td>
+            </tr>
+{% endfor %}
+{% endfor %}
+{% if length(jobs) == 0 %}
+            <tr><td colspan="5" class="text-center k-empty">No job detail recorded</td></tr>
+{% endif %}
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <div class="card p-3"{% if is_running %} data-kairos-sse="/sse/logs/{{ run_id }}"{% endif %}>
+      <div class="d-flex justify-content-between align-items-center mb-2">
+        <h5 class="mb-0">Logs</h5>
+{% if is_running %}
+        <span class="text-muted small">streaming live…</span>
+{% else %}
+        <a href="/api/v1/runs/{{ run_id }}/logs" class="text-muted small">full logs via API</a>
+{% endif %}
+      </div>
+      <div class="log-panel">
+{% for log in logs %}
+        <div class="log-line {% if log.stream == "stderr" %}log-stderr{% else %}log-stdout{% endif %}"><span class="log-meta">[{{ log.job_id }}] </span>{{ log.content }}</div>
+{% endfor %}
+{% if length(logs) == 0 %}
+        <div class="log-line log-meta">no output captured yet</div>
+{% endif %}
+      </div>
+    </div>
+  </div>
+
+  <div class="col-lg-4">
+    <div class="card p-3">
+      <h5>Detail</h5>
+      <table class="table table-sm mb-0">
+        <tr><td class="text-muted" style="width:130px">Run ID</td><td><code style="word-break:break-all;">{{ run_id }}</code></td></tr>
+        <tr><td class="text-muted">Target</td><td>{{ target_name }}</td></tr>
+        <tr><td class="text-muted">Type</td><td>{{ target_type }}</td></tr>
+        <tr><td class="text-muted">Trigger</td><td>{{ trigger_type }}</td></tr>
+        <tr><td class="text-muted">Exit code</td><td><code>{{ exit_code }}</code></td></tr>
+        <tr><td class="text-muted">Started</td><td>{{ start_ts }}</td></tr>
+        <tr><td class="text-muted">Ended</td><td>{{ end_ts }}</td></tr>
+        <tr><td class="text-muted">Duration</td><td>{{ duration_ms }}ms</td></tr>
+      </table>
+    </div>
+  </div>
+</div>

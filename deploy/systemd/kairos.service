@@ -19,6 +19,12 @@ StartLimitBurst=5
 
 [Service]
 Type=notify
+
+# Kairos calls sd_notify(READY=1) within ~100ms of startup.
+# Explicit timeout avoids relying on the distro-default (90s on most).
+TimeoutStartSec=30
+TimeoutStopSec=120
+
 ExecStart=/usr/bin/kairos start --config /etc/kairos/kairos.toml
 ExecReload=/bin/kill -HUP $MAINPID
 

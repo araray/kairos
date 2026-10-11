@@ -4,6 +4,7 @@
 // ╚════════════════════════════════════════════════════════════════════════════╝
 
 #include "kairos/config/config_store.hpp"
+#include "kairos/platform/environment.hpp"
 
 #include <cstdlib>
 #include <filesystem>
@@ -24,29 +25,29 @@ std::filesystem::path resolve_config_path(const std::string& cli_override) {
     }
 
     // 2. Environment variable.
-    if (const char* env = std::getenv("KAIROS_CONFIG_FILE"); env && env[0]) {
-        return fs::path(env);
+    if (auto env = platform::get_env("KAIROS_CONFIG_FILE"); env && !env->empty()) {
+        return fs::path(*env);
     }
 
     // 3. Platform default.
 #if defined(_WIN32)
-    if (const char* appdata = std::getenv("APPDATA"); appdata && appdata[0]) {
-        auto p = fs::path(appdata) / "kairos" / "kairos.toml";
+    if (auto appdata = platform::get_env("APPDATA"); appdata && !appdata->empty()) {
+        auto p = fs::path(*appdata) / "kairos" / "kairos.toml";
         if (fs::exists(p)) return p;
     }
 #elif defined(__APPLE__)
-    if (const char* home = std::getenv("HOME"); home && home[0]) {
-        auto p = fs::path(home) / "Library" / "Application Support" / "kairos" / "kairos.toml";
+    if (auto home = platform::get_env("HOME"); home && !home->empty()) {
+        auto p = fs::path(*home) / "Library" / "Application Support" / "kairos" / "kairos.toml";
         if (fs::exists(p)) return p;
     }
 #else  // Linux / other POSIX
     // XDG_CONFIG_HOME or ~/.config/kairos/
-    if (const char* xdg = std::getenv("XDG_CONFIG_HOME"); xdg && xdg[0]) {
-        auto p = fs::path(xdg) / "kairos" / "kairos.toml";
+    if (auto xdg = platform::get_env("XDG_CONFIG_HOME"); xdg && !xdg->empty()) {
+        auto p = fs::path(*xdg) / "kairos" / "kairos.toml";
         if (fs::exists(p)) return p;
     }
-    if (const char* home = std::getenv("HOME"); home && home[0]) {
-        auto p = fs::path(home) / ".config" / "kairos" / "kairos.toml";
+    if (auto home = platform::get_env("HOME"); home && !home->empty()) {
+        auto p = fs::path(*home) / ".config" / "kairos" / "kairos.toml";
         if (fs::exists(p)) return p;
     }
     // System default.

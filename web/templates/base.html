@@ -1,0 +1,55 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="blue" data-bs-theme="dark">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{{ title }} — Kairos</title>
+  <link rel="icon" type="image/svg+xml" href="/static/img/kairos-logo.svg">
+  <link href="/static/vendor/bootstrap.min.css" rel="stylesheet">
+  <link href="/static/css/kairos.css" rel="stylesheet">
+</head>
+<body>
+  <nav class="kairos-navbar py-2 mb-4">
+    <div class="container-fluid d-flex flex-wrap justify-content-between align-items-center gap-2">
+      <div class="d-flex align-items-center gap-4 flex-wrap">
+        <a class="kairos-brand" href="/">
+          <img src="/static/img/kairos-logo.svg" alt="">
+          ⏱ Kairos
+        </a>
+        <div class="kairos-nav d-flex flex-wrap gap-1">
+          <a href="/" class="{% if active == "dashboard" %}active{% endif %}">Dashboard</a>
+          <a href="/workflows" class="{% if active == "workflows" %}active{% endif %}">Workflows</a>
+          <a href="/jobs" class="{% if active == "jobs" %}active{% endif %}">Jobs</a>
+          <a href="/runs" class="{% if active == "runs" %}active{% endif %}">Runs</a>
+          <a href="/events" class="{% if active == "events" %}active{% endif %}">Events</a>
+          <a href="/watches" class="{% if active == "watches" %}active{% endif %}">Watches</a>
+          <a href="/triggers" class="{% if active == "triggers" %}active{% endif %}">Triggers</a>
+          <a href="/kel" class="{% if active == "kel" %}active{% endif %}">KEL</a>
+          <a href="/metrics" class="small">Metrics</a>
+        </div>
+      </div>
+      <div class="d-flex align-items-center gap-2">
+        <div class="kairos-search">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" aria-hidden="true"><circle cx="11" cy="11" r="7"></circle><path d="m20 20-3.8-3.8"></path></svg>
+          <input id="kairos-search-input" type="search" placeholder="Filter ( / or /regex/ )" aria-label="Filter tables" autocomplete="off">
+          <span id="kairos-search-count" class="k-search-count"></span>
+        </div>
+        <button id="theme-toggle" class="theme-btn" type="button" title="Cycle theme (blue / dark / light)">◐ theme</button>
+      </div>
+    </div>
+  </nav>
+
+  <main class="container-fluid">
+{{ content }}
+  </main>
+
+  <footer class="footer container-fluid">
+    Kairos {{ version }} — unified local orchestration ·
+    <a href="/health">health</a> · <a href="/metrics">metrics</a> ·
+    <a href="/api/v1/workflows">API</a>
+  </footer>
+
+  <script src="/static/js/kairos.js"></script>
+  <script src="/static/js/actions.js"></script>
+</body>
+</html>

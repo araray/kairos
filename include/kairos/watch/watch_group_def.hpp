@@ -31,10 +31,16 @@ struct WatchRuleDef {
     std::vector<std::string> event_types;
 
     /// Target workflow/job to trigger when this rule fires.
+    /// May come from the legacy `trigger_target:` key or from an
+    /// explicit `action:` block (Roadmap §10.2).
     std::optional<std::string> trigger_target;
 
     /// Whether the target is a workflow or standalone job.
     bool trigger_is_workflow = true;
+
+    /// §10.4: minimum seconds between triggers from this rule
+    /// (anti-storm). 0 = no cooldown.
+    std::chrono::seconds cooldown{0};
 };
 
 /// Watch mode: how the watch group detects changes.
@@ -91,6 +97,13 @@ struct WatchGroupDef {
 
     /// Whether the group is enabled.
     bool enabled = true;
+
+    /// §6 Tags from YAML `tags:` array.
+    std::vector<std::string> tags;
+
+    /// YAML file this group was loaded from ("" for inline definitions).
+    /// Not part of the content ID hash.
+    std::string source_path;
 };
 
 /// Result of a triggered watch rule, ready for persistence and

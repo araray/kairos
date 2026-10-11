@@ -42,6 +42,7 @@ struct FileEventPayload {
 /// Payload for sample+diff filesystem events.
 struct FileDiffPayload {
     std::string watch_group;
+    std::string rule_name;      ///< §10.3: rule that fired (may be empty)
     int files_added = 0;
     int files_removed = 0;
     int files_modified = 0;
@@ -53,6 +54,7 @@ struct FileDiffPayload {
 struct ManualRunPayload {
     std::string invoked_by;      ///< "cli" or "mcp"
     std::string extra_args;      ///< Any additional CLI arguments
+    bool dry_run = false;        ///< §15.1: no-op execution
 };
 
 /// Payload for config reload events.

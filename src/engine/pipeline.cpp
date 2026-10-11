@@ -7,12 +7,22 @@
 #include "kairos/engine/pipeline.hpp"
 #include "kairos/core/id_generator.hpp"
 #include "kairos/exec/output_sink.hpp"
+#include "kairos/exec/process_handle.hpp"
+#include "kairos/kel/errors.hpp"
 
 #include <spdlog/spdlog.h>
 
+#include <nlohmann/json.hpp>
+
+#include <algorithm>
+#include <iterator>
+#include <regex>
+#include <fstream>
 #include <condition_variable>
+#include <filesystem>
 #include <future>
 #include <mutex>
+#include <unordered_map>
 
 namespace kairos::engine {
 
@@ -22,6 +32,9 @@ Pipeline::Pipeline(PipelineConfig config, Dependencies deps)
     if (!deps_.clock) {
         throw std::invalid_argument("Pipeline requires a non-null ClockSource");
     }
+    // §15.4: fire-and-forget notification worker (dies with stop()).
+    notify_thread_ = std::jthread(
+        [this](std::stop_token st) { notify_worker(st); });
 }
 
 Pipeline::~Pipeline() { stop(); }
@@ -34,6 +47,134 @@ void Pipeline::stop() {
     if (thread_.joinable()) {
         thread_.request_stop();
         thread_.join();
+    }
+    // §15.4: drain remaining notifications (each bounded by its own
+    // 10s timeout), then stop the worker.
+    if (notify_thread_.joinable()) {
+        notify_thread_.request_stop();
+        notify_thread_.join();
+    }
+}
+
+// ── §15.4 notification dispatcher ────────────────────────────────────────
+
+void Pipeline::enqueue_notifications(const RunContext& ctx,
+                                     RunStatus status) {
+    const auto* wf = deps_.registry
+        ? deps_.registry->workflow(ctx.workflow_id)
+        : nullptr;
+    if (!wf) return;
+
+    // Only SUCCESS and FAILURE fire hooks; skips/cancels stay quiet.
+    const auto& hooks =
+        status == RunStatus::Failure
+            ? wf->notifications.on_failure
+            : wf->notifications.on_success;
+
+    for (const auto& def : hooks) {
+        NotifyTask task;
+        task.def = def;
+        task.workflow = ctx.workflow_name;
+        task.run_id = ctx.run_id;
+        task.status = run_status_to_string(status);
+        task.trigger = ctx.trigger_type;
+        using namespace std::chrono_literals;
+        if (!notify_queue_.push(std::move(task), 0ms)) {
+            spdlog::warn(
+                "Run {}: notification queue full — dropping hook",
+                ctx.run_id);
+        }
+    }
+}
+
+void Pipeline::notify_worker(std::stop_token stop) {
+    while (!stop.stop_requested()) {
+        auto task = notify_queue_.pop(std::chrono::milliseconds(500));
+        if (!task) continue;
+        dispatch_notification(*task);
+    }
+}
+
+void Pipeline::dispatch_notification(const NotifyTask& task) {
+    // Template: {{ workflow }} {{ run_id }} {{ status }} {{ trigger }}.
+    std::string message = task.def.message_template;
+    auto replace_all = [&message](const std::string& token,
+                                  const std::string& value) {
+        size_t pos = 0;
+        while ((pos = message.find(token, pos)) != std::string::npos) {
+            message.replace(pos, token.size(), value);
+            pos += value.size();
+        }
+    };
+    replace_all("{{ workflow }}", task.workflow);
+    replace_all("{{workflow}}", task.workflow);
+    replace_all("{{ run_id }}", task.run_id);
+    replace_all("{{run_id}}", task.run_id);
+    replace_all("{{ status }}", task.status);
+    replace_all("{{status}}", task.status);
+    replace_all("{{ trigger }}", task.trigger);
+    replace_all("{{trigger}}", task.trigger);
+
+    // Commands get the same substitution (paths, args).
+    std::string command = task.def.command;
+    auto render = [&command](const std::string& token,
+                             const std::string& value) {
+        size_t pos = 0;
+        while ((pos = command.find(token, pos)) != std::string::npos) {
+            command.replace(pos, token.size(), value);
+            pos += value.size();
+        }
+    };
+    render("{{ workflow }}", task.workflow);
+    render("{{workflow}}", task.workflow);
+    render("{{ run_id }}", task.run_id);
+    render("{{run_id}}", task.run_id);
+    render("{{ status }}", task.status);
+    render("{{status}}", task.status);
+    render("{{ trigger }}", task.trigger);
+    render("{{trigger}}", task.trigger);
+
+    if (task.def.type == NotificationDef::Type::Webhook) {
+        if (!deps_.webhook_post) {
+            spdlog::warn(
+                "Webhook notification skipped (no delivery hook "
+                "configured): {}", message);
+            return;
+        }
+        nlohmann::json body;
+        body["text"] = message;
+        try {
+            deps_.webhook_post(task.def.url, body.dump());
+        } catch (const std::exception& e) {
+            spdlog::warn("Webhook notification failed: {}", e.what());
+        }
+        return;
+    }
+
+    // Command: fire-and-forget with a 10s budget (§15.4). The
+    // rendered message rides along as KAIROS_NOTIFY_MESSAGE.
+    if (!deps_.notification_process_factory) {
+        spdlog::warn(
+            "Command notification skipped (no process factory): {}",
+            message);
+        return;
+    }
+    exec::ProcessSpec spec;
+    spec.command_line = command;
+    spec.use_shell = true;
+    spec.timeout = std::chrono::seconds(10);
+    spec.environment["KAIROS_NOTIFY_MESSAGE"] = message;
+    spec.environment["KAIROS_RUN_ID"] = task.run_id;
+    spec.environment["KAIROS_WORKFLOW"] = task.workflow;
+
+    try {
+        auto handle = deps_.notification_process_factory();
+        if (handle->spawn(spec)) {
+            std::stop_source src;  // never stopped — spec.timeout bounds it
+            handle->wait(src.get_token());
+        }
+    } catch (const std::exception& e) {
+        spdlog::warn("Command notification failed: {}", e.what());
     }
 }
 
@@ -98,6 +239,24 @@ RunStatus Pipeline::process_event(const TriggerEvent& event,
     ctx.trigger_id = event.trigger_id;
     ctx.correlation_id = event.correlation_id;
     ctx.now = deps_.clock->now();
+    // §10.3: capture watch-event metadata for env forwarding.
+    if (auto* fe = std::get_if<engine::FileEventPayload>(
+            &event.payload)) {
+        ctx.trigger_meta.event_type = fe->event_type;
+        ctx.trigger_meta.watch_group = fe->watch_group;
+        ctx.trigger_meta.affected_paths = fe->changed_paths;
+    } else if (auto* fd = std::get_if<engine::FileDiffPayload>(
+                   &event.payload)) {
+        ctx.trigger_meta.event_type = fd->diff_summary;
+        ctx.trigger_meta.watch_group = fd->watch_group;
+        ctx.trigger_meta.rule_name = fd->rule_name;
+        ctx.trigger_meta.affected_paths = fd->affected_paths;
+    }
+    if (auto* manual = std::get_if<engine::ManualRunPayload>(
+            &event.payload)) {
+        ctx.dry_run = manual->dry_run;
+        if (ctx.dry_run) ctx.trigger_type = "dry-run";
+    }
 
     if (deps_.active_runs) deps_.active_runs->increment(event.target_id);
 
@@ -131,6 +290,11 @@ RunStatus Pipeline::process_event(const TriggerEvent& event,
     ctx.run_status = status;
 
     persist_run_complete(ctx);
+
+    // §15.4: fire notification hooks (async, best-effort).
+    if (!ctx.dry_run) {
+        enqueue_notifications(ctx, status);
+    }
 
     // Close RunStream subscribers for this run (§14.7).
     // Any live followers (CLI --follow, MCP, SSE) will see
@@ -461,54 +625,133 @@ RunStatus Pipeline::execute_job(const std::string& job_id, RunContext& ctx,
                 });
         }
 
-        // Submit to runner pool and wait for completion.
-        // Uses promise/future instead of CV+atomic: the shared state is
-        // heap-allocated, so it's safe even if the worker thread is still
-        // unwinding from set_value() when we destroy locals here.
-        // Wrapped in shared_ptr because std::function requires copyable callables.
-        auto step_promise = std::make_shared<std::promise<exec::ProcessResult>>();
-        auto step_future = step_promise->get_future();
+        // §15.1 dry-run: no process is spawned — log what would run,
+        // then treat the step as an immediate success.
+        if (ctx.dry_run) {
+            std::string cwd = proc_spec.working_dir.empty()
+                ? std::string("(inherit)")
+                : proc_spec.working_dir.string();
+            std::string line = "[dry-run] step '" + step.step_name +
+                "' would run: " + step.command +
+                "  (cwd: " + cwd +
+                ", timeout: " +
+                (step.timeout ? std::to_string(step.timeout->count()) + "s"
+                              : std::string("default")) +
+                ")\n";
+            output_mux.deliver(line, false);
 
-        exec::WorkItem item;
-        item.run_id = ctx.run_id;
-        item.job_id = job_id;
-        item.step_id = step.step_id;
-        item.correlation_id = ctx.correlation_id;
-        item.process_spec = std::move(proc_spec);
-        item.output_callback = exec::make_output_callback(output_mux);
-        // Per-run cancel token (§23.10): the runner pool will merge
-        // this with the global stop token so that cancelling a single
-        // run kills only that run's processes.
-        if (ctx.cancel_token.stop_possible()) {
-            item.cancel_token = ctx.cancel_token;
-        }
-        item.on_complete = [step_promise](
-            const std::string&, exec::ProcessResult result) {
-            step_promise->set_value(std::move(result));
-        };
-
-        bool submitted = deps_.runner_pool ?
-            deps_.runner_pool->submit(std::move(item)) : false;
-
-        if (!submitted) {
-            spdlog::error("Run {}: failed to submit step '{}' to runner pool",
-                          ctx.run_id, step.step_name);
-            ctx.job_statuses[job_id].exit_code = 202;
-            return RunStatus::Failure;
+            if (deps_.db_writer) {
+                deps_.db_writer->enqueue(persist::InsertStepRun{
+                    .run_id = ctx.run_id, .job_id = job_id,
+                    .step_id = step.step_id, .step_name = step.step_name,
+                    .command = step.command,
+                    .status = "SUCCESS",
+                    .start_ts = format_iso8601(deps_.clock->now()),
+                });
+            }
+            continue;  // Next step — nothing failed, nothing ran.
         }
 
-        // Block until the worker completes the step.
-        auto step_result = step_future.get();
+        // §8: ensure the output directory exists before the step runs.
+        if (!deps_.data_dir.empty()) {
+            std::error_code ec;
+            std::filesystem::create_directories(
+                output_file_path(ctx.run_id, job_id, step.step_id)
+                    .parent_path(),
+                ec);
+        }
 
-        // Persist step.
-        if (deps_.db_writer) {
-            deps_.db_writer->enqueue(persist::InsertStepRun{
-                .run_id = ctx.run_id, .job_id = job_id,
-                .step_id = step.step_id, .step_name = step.step_name,
-                .command = step.command,
-                .status = step_result.success() ? "SUCCESS" : "FAILURE",
-                .start_ts = format_iso8601(deps_.clock->now()),
-            });
+        // Submit to runner pool and wait for completion, retrying per
+        // the step's §15.2 policy. Each attempt gets a fresh WorkItem
+        // and its own step_runs row (attempt 1-based).
+        const int max_attempts =
+            (step.retry && step.retry->enabled())
+                ? step.retry->max_attempts : 1;
+        exec::ProcessResult step_result{};
+        bool submitted_ok = false;
+
+        for (int attempt = 1; attempt <= max_attempts; ++attempt) {
+            // Uses promise/future instead of CV+atomic: the shared state
+            // is heap-allocated, so it's safe even if the worker thread
+            // is still unwinding from set_value() when we destroy locals.
+            // Wrapped in shared_ptr: std::function needs copyables.
+            auto step_promise =
+                std::make_shared<std::promise<exec::ProcessResult>>();
+            auto step_future = step_promise->get_future();
+
+            exec::WorkItem item;
+            item.run_id = ctx.run_id;
+            item.job_id = job_id;
+            item.step_id = step.step_id;
+            item.correlation_id = ctx.correlation_id;
+            item.process_spec = proc_spec;  // copy — retries reuse it
+            item.output_callback = exec::make_output_callback(output_mux);
+            // Per-run cancel token (§23.10): the runner pool will merge
+            // this with the global stop token so that cancelling a
+            // single run kills only that run's processes.
+            if (ctx.cancel_token.stop_possible()) {
+                item.cancel_token = ctx.cancel_token;
+            }
+            item.on_complete = [step_promise](
+                const std::string&, exec::ProcessResult result) {
+                step_promise->set_value(std::move(result));
+            };
+
+            submitted_ok = deps_.runner_pool ?
+                deps_.runner_pool->submit(std::move(item)) : false;
+
+            if (!submitted_ok) {
+                spdlog::error("Run {}: failed to submit step '{}' "
+                              "to runner pool",
+                              ctx.run_id, step.step_name);
+                ctx.job_statuses[job_id].exit_code = 202;
+                return RunStatus::Failure;
+            }
+
+            // Block until the worker completes the attempt.
+            step_result = step_future.get();
+
+            // Persist this attempt (§15.2: one row per attempt).
+            if (deps_.db_writer) {
+                deps_.db_writer->enqueue(persist::InsertStepRun{
+                    .run_id = ctx.run_id, .job_id = job_id,
+                    .step_id = step.step_id,
+                    .step_name = step.step_name,
+                    .command = step.command,
+                    .status = step_result.success() ? "SUCCESS"
+                                                    : "FAILURE",
+                    .start_ts = format_iso8601(deps_.clock->now()),
+                    .attempt = attempt,
+                });
+            }
+
+            if (step_result.success()) break;
+
+            // Retryable? (last attempt, not enabled, or filtered code.)
+            bool retryable_code =
+                !step.retry || step.retry->retry_on.empty()
+                    ? true
+                    : std::find(step.retry->retry_on.begin(),
+                                step.retry->retry_on.end(),
+                                step_result.exit_code) !=
+                          step.retry->retry_on.end();
+            if (attempt >= max_attempts || !retryable_code) break;
+
+            auto wait = step.retry->delay_for(attempt);
+            spdlog::info("Run {}: step '{}' failed (exit {}) — retry "
+                         "{}/{} in {}ms",
+                         ctx.run_id, step.step_name,
+                         step_result.exit_code, attempt,
+                         max_attempts, wait.count());
+            if (wait.count() > 0) {
+                std::this_thread::sleep_for(wait);
+            }
+        }
+
+        // §8: capture outputs the step wrote (final state, after any
+        // retries appended to the same file).
+        if (step_result.success() && !ctx.dry_run) {
+            capture_step_outputs(ctx, *job_def, step, job_id);
         }
 
         if (!step_result.success()) {
@@ -535,8 +778,59 @@ ConditionDecision Pipeline::evaluate_condition(const DagNode& node,
     kel_ctx.variables["trigger"] = kel::KelValue(ctx.trigger_type);
     kel_ctx.variables["run_id"] = kel::KelValue(ctx.run_id);
 
+    // §8: output('job', 'step', 'key') reads the current run's
+    // captured outputs (jobs in earlier DAG levels are done by now).
+    kel_ctx.functions["output"] =
+        [&ctx](const std::vector<kel::KelValue>& args) -> kel::KelValue {
+        if (args.size() != 3 || !args[0].is_string() ||
+            !args[1].is_string() || !args[2].is_string()) {
+            throw kel::KelEvalError(
+                "output() requires three string arguments "
+                "(job_name, step_name, key)");
+        }
+        const auto& job_name = args[0].as_string();
+        const auto& step_name = args[1].as_string();
+        const auto& key = args[2].as_string();
+        auto jit = ctx.outputs.find(job_name);
+        if (jit != ctx.outputs.end()) {
+            auto sit = jit->second.find(step_name);
+            if (sit != jit->second.end()) {
+                auto kit = sit->second.find(key);
+                if (kit != sit->second.end()) {
+                    return kel::KelValue(kit->second);
+                }
+            }
+        }
+        throw kel::KelEvalError(
+            "output('" + job_name + "', '" + step_name + "', '" + key +
+            "') is not available in this run (yet)");
+    };
+
     if (deps_.query_reader)
         deps_.query_reader->register_kel_bindings(kel_ctx, ctx.now);
+
+    // Phase 8.5: Register has_tag(entity_id, tag) → bool.
+    // Checks all entity types (workflow, job, watch_group, trigger).
+    if (deps_.tag_store) {
+        auto* ts = deps_.tag_store;
+        kel_ctx.functions["has_tag"] = [ts](
+            const std::vector<kel::KelValue>& args) -> kel::KelValue
+        {
+            if (args.size() != 2 || !args[0].is_string() || !args[1].is_string())
+                throw kel::KelEvalError(
+                    "has_tag() requires two string arguments (entity_id, tag)");
+            const auto& entity_id = args[0].as_string();
+            const auto& tag = args[1].as_string();
+            // Check all entity types sequentially.
+            static const std::string types[] = {
+                "workflow", "job", "watch_group", "trigger"};
+            for (const auto& t : types) {
+                if (ts->has_tag(t, entity_id, tag))
+                    return kel::KelValue(true);
+            }
+            return kel::KelValue(false);
+        };
+    }
 
     try {
         auto result = kel::eval_expression(expr, kel_ctx, config_.kel_limits);
@@ -566,20 +860,170 @@ ConditionDecision Pipeline::check_needs(const DagNode& node,
     return ConditionDecision::run();
 }
 
+/// §8: per-step output file location.
+std::filesystem::path Pipeline::output_file_path(
+    const std::string& run_id, const std::string& job_id,
+    const std::string& step_id) const
+{
+    return deps_.data_dir / "runs" / run_id / "outputs" / job_id /
+           (step_id + ".env");
+}
+
+/// §8.4 safety: validate captured outputs. Throws on violation.
+void Pipeline::validate_step_outputs(
+    const std::unordered_map<std::string, std::string>& outputs,
+    std::size_t existing_bytes) const
+{
+    constexpr std::size_t kMaxValueBytes = 64 * 1024;
+    constexpr std::size_t kMaxRunBytes = 1024 * 1024;
+    std::size_t total = existing_bytes;
+    static const std::regex key_re("^[A-Za-z_][A-Za-z0-9_]*$");
+    for (const auto& [k, v] : outputs) {
+        if (!std::regex_match(k, key_re)) {
+            throw std::runtime_error(
+                "invalid output key '" + k +
+                "' (allowed: letters, digits, _, no leading digit)");
+        }
+        if (v.size() > kMaxValueBytes) {
+            throw std::runtime_error(
+                "output value for '" + k + "' exceeds 64 KiB");
+        }
+        total += k.size() + v.size();
+    }
+    if (total > kMaxRunBytes) {
+        throw std::runtime_error(
+            "run outputs exceed the 1 MiB per-run budget");
+    }
+}
+
+/// §8: read the step's output file, validate, persist, and update the
+/// in-run context. Missing file = no outputs (normal case).
+void Pipeline::capture_step_outputs(
+    RunContext& ctx, const JobDef& job, const StepDef& step,
+    const std::string& job_id)
+{
+    auto path = output_file_path(ctx.run_id, job_id, step.step_id);
+    std::error_code ec;
+    if (!std::filesystem::is_regular_file(path, ec) || ec) return;
+
+    std::ifstream in(path, std::ios::binary);
+    if (!in) return;
+    std::string content((std::istreambuf_iterator<char>(in)),
+                        std::istreambuf_iterator<char>());
+    auto parsed = exec::parse_env_file_content(content);
+
+    try {
+        validate_step_outputs(parsed, ctx.outputs_bytes);
+    } catch (const std::exception& e) {
+        spdlog::error("Run {}: step '{}' outputs rejected: {}",
+                      ctx.run_id, step.step_name, e.what());
+        return;  // Invalid outputs are dropped, not fatal.
+    }
+
+    if (parsed.empty()) return;
+
+    for (const auto& [k, v] : parsed) {
+        ctx.outputs_bytes += k.size() + v.size();
+        ctx.outputs[job.job_name][step.step_name][k] = v;
+    }
+
+    if (deps_.db_writer) {
+        persist::BatchInsertRunOutputs batch;
+        batch.run_id = ctx.run_id;
+        batch.job_id = job_id;
+        batch.step_id = step.step_id;
+        batch.entries.assign(parsed.begin(), parsed.end());
+        deps_.db_writer->enqueue(std::move(batch));
+    }
+}
+
+/// §8.3: substitute ${{ steps.<step>.KEY }} (job scope) and
+/// ${{ jobs.<job>.<step>.KEY }} (workflow scope) from the run context.
+/// Unresolvable references fail the job with a clear message.
+std::string Pipeline::resolve_output_refs(
+    const std::string& text, const JobDef& current_job,
+    const RunContext& ctx) const
+{
+    // ${{ steps.<step>.KEY }} or ${{ jobs.<job>.<step>.KEY }}
+    static const std::regex re(
+        R"regex(\$\{\{\s*(?:steps\.([A-Za-z0-9_.\-]+)|jobs\.([A-Za-z0-9_.\-]+)\.([A-Za-z0-9_.\-]+))\.([A-Za-z_][A-Za-z0-9_]*)\s*\}\})regex");
+    std::string result;
+    auto begin = std::sregex_iterator(text.begin(), text.end(), re);
+    auto end = std::sregex_iterator();
+    size_t last = 0;
+    for (auto it = begin; it != end; ++it) {
+        const auto& m = *it;
+        result.append(text, last, static_cast<size_t>(m.position()) - last);
+
+        std::string job_name = current_job.job_name;
+        std::string step_name;
+        if (m[1].matched) {
+            step_name = m[1].str();                 // steps.<step>.KEY
+        } else {
+            job_name = m[2].str();                  // jobs.<job>.<step>.KEY
+            step_name = m[3].str();
+        }
+        const std::string key = m[4].str();
+
+        auto jit = ctx.outputs.find(job_name);
+        if (jit == ctx.outputs.end()) {
+            throw std::runtime_error(
+                "unknown output reference '" + m.str() +
+                "': job '" + job_name + "' has no captured outputs");
+        }
+        auto sit = jit->second.find(step_name);
+        if (sit == jit->second.end()) {
+            throw std::runtime_error(
+                "unknown output reference '" + m.str() +
+                "': step '" + step_name + "' has no captured outputs");
+        }
+        auto kit = sit->second.find(key);
+        if (kit == sit->second.end()) {
+            throw std::runtime_error(
+                "unknown output reference '" + m.str() + "': key '" +
+                key + "' was not set");
+        }
+        result += kit->second;
+        last = static_cast<size_t>(m.position() + m.length());
+    }
+    result.append(text, last, text.size() - last);
+    return result;
+}
+
 exec::ProcessSpec Pipeline::build_process_spec(
     const StepDef& step, const JobDef& job, const RunContext& ctx)
 {
     exec::ProcessSpec spec;
-    spec.command_line = step.command;
+    spec.command_line = resolve_output_refs(step.command, job, ctx);
     spec.use_shell = step.use_shell;
     if (!step.working_dir.empty()) spec.working_dir = step.working_dir;
     else if (!job.working_dir.empty()) spec.working_dir = job.working_dir;
     spec.timeout = step.timeout;
 
     // Build environment via the 7-layer EnvBuilder (§14.6).
+    //
+    // §11 env_file layer: loaded at execution time; relative paths
+    // resolve against the effective working directory. Merged as its
+    // own layer BEFORE the job inline env — later layers override, so
+    // inline `env:` always wins over files, and later files win over
+    // earlier ones (map insert-or-assign below).
+    std::unordered_map<std::string, std::string> env_file_layer;
+    if (!job.env_files.empty()) {
+        std::filesystem::path base =
+            !spec.working_dir.empty()
+                ? std::filesystem::path(spec.working_dir)
+                : std::filesystem::current_path();
+        for (const auto& f : job.env_files) {
+            for (const auto& [k, v] : exec::load_env_file(f, base)) {
+                env_file_layer.insert_or_assign(k, v);
+            }
+        }
+    }
+
     exec::EnvBuilder builder;
-    builder.inherit_parent()
-           .add_job(job.env)
+    builder.inherit_parent();
+    if (!env_file_layer.empty()) builder.add_job(env_file_layer);
+    builder.add_job(job.env)
            .add_step(step.env);
 
     // Layer 6: Resolve ${{ secrets.key }} references (§17.1).
@@ -592,9 +1036,46 @@ exec::ProcessSpec Pipeline::build_process_spec(
         ctx.run_id, job.job_id, step.step_id,
         ctx.workflow_id, ctx.trigger_type,
         ctx.correlation_id,
-        "", "");  // data_dir and db_path filled by config
+        deps_.data_dir.string(), "");
+
+    // §9.3: in-step query variables (best-effort — no reader, skip).
+    if (deps_.query_reader) {
+        auto start_iso = format_iso8601(ctx.now);
+        auto prev_id = deps_.query_reader->previous_run_id(
+            ctx.workflow_name, start_iso);
+        builder.add_query_vars(
+            deps_.query_reader->run_number_for(
+                ctx.workflow_name, start_iso),
+            prev_id.empty()
+                ? ""
+                : deps_.query_reader->run_status_by_id(prev_id),
+            prev_id);
+    }
 
     spec.environment = builder.build();
+
+    // §10.3: forward watch-event metadata as environment variables.
+    if (!ctx.trigger_meta.watch_group.empty()) {
+        auto& env = spec.environment;
+        env["KAIROS_TRIGGER_EVENT_TYPE"] = ctx.trigger_meta.event_type;
+        env["KAIROS_TRIGGER_WATCH_GROUP"] =
+            ctx.trigger_meta.watch_group;
+        env["KAIROS_TRIGGER_RULE"] = ctx.trigger_meta.rule_name;
+        std::string files;
+        for (const auto& p : ctx.trigger_meta.affected_paths) {
+            if (!files.empty()) files += ",";
+            files += p;
+        }
+        env["KAIROS_TRIGGER_AFFECTED_FILES"] = files;
+    }
+
+    // §8 shared context: the step appends "KEY=VALUE" lines here;
+    // the pipeline captures the file after the step completes.
+    if (!deps_.data_dir.empty()) {
+        spec.environment["KAIROS_OUTPUT"] =
+            output_file_path(ctx.run_id, job.job_id, step.step_id)
+                .string();
+    }
     return spec;
 }
 

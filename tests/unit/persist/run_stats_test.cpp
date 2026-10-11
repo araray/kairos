@@ -22,6 +22,14 @@
 #include <gtest/gtest.h>
 
 #include <filesystem>
+
+#ifdef _WIN32
+#include <process.h>
+static long kairos_test_pid() { return _getpid(); }
+#else
+#include <unistd.h>
+static long kairos_test_pid() { return ::getpid(); }
+#endif
 #include <string>
 
 namespace fs = std::filesystem;
@@ -33,7 +41,9 @@ namespace {
 class RunStatsTest : public ::testing::Test {
 protected:
     void SetUp() override {
-        db_path_ = fs::temp_directory_path() / "kairos_run_stats_test.db";
+        db_path_ = fs::temp_directory_path() /
+            ("kairos_run_stats_test_" +
+             std::to_string(kairos_test_pid()) + ".db");
         fs::remove(db_path_);
         db_ = kairos::persist::open_database(db_path_);
     }

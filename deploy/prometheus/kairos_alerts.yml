@@ -1,0 +1,74 @@
+# Kairos — recommended Prometheus alerting rules (Roadmap §15.15)
+#
+# The daemon exposes GET /metrics in Prometheus text format. Import this
+# file into Prometheus (rule_files) and adjust thresholds to taste.
+#
+# Available metrics (partial):
+#   kairos_runs_total{status=SUCCESS|FAILURE|...}   counter
+#   kairos_active_runs                              gauge
+#   kairos_pipeline_depth                           gauge (trigger bus)
+#   kairos_uptime_seconds                           gauge
+
+groups:
+  - name: kairos
+    rules:
+      - alert: KairosJobFailureRate
+        expr: |
+          sum(rate(kairos_runs_total{status="FAILURE"}[1h]))
+            /
+          clamp_min(sum(rate(kairos_runs_total[1h])), 0.001) > 0.5
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Kairos failure rate above 50% (1h)"
+          description: >-
+            More than half of Kairos runs are failing over the last
+            hour. Check `kairos runs list --status FAILURE` for details.
+
+      - alert: KairosNoSuccessfulRuns
+        expr: |
+          sum(increase(kairos_runs_total{status="SUCCESS"}[6h])) == 0
+          and
+          sum(increase(kairos_runs_total[6h])) > 0
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "No successful Kairos runs in 6h"
+          description: >-
+            Runs are happening but none succeed — likely an environment
+            or dependency problem rather than scheduling.
+
+      - alert: KairosPipelineBacklog
+        expr: kairos_pipeline_depth > 100
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Kairos trigger bus backed up ({{ $value }} pending)"
+          description: >-
+            The pipeline is not keeping up with triggers; runs may be
+            delayed or dropped when the bounded queue fills.
+
+      - alert: KairosDaemonDown
+        expr: kairos_uptime_seconds < 60
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Kairos daemon recently restarted"
+          description: >-
+            Uptime under a minute for 2m — the daemon is crash-looping
+            or being repeatedly restarted.
+
+      - alert: KairosRunsStuck
+        expr: kairos_active_runs > 0 and on() (kairos_active_runs > 5)
+        for: 1h
+        labels:
+          severity: info
+        annotations:
+          summary: "{{ $value }} Kairos runs active for over an hour"
+          description: >-
+            Long-running or stuck jobs; check `kairos status --health`
+            (stale_runs check) and consider cancelling.

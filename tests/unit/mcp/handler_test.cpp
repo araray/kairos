@@ -105,7 +105,7 @@ TEST_F(McpHandlerTest, ToolsListReturns14Tools) {
     EXPECT_TRUE(result.contains("tools"));
     auto& tools = result["tools"];
     // 14 tools from spec §22.4 + 1 additional (watchScanOnce) = 15.
-    EXPECT_EQ(tools.size(), 15);
+    EXPECT_EQ(tools.size(), 16);
 
     // Verify all expected tool names are present.
     std::vector<std::string> expected_names = {
@@ -116,8 +116,7 @@ TEST_F(McpHandlerTest, ToolsListReturns14Tools) {
         "kairos.getStepOutput", "kairos.listWatchGroups",
         "kairos.getEvents",     "kairos.watchScanOnce",
         "kairos.reloadConfig",  "kairos.explainPlan",
-        "kairos.getMetrics",
-    };
+        "kairos.getMetrics",  "kairos.search"};
     EXPECT_EQ(tools.size(), expected_names.size());
 
     // Verify each tool has name, description, inputSchema.

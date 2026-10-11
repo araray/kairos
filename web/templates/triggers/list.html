@@ -1,0 +1,30 @@
+<!-- Triggers list (wrapped by base.html) -->
+<!-- Data: triggers[{id, target_name, target_kind, type, expression,
+     next_fire, ms_until_fire, when, enabled, max_instances}] -->
+
+<h4 class="page-header">Schedule Triggers</h4>
+
+<div class="card p-3">
+  <div class="table-responsive">
+    <table class="table table-sm table-hover mb-0">
+      <thead>
+        <tr><th>Trigger</th><th>Target</th><th>Type</th><th>Schedule</th><th>Next Fire</th><th>In</th></tr>
+      </thead>
+      <tbody>
+{% for t in triggers %}
+        <tr>
+          <td><code>{{ t.id }}</code></td>
+          <td><strong>{{ t.target_name }}</strong> <span class="text-muted small">({{ t.target_kind }})</span></td>
+          <td class="fit"><span class="badge badge-primary">{{ t.type }}</span></td>
+          <td><code>{{ t.expression }}</code></td>
+          <td class="fit">{{ t.next_fire }}</td>
+          <td class="fit text-muted">{{ t.when }}</td>
+        </tr>
+{% endfor %}
+{% if length(triggers) == 0 %}
+        <tr><td colspan="6" class="text-center k-empty py-4">No triggers configured — workflows run manually only</td></tr>
+{% endif %}
+      </tbody>
+    </table>
+  </div>
+</div>

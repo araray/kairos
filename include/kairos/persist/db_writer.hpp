@@ -40,6 +40,7 @@ struct InsertRun {
     std::string correlation_id;
     std::string status;             ///< "RUNNING"
     std::string start_ts;           ///< ISO-8601
+    std::string tags_json;          ///< §6 JSON array of tags (propagated from config)
 };
 
 /// Update a completed run record.
@@ -80,6 +81,7 @@ struct InsertStepRun {
     std::string command;
     std::string status;             ///< "RUNNING"
     std::string start_ts;
+    int attempt = 1;              ///< §15.2 retry attempt (1-based).
 };
 
 /// Update a completed step record.
@@ -170,6 +172,23 @@ struct PruneOlderThan {
     std::string cutoff_date;        ///< ISO-8601
 };
 
+/// Pin/unpin a run — pinned runs survive retention pruning (§15.6).
+struct UpdateRunPinned {
+    std::string run_id;
+    bool pinned = true;
+};
+
+/// §15.11: apply a per-workflow retention override. Deletes the
+/// oldest runs of one target beyond max_runs, and runs older than
+/// max_age_days (keeping failures when requested). Pinned runs and
+/// the global cutoff are unaffected.
+struct PruneWorkflowRetention {
+    std::string target_name;
+    int max_runs = 0;           ///< 0 = skip the count-based rule.
+    int max_age_days = 0;       ///< 0 = skip the age-based rule.
+    bool keep_failures = true;
+};
+
 /// Insert a metrics snapshot (periodic persistence per §20.5).
 struct InsertMetricsSnapshot {
     std::string metric_name;
@@ -189,6 +208,25 @@ struct PruneMetricsSnapshots {
     int retention_days = 7;              ///< Delete snapshots older than this many days.
 };
 
+/// Persist one step's outputs (Roadmap §8): all key→value pairs the
+/// step wrote to $KAIROS_OUTPUT, in one batch.
+struct BatchInsertRunOutputs {
+    std::string run_id;
+    std::string job_id;
+    std::string step_id;
+    std::vector<std::pair<std::string, std::string>> entries;
+};
+
+/// Append an audit-log entry — records every mutation (config writes,
+/// run triggers/cancels, reloads) with its actor.
+/// Spec reference: Roadmap §15.14 (audit log), §3.8.2 (write API safety).
+struct InsertAuditEntry {
+    std::string actor;               ///< "cli" | "mcp" | "http" | "scheduler" …
+    std::string action;              ///< "create_workflow" | "cancel_run" …
+    std::string target;              ///< Entity name/ID (may be empty).
+    std::string detail_json;         ///< Additional context (JSON object).
+};
+
 /// Union of all write request types.
 using DBWriteRequest = std::variant<
     InsertRun, UpdateRunComplete,
@@ -200,7 +238,11 @@ using DBWriteRequest = std::variant<
     BatchInsertWatchSamples, PruneWatchSamples,
     PruneOlderThan,
     InsertMetricsSnapshot, BatchInsertMetricsSnapshots,
-    PruneMetricsSnapshots
+    PruneMetricsSnapshots,
+    InsertAuditEntry,
+    BatchInsertRunOutputs,
+    UpdateRunPinned,
+    PruneWorkflowRetention
 >;
 
 // ── DB Writer ────────────────────────────────────────────────────────────
@@ -275,6 +317,7 @@ private:
     std::unique_ptr<SQLite::Statement> stmt_insert_watch_sample_;
     std::unique_ptr<SQLite::Statement> stmt_insert_watch_event_;
     std::unique_ptr<SQLite::Statement> stmt_insert_metrics_snapshot_;
+    std::unique_ptr<SQLite::Statement> stmt_insert_audit_;
 };
 
 }  // namespace kairos::persist

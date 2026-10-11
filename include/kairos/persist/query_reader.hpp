@@ -155,6 +155,25 @@ public:
         int limit = 50,
         const std::string& watch_group = "") const;
 
+    /// Get a single watch event by its event_uid (the row id).
+    /// @return nullopt when no event has this id.
+    [[nodiscard]] std::optional<WatchEventRow> get_watch_event(
+        const std::string& event_uid) const;
+
+    // ── Run outputs (Roadmap §8) ──────────────────────────────────
+
+    /// One captured step output.
+    struct RunOutputRow {
+        std::string job_id;
+        std::string step_id;
+        std::string key;
+        std::string value;
+    };
+
+    /// All outputs captured for a run, ordered by job then key.
+    [[nodiscard]] std::vector<RunOutputRow> get_run_outputs(
+        const std::string& run_id) const;
+
     // ── Run summary stats (for CLI status) ───────────────────────
 
     /// Summary statistics for `kairos status` display.
@@ -167,6 +186,30 @@ public:
 
     /// Query aggregate run statistics from the database.
     [[nodiscard]] RunStats query_run_stats() const;
+
+    /// Count RUNNING runs started more than `timeout_seconds` ago
+    /// (Roadmap §15.5 stale-run check).
+    [[nodiscard]] int64_t count_stale_runs(int timeout_seconds) const;
+
+    // ── In-step query env (Roadmap §9.3) ──────────────────────────
+
+    /// Sequential run number for a target: count of prior runs with
+    /// the same target_name started before the given run's start_ts.
+    [[nodiscard]] int64_t run_number_for(
+        const std::string& target_name,
+        const std::string& run_start_ts) const;
+
+    /// The run_id immediately preceding the given run for the same
+    /// target (by start_ts). Empty when none exists.
+    [[nodiscard]] std::string previous_run_id(
+        const std::string& target_name,
+        const std::string& run_start_ts) const;
+
+    /// Status of the run with the given id (empty when unknown).
+    [[nodiscard]] std::string run_status_by_id(
+        const std::string& run_id) const;
+
+
 
     /// Query the database file size in bytes.
     /// @param db_path  Path to the SQLite database file.
@@ -187,6 +230,8 @@ public:
         std::string start_ts;
         std::string end_ts;
         int64_t duration_ms = 0;
+        std::string tags_json;         ///< §6 JSON array of tags (from runs.tags_json)
+        bool pinned = false;           ///< §15.6 survives retention pruning
     };
 
     /// Query recent runs with optional filters.
@@ -200,9 +245,37 @@ public:
         const std::string& target_filter = "",
         const std::string& since = "") const;
 
+    // ── Run ID prefix resolution (§1.1 — Roadmap Phase 6) ──────
+
+    /// Result of resolving a run ID prefix.
+    struct PrefixResult {
+        enum Status { kExact, kUnique, kAmbiguous, kNotFound, kEmpty };
+        Status status = kNotFound;
+        std::string resolved_id;        ///< Full run_id (if kExact or kUnique).
+        std::vector<std::string> candidates;  ///< Multiple matches (if kAmbiguous).
+    };
+
+    /// Resolve a (possibly truncated) run ID prefix to a full run_id.
+    ///
+    /// Logic:
+    ///  - If prefix is empty → kEmpty.
+    ///  - If prefix length >= 36 (full UUID) → exact match.
+    ///  - Otherwise → LIKE prefix% query.
+    ///    - 0 results → kNotFound.
+    ///    - 1 result  → kUnique (returns full ID).
+    ///    - N results → kAmbiguous (returns up to 10 candidates).
+    [[nodiscard]] PrefixResult resolve_run_id_prefix(
+        const std::string& prefix) const;
+
     /// Get a single run summary by run_id.
     [[nodiscard]] std::optional<RunSummary> get_run_summary(
         const std::string& run_id) const;
+
+    /// Resolve a run by its correlation_id (the ID handed to submitters
+    /// of manual runs before the pipeline mints the actual run_id).
+    /// Returns the most recent matching run_id, or nullopt.
+    [[nodiscard]] std::optional<std::string> get_run_id_by_correlation(
+        const std::string& correlation_id) const;
 
     /// Full run detail with jobs and steps (§16.6).
     struct StepDetail {
@@ -261,6 +334,24 @@ public:
         int64_t after_id = 0,
         int limit = 100) const;
 
+    // ── Export bundles (Roadmap §15.9) ────────────────────────────
+
+    /// One exported run with all nested job/step/log rows.
+    struct ExportedRun {
+        RunSummary run;
+        std::vector<JobDetail> jobs;   // steps nested inside
+        std::vector<LogChunk> logs;
+    };
+
+    /// Export runs (optionally since a cutoff) as full nested bundles.
+    [[nodiscard]] std::vector<ExportedRun> export_runs(
+        const std::string& since = "") const;
+
+    /// Export watch events (optionally since a cutoff, newest last).
+    [[nodiscard]] std::vector<WatchEventRow> export_events(
+        const std::string& since = "") const;
+
+
     // ── Metrics snapshot queries (§20.5) ────────────────────────
 
     /// A metrics snapshot row.
@@ -310,6 +401,26 @@ public:
     /// Query the maximum rowid in watch_events table.
     /// Returns 0 if no events exist.
     [[nodiscard]] int64_t query_max_event_id() const;
+
+    // ── Audit log queries (Roadmap §15.14) ────────────────────────
+
+    /// An audit-log row.
+    struct AuditRow {
+        int64_t id = 0;
+        std::string timestamp;
+        std::string actor;       ///< "cli" | "mcp" | "http" | …
+        std::string action;      ///< "create_workflow" | "cancel_run" | …
+        std::string target;      ///< Entity name/ID (may be empty).
+        std::string detail_json;
+    };
+
+    /// Query recent audit entries, newest first.
+    [[nodiscard]] std::vector<AuditRow> query_audit_log(
+        int limit = 50) const;
+
+    /// Export audit entries oldest-first (§15.9 bundles).
+    [[nodiscard]] std::vector<AuditRow> export_audit(
+        int limit = 10000) const;
 
 private:
     SQLite::Database& db_;

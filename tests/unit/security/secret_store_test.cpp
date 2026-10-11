@@ -24,6 +24,16 @@
 #include <unordered_map>
 #include <vector>
 
+#ifdef _WIN32
+// MSVC has no setenv/unsetenv — wrap _putenv_s (§12.2.3 tests).
+static int setenv_wrapper(const char* name, const char* value, int) {
+    return _putenv_s(name, value) == 0 ? 0 : -1;
+}
+static void unsetenv_wrapper(const char* name) { _putenv_s(name, ""); }
+#define setenv setenv_wrapper
+#define unsetenv(nm) unsetenv_wrapper(nm)
+#endif
+
 namespace kairos::security {
 namespace {
 
@@ -315,6 +325,46 @@ TEST(SecretStoreVaultTest, LoadVaultThrowsWhenNotCompiled) {
 }
 
 #endif  // KAIROS_VAULT
+
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  §12.2.3 environment-only secrets backend (Roadmap Phase 13)
+// ═══════════════════════════════════════════════════════════════════════════
+
+TEST(SecretEnvTest, LoadsPrefixedVariables) {
+    ASSERT_EQ(0, ::setenv("KAIROS_SECRET_DEPLOY_API_KEY", "tok-123", 1));
+    ASSERT_EQ(0, ::setenv("KAIROS_SECRET_DB_PASSWORD", "hunter2", 1));
+    ASSERT_EQ(0, ::setenv("UNRELATED_SECRET", "nope", 1));
+
+    SecretStore store;
+    auto count = store.load_from_env();
+    EXPECT_EQ(count, 2u);
+    EXPECT_EQ(*store.get("DEPLOY_API_KEY"), "tok-123");
+    EXPECT_EQ(*store.get("DB_PASSWORD"), "hunter2");
+    EXPECT_FALSE(store.get("UNRELATED_SECRET").has_value());
+    EXPECT_TRUE(store.is_loaded());
+
+    ::unsetenv("KAIROS_SECRET_DEPLOY_API_KEY");
+    ::unsetenv("KAIROS_SECRET_DB_PASSWORD");
+    ::unsetenv("UNRELATED_SECRET");
+}
+
+TEST(SecretEnvTest, CustomPrefix) {
+    ASSERT_EQ(0, ::setenv("MYAPP_KEY_X", "v", 1));
+    SecretStore store;
+    EXPECT_EQ(store.load_from_env("MYAPP_KEY_"), 1u);
+    EXPECT_EQ(*store.get("X"), "v");
+    ::unsetenv("MYAPP_KEY_X");
+}
+
+TEST(SecretEnvTest, ResolverExposesEnvSecrets) {
+    ASSERT_EQ(0, ::setenv("KAIROS_SECRET_TOKEN", "abc", 1));
+    SecretStore store;
+    store.load_from_env();
+    auto resolver = store.make_resolver();
+    EXPECT_EQ(resolver("TOKEN"), std::optional<std::string>("abc"));
+    ::unsetenv("KAIROS_SECRET_TOKEN");
+}
 
 }  // anonymous namespace
 }  // namespace kairos::security

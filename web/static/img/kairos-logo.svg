@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64" role="img" aria-label="Kairos logo">
+  <!-- Kairos mark: an opportune moment — clock hand meeting an hourglass -->
+  <circle cx="32" cy="32" r="28" fill="none" stroke="currentColor" stroke-width="4" opacity="0.9"/>
+  <path d="M32 12 L32 32 L47 41" fill="none" stroke="currentColor" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/>
+  <circle cx="32" cy="32" r="4" fill="currentColor"/>
+  <path d="M52 10 L58 10 L52 20 L58 30 L52 30" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" opacity="0.55"/>
+</svg>

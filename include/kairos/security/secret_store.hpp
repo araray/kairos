@@ -20,6 +20,12 @@
 #include <optional>
 #include <string>
 #include <string_view>
+
+#ifndef _WIN32
+#include <unistd.h>
+#else
+extern "C" char** _environ;
+#endif
 #include <unordered_map>
 #include <vector>
 
@@ -138,6 +144,40 @@ public:
     /// Load secrets from a pre-decrypted map (for testing or
     /// non-vault secret sources).
     void load_from_map(std::unordered_map<std::string, std::string> secrets);
+
+    /// §12.2.3: load secrets from environment variables.
+    /// Every variable named <prefix><KEY> (prefix default
+    /// "KAIROS_SECRET_") contributes secret KEY with its value —
+    /// e.g. KAIROS_SECRET_DEPLOY_API_KEY → secrets.deploy_api_key.
+    /// Case: the key keeps the variable's case after the prefix.
+    /// @return Number of secrets loaded.
+    std::size_t load_from_env(
+        const std::string& prefix = "KAIROS_SECRET_") {
+        std::unordered_map<std::string, std::string> found;
+#ifdef _WIN32
+        char** table = _environ;
+#else
+        char** table = environ;
+#endif
+        for (char** e = table; e && *e; ++e) {
+            std::string_view entry(*e);
+            if (entry.size() <= prefix.size()) continue;
+            if (entry.substr(0, prefix.size()) != prefix) continue;
+            auto eq = entry.find('=');
+            if (eq == std::string_view::npos || eq < prefix.size()) {
+                continue;
+            }
+            std::string key(
+                entry.substr(prefix.size(), eq - prefix.size()));
+            std::string value(entry.substr(eq + 1));
+            if (!key.empty()) {
+                found.emplace(std::move(key), std::move(value));
+            }
+        }
+        auto count = found.size();
+        load_from_map(std::move(found));
+        return count;
+    }
 
     /// Look up a secret by key.
     /// Returns std::nullopt if the key does not exist.

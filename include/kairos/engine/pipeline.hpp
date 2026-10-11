@@ -15,17 +15,22 @@
 #include "kairos/engine/execution_plan.hpp"
 #include "kairos/engine/trigger_event.hpp"
 #include "kairos/engine/trigger_types.hpp"
+#include "kairos/core/bounded_queue.hpp"
 #include "kairos/engine/workflow_registry.hpp"
 #include "kairos/exec/env_builder.hpp"
 #include "kairos/exec/output_sink.hpp"
+#include "kairos/exec/process_handle.hpp"
 #include "kairos/exec/runner_pool.hpp"
 #include "kairos/kel/evaluator.hpp"
 #include "kairos/persist/db_writer.hpp"
 #include "kairos/persist/query_reader.hpp"
+#include "kairos/persist/tag_store.hpp"
 #include "kairos/testing/fake_clock.hpp"
 
 #include <atomic>
+#include <filesystem>
 #include <functional>
+#include <map>
 #include <memory>
 #include <stop_token>
 #include <string>
@@ -80,6 +85,29 @@ struct RunContext {
     /// Per-run cancel token (from CancelRegistry, §23.10).
     /// Stored here so execute_job can set it on each WorkItem.
     std::stop_token cancel_token;
+
+    /// §15.1 dry-run: full pipeline execution, but every step logs what
+    /// would run and succeeds immediately — no processes are spawned.
+    bool dry_run = false;
+
+    /// §10.3: metadata of the triggering watch event (empty for
+    /// manual/schedule runs) — forwarded to steps as KAIROS_TRIGGER_*.
+    struct TriggerMeta {
+        std::string event_type;
+        std::string watch_group;
+        std::string rule_name;
+        std::vector<std::string> affected_paths;
+    } trigger_meta;
+
+    /// §8 shared context: outputs written by completed steps via
+    /// $KAIROS_OUTPUT, keyed job_name → step_name → key → value.
+    /// Filled as jobs finish, so later DAG levels read earlier ones.
+    std::map<std::string,
+             std::map<std::string,
+                      std::map<std::string, std::string>>> outputs;
+
+    /// Total size of captured outputs (§8.4: 1 MiB per-run cap).
+    std::size_t outputs_bytes = 0;
 
     /// Status of each job in this run.
     struct JobStatus {
@@ -143,9 +171,31 @@ public:
         exec::RunStream* run_stream = nullptr;
         CancelRegistry* cancel_registry = nullptr;
 
+        /// Tag store for KEL has_tag() builtin (Phase 8.5, Roadmap §6).
+        /// If null, has_tag() always returns false.
+        persist::TagStore* tag_store = nullptr;
+
         /// Secret resolver for ${{ secrets.key }} substitution (§17.1).
         /// If null, secret references are left unresolved.
         exec::EnvBuilder::SecretResolver secret_resolver;
+
+        /// Data directory — base for §8 per-run output files
+        /// (<data_dir>/runs/<run_id>/outputs/…). Empty disables capture.
+        std::filesystem::path data_dir;
+
+        /// §15.4: POST {"text": …} to a webhook URL. Wired by the
+        /// daemon when built with KAIROS_HTTP; null → webhook
+        /// notifications log a warning instead of firing.
+        std::function<void(const std::string& url,
+                           const std::string& body)>
+            webhook_post;
+
+        /// §15.4: process factory for command notifications. Core
+        /// cannot link the platform layer, so the host injects
+        /// exec::create_process_handle here; null → command
+        /// notifications log a warning instead of firing.
+        std::function<std::unique_ptr<exec::ProcessHandle>()>
+            notification_process_factory;
 
         /// Pre-sorted secret values for output masking (§17.3).
         /// Populated from SecretStore::values(), sorted longest-first.
@@ -174,6 +224,44 @@ public:
     void stop();
 
 private:
+    /// ── §15.4 notification dispatcher ─────────────────────────────
+    /// Fire-and-forget worker: the pipeline enqueues completed-run
+    /// notifications and never blocks on delivery. Bounded queue;
+    /// overflow drops with a log (notifications are best-effort).
+    struct NotifyTask {
+        NotificationDef def;
+        std::string workflow;
+        std::string run_id;
+        std::string status;
+        std::string trigger;
+    };
+    void notify_worker(std::stop_token stop);
+    void dispatch_notification(const NotifyTask& task);
+    void enqueue_notifications(const RunContext& ctx, RunStatus status);
+
+    core::BoundedQueue<NotifyTask> notify_queue_{64};
+    std::jthread notify_thread_;
+
+    /// §8: per-step output file path.
+    [[nodiscard]] std::filesystem::path output_file_path(
+        const std::string& run_id, const std::string& job_id,
+        const std::string& step_id) const;
+
+    /// §8.4: validate output keys/sizes (throws with reason).
+    void validate_step_outputs(
+        const std::unordered_map<std::string, std::string>& outputs,
+        std::size_t existing_bytes) const;
+
+    /// §8.3: resolve ${{ steps.* }} / ${{ jobs.*.* }} references.
+    [[nodiscard]] std::string resolve_output_refs(
+        const std::string& text, const JobDef& current_job,
+        const RunContext& ctx) const;
+
+    /// §8: capture + persist + publish one step's outputs.
+    void capture_step_outputs(RunContext& ctx, const JobDef& job,
+                              const StepDef& step,
+                              const std::string& job_id);
+
     /// Execute a complete workflow run.
     RunStatus execute_run(const WorkflowDag& dag,
                           RunContext& ctx,

@@ -4,6 +4,7 @@
 // ╚════════════════════════════════════════════════════════════════════════════╝
 
 #include "kairos/platform/paths.hpp"
+#include "kairos/platform/environment.hpp"
 
 #include <cstdlib>
 #include <pwd.h>
@@ -74,8 +75,8 @@ std::filesystem::path utf8_to_path(const std::string& s) {
 
 std::filesystem::path get_home_dir() {
     // Prefer $HOME, fall back to getpwuid.
-    if (const char* home = std::getenv("HOME"); home && home[0]) {
-        return fs::path(home);
+    if (auto home = get_env("HOME"); home && !home->empty()) {
+        return fs::path(*home);
     }
     if (struct passwd* pw = getpwuid(getuid()); pw) {
         return fs::path(pw->pw_dir);
@@ -88,8 +89,8 @@ std::filesystem::path get_config_dir() {
     return get_home_dir() / "Library" / "Application Support" / "kairos";
 #else
     // XDG Base Directory spec.
-    if (const char* xdg = std::getenv("XDG_CONFIG_HOME"); xdg && xdg[0]) {
-        return fs::path(xdg) / "kairos";
+    if (auto xdg = get_env("XDG_CONFIG_HOME"); xdg && !xdg->empty()) {
+        return fs::path(*xdg) / "kairos";
     }
     return get_home_dir() / ".config" / "kairos";
 #endif
@@ -99,8 +100,8 @@ std::filesystem::path get_data_dir() {
 #ifdef __APPLE__
     return get_home_dir() / "Library" / "Application Support" / "kairos";
 #else
-    if (const char* xdg = std::getenv("XDG_DATA_HOME"); xdg && xdg[0]) {
-        return fs::path(xdg) / "kairos";
+    if (auto xdg = get_env("XDG_DATA_HOME"); xdg && !xdg->empty()) {
+        return fs::path(*xdg) / "kairos";
     }
     return get_home_dir() / ".local" / "share" / "kairos";
 #endif
@@ -110,8 +111,8 @@ std::filesystem::path get_log_dir() {
 #ifdef __APPLE__
     return get_home_dir() / "Library" / "Logs" / "kairos";
 #else
-    if (const char* xdg = std::getenv("XDG_STATE_HOME"); xdg && xdg[0]) {
-        return fs::path(xdg) / "kairos";
+    if (auto xdg = get_env("XDG_STATE_HOME"); xdg && !xdg->empty()) {
+        return fs::path(*xdg) / "kairos";
     }
     return get_home_dir() / ".local" / "state" / "kairos";
 #endif

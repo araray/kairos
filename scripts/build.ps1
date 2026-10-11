@@ -29,6 +29,7 @@ param(
     [switch]$NoTests,
     [switch]$Http,
     [switch]$Otel,
+    [switch]$SystemOtel,
     [switch]$Vault,
     [switch]$Docker,
     [switch]$Tui,
@@ -124,6 +125,7 @@ if ($ShowHelp)
     Write-Host "    -Tests / -NoTests      Build test suite (default: on)"
     Write-Host "    -Http                  Build HTTP server + Web UI"
     Write-Host "    -Otel                  Build with OpenTelemetry tracing"
+    Write-Host "    -SystemOtel            Use system OTel SDK (enables OTLP; needs protobuf)"
     Write-Host "    -Vault                 Build with Ansible Vault support (OpenSSL)"
     Write-Host "    -Docker                Build with Docker runner support"
     Write-Host "    -Tui                   Build TUI dashboard (FTXUI)"
@@ -186,6 +188,7 @@ $BuildType = "Debug"
 $EnableTests = "ON"
 $EnableHttp = "OFF"
 $EnableOtel = "OFF"
+$EnableOtelSystem = "OFF"
 $EnableVault = "OFF"
 $EnableDocker = "OFF"
 $EnableTui = "OFF"
@@ -220,14 +223,18 @@ switch ($Profile)
 }
 
 # ── Windows platform adjustments ─────────────────────────────────────────
-# OTel (requires protobuf/abseil) and Vault (requires OpenSSL) are
-# not supported on Windows builds.  Disable them silently.
-if ($IsWindows -or ($env:OS -eq "Windows_NT")) {
-    if ($EnableOtel -eq "ON") {
-        Write-Host "  (i) OTel disabled on Windows (protobuf/abseil not available)" -ForegroundColor Yellow
-        $EnableOtel = "OFF"
+# OTel system SDK (needs protobuf/abseil) is not available on Windows.
+# FetchContent OTel (ostream exporter) works fine — only disable system mode.
+# Vault (requires OpenSSL) is not supported on Windows builds.
+if ($IsWindows -or ($env:OS -eq "Windows_NT"))
+{
+    if ($EnableOtelSystem -eq "ON")
+    {
+        Write-Host "  (i) OTel system SDK disabled on Windows (protobuf/abseil not available)" -ForegroundColor Yellow
+        $EnableOtelSystem = "OFF"
     }
-    if ($EnableVault -eq "ON") {
+    if ($EnableVault -eq "ON")
+    {
         Write-Host "  (i) Vault disabled on Windows (OpenSSL not available)" -ForegroundColor Yellow
         $EnableVault = "OFF"
     }
@@ -256,6 +263,9 @@ if ($Http)
 }
 if ($Otel)
 { $EnableOtel = "ON"
+}
+if ($SystemOtel)
+{ $EnableOtel = "ON"; $EnableOtelSystem = "ON"
 }
 if ($Vault)
 { $EnableVault = "ON"
@@ -313,7 +323,7 @@ if ($EnableHttp -eq "ON")
 { $features += "http"
 }
 if ($EnableOtel -eq "ON")
-{ $features += "otel"
+{ $features += "otel($(if ($EnableOtelSystem -eq 'ON') {'system'} else {'fetch'}))"
 }
 if ($EnableVault -eq "ON")
 { $features += "vault"
@@ -371,6 +381,7 @@ $CmakeArgs = @(
     "-DKAIROS_BUILD_TESTS=$EnableTests",
     "-DKAIROS_HTTP=$EnableHttp",
     "-DKAIROS_OTEL=$EnableOtel",
+    "-DKAIROS_OTEL_SYSTEM=$EnableOtelSystem",
     "-DKAIROS_VAULT=$EnableVault",
     "-DKAIROS_DOCKER=$EnableDocker",
     "-DKAIROS_TUI=$EnableTui"

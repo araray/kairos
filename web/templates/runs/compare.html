@@ -1,0 +1,72 @@
+<!-- Run comparison (wrapped by base.html) — Roadmap §3.8.6 -->
+<!-- Data: a, b (run summaries), jobs[{job, a_status, a_badge, a_exit,
+     a_dur, b_status, b_badge, b_exit, b_dur, same}] -->
+
+<nav aria-label="breadcrumb">
+  <ol class="breadcrumb">
+    <li class="breadcrumb-item"><a href="/runs">Runs</a></li>
+    <li class="breadcrumb-item active">Compare</li>
+  </ol>
+</nav>
+
+<div class="page-header"><h4>Run Comparison</h4></div>
+
+<div class="row g-4 mb-4">
+  <div class="col-md-6">
+    <div class="card p-3 h-100">
+      <h5><a href="/runs/{{ a.run_id }}"><code>{{ a.run_id_short }}</code></a></h5>
+      <table class="table table-sm mb-0">
+        <tr><td class="text-muted">Target</td><td>{{ a.target_name }}</td></tr>
+        <tr><td class="text-muted">Status</td><td><span class="badge badge-{{ a.badge }}">{{ a.status }}</span></td></tr>
+        <tr><td class="text-muted">Started</td><td>{{ a.start_ts }}</td></tr>
+        <tr><td class="text-muted">Duration</td><td>{{ a.duration_ms }}ms</td></tr>
+      </table>
+    </div>
+  </div>
+  <div class="col-md-6">
+    <div class="card p-3 h-100">
+      <h5><a href="/runs/{{ b.run_id }}"><code>{{ b.run_id_short }}</code></a></h5>
+      <table class="table table-sm mb-0">
+        <tr><td class="text-muted">Target</td><td>{{ b.target_name }}</td></tr>
+        <tr><td class="text-muted">Status</td><td><span class="badge badge-{{ b.badge }}">{{ b.status }}</span></td></tr>
+        <tr><td class="text-muted">Started</td><td>{{ b.start_ts }}</td></tr>
+        <tr><td class="text-muted">Duration</td><td>{{ b.duration_ms }}ms</td></tr>
+      </table>
+    </div>
+  </div>
+</div>
+
+<div class="card p-3">
+  <h5>Jobs — side by side</h5>
+  <div class="table-responsive">
+    <table class="table table-sm table-hover mb-0">
+      <thead>
+        <tr>
+          <th rowspan="2">Job</th>
+          <th colspan="3" class="text-center">{{ a.run_id_short }}</th>
+          <th colspan="3" class="text-center">{{ b.run_id_short }}</th>
+        </tr>
+        <tr>
+          <th>Status</th><th>Exit</th><th>Duration</th>
+          <th>Status</th><th>Exit</th><th>Duration</th>
+        </tr>
+      </thead>
+      <tbody>
+{% for j in jobs %}
+        <tr{% if not j.same %} style="background: var(--k-hover-row);"{% endif %}>
+          <td>{{ j.job }}</td>
+          <td><span class="badge badge-{{ j.a_badge }}">{{ j.a_status }}</span></td>
+          <td class="fit"><code>{{ j.a_exit }}</code></td>
+          <td class="fit">{{ j.a_dur }}</td>
+          <td><span class="badge badge-{{ j.b_badge }}">{{ j.b_status }}</span></td>
+          <td class="fit"><code>{{ j.b_exit }}</code></td>
+          <td class="fit">{{ j.b_dur }}</td>
+        </tr>
+{% endfor %}
+{% if length(jobs) == 0 %}
+        <tr><td colspan="7" class="text-center k-empty">No jobs recorded</td></tr>
+{% endif %}
+      </tbody>
+    </table>
+  </div>
+</div>

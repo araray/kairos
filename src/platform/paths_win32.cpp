@@ -8,6 +8,7 @@
 #ifdef _WIN32
 
 #include "kairos/platform/paths.hpp"
+#include "kairos/platform/environment.hpp"
 
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
@@ -147,8 +148,8 @@ std::filesystem::path utf8_to_path(const std::string& s) {
 
 std::filesystem::path get_home_dir() {
     // Prefer %USERPROFILE%, fall back to SHGetKnownFolderPath.
-    if (const char* home = std::getenv("USERPROFILE"); home && home[0]) {
-        return fs::path(to_utf16(home));
+    if (auto home = get_env("USERPROFILE"); home && !home->empty()) {
+        return fs::path(to_utf16(*home));
     }
     fs::path folder = get_known_folder(FOLDERID_Profile);
     if (!folder.empty()) return folder;
@@ -159,8 +160,8 @@ std::filesystem::path get_config_dir() {
     // %APPDATA%\kairos  (Roaming — follows user across domain machines).
     fs::path roaming = get_known_folder(FOLDERID_RoamingAppData);
     if (roaming.empty()) {
-        if (const char* v = std::getenv("APPDATA"); v && v[0]) {
-            roaming = fs::path(to_utf16(v));
+        if (auto v = get_env("APPDATA"); v && !v->empty()) {
+            roaming = fs::path(to_utf16(*v));
         } else {
             roaming = get_home_dir() / "AppData" / "Roaming";
         }
@@ -172,8 +173,8 @@ std::filesystem::path get_data_dir() {
     // %LOCALAPPDATA%\kairos
     fs::path local = get_known_folder(FOLDERID_LocalAppData);
     if (local.empty()) {
-        if (const char* v = std::getenv("LOCALAPPDATA"); v && v[0]) {
-            local = fs::path(to_utf16(v));
+        if (auto v = get_env("LOCALAPPDATA"); v && !v->empty()) {
+            local = fs::path(to_utf16(*v));
         } else {
             local = get_home_dir() / "AppData" / "Local";
         }

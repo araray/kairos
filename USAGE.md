@@ -25,6 +25,7 @@ This guide covers installation, configuration, CLI usage, common workflows, and 
 15. [Build and Test Scripts](#15-build-and-test-scripts)
 16. [Examples](#16-examples)
 17. [Troubleshooting](#17-troubleshooting)
+18. [HTTP API and Web UI](#18-http-api-and-web-ui)
 
 ---
 
@@ -287,6 +288,26 @@ kairos
 │
 ├── init-db                  Initialize the SQLite database
 │   └── --db-path            Override database path
+││
+├── secrets                 Manage the native encrypted secrets file
+│   ├── init                Create an empty secrets file
+│   ├── set <key>           Add/update a secret (value from stdin/--value)
+│   ├── list                List secret keys (never values)
+│   ├── remove <key>        Remove a secret (-f: ignore missing)
+│   └── rotate-password     Re-encrypt under a new master password
+│
+├── export                  Export run history, events, and audit
+│   ├── --since             Only records after an ISO-8601 timestamp
+│   └── --output, -o        Output bundle file
+│
+├── import                  Import a JSON bundle (idempotent per run_id)
+│   ├── file                Bundle file path
+│   └── --merge             Insert only missing runs (default behavior)
+│   ├── init                Create an empty secrets file
+│   ├── set <key>           Add/update a secret (value from stdin/--value)
+│   ├── list                List secret keys (never values)
+│   ├── remove <key>        Remove a secret (-f: ignore missing)
+│   └── rotate-password     Re-encrypt under a new master password
 │
 ├── migrate-config           Migrate legacy tool configuration
 │   ├── --source             Source tool (avscheduler|eventwatcher|localflow)
@@ -1089,6 +1110,345 @@ Multiple processes sharing the same database. Check for stale test processes:
 ```bash
 pkill -f test_persist
 ```
+
+---
+
+## 18. HTTP API and Web UI
+
+> Requires a build with `KAIROS_HTTP=ON` (`./scripts/build.sh --http` or
+> `--profile full`). Enable in config with `[kairos.http] enabled = true`.
+
+### 18.1 Configuration
+
+```toml
+[kairos.http]
+enabled     = true
+listen_addr = "127.0.0.1"   # "0.0.0.0" for all interfaces
+listen_port = 8420
+# api_token = "secret"      # Bearer token for /api/v1/* when set
+# web_root  = "/etc/kairos/web"  # external UI override directory
+```
+
+When `web_root` is set (or `<data_dir>/web/` exists), the Web UI templates
+and static assets are served from that directory — edit a file, refresh,
+see the change, no rebuild. Otherwise the assets compiled into the binary
+from `web/` are used, keeping the single-binary property.
+
+### 18.2 Web UI
+
+Pages (all server-rendered, no client framework):
+
+| Path | Content |
+|------|---------|
+| `/` | Dashboard: run/event stats, recent runs + events |
+| `/workflows`, `/workflows/{name}` | Workflow list / detail (jobs, dry-run plan, triggers, recent runs, YAML source) |
+| `/jobs`, `/jobs/{id}` | Job list (workflow + standalone) / detail |
+| `/runs`, `/runs/{id}` | Run history with filters / run detail with logs (SSE live streaming for running runs) |
+| `/events`, `/events/{uid}` | Watch events with affected files / event detail |
+| `/watches`, `/watches/{name}` | Watch group list / detail (rules, scan settings, YAML) |
+| `/triggers` | Schedule triggers with next fire times |
+
+- **Themes** — blue (default) / dark / light via the navbar toggle;
+  the choice persists in the browser and follows `prefers-color-scheme`
+  on first visit.
+- **Search** — the navbar search box filters every table on the current
+  page. Plain text matches case-insensitively; `/regex/` switches to
+  regex mode. Press `/` to focus, `Esc` to clear.
+- **Real-time** — the dashboard updates live over SSE (`/sse/runs`,
+  `/sse/events`): new runs and status changes appear without refresh,
+  and toasts announce completions and warning/critical events.
+- **DAG view** — workflow and run pages render the job DAG as an SVG
+  (levels left-to-right, need edges, nodes linked to job pages); on run
+  pages nodes are colored by status.
+- **KEL playground** — `/kel` evaluates expressions against the daemon
+  (job()/has_tag() bindings) with a history and cheat sheet.
+- **Run comparison** — `/runs/{a}/vs/{b}` shows two runs side by side
+  with per-job status/exit/duration diffs (rows that differ are
+  highlighted).
+- **Editing** — `/workflows/new`, `/workflows/{name}/edit` and the
+  watches equivalents are YAML editors with live validation, atomic
+  saves (with `.bak` backups) and automatic daemon reload; `Ctrl+S`
+  saves.
+- **Run management** — Run now / Re-run / Cancel buttons on the workflow
+  and run pages; tag pills on the runs list filter by tag.
+- Run IDs in URLs accept unique prefixes, matching the CLI (`/runs/run-abc123`).
+
+### 18.3 REST API
+
+All `/api/v1/*` endpoints require `Authorization: Bearer <token>` when
+`api_token` is configured. Responses are JSON; timestamps are display-formatted.
+
+```
+# Read
+GET  /api/v1/workflows                     # list (with tags, triggers, job counts)
+GET  /api/v1/workflows/{name}              # detail incl. jobs and YAML source
+GET  /api/v1/workflows/{name}/yaml         # raw YAML (text)
+GET  /api/v1/jobs                          # all jobs (workflow + standalone)
+GET  /api/v1/jobs/{id-or-name}             # job detail + recent runs
+GET  /api/v1/runs                          # ?status=&workflow=&since=&tag=a,b&limit=
+GET  /api/v1/runs/{id-or-prefix}           # run detail (jobs, steps)
+GET  /api/v1/runs/{id}/logs                # ?after=<cursor>&limit=
+GET  /api/v1/events                        # ?watch_group=&severity=&limit=
+GET  /api/v1/events/{uid}                  # event detail with affected files
+GET  /api/v1/watches                       # watch group list
+GET  /api/v1/watches/{name}                # detail incl. rules and YAML
+GET  /api/v1/watches/{name}/yaml           # raw YAML (text)
+GET  /api/v1/triggers                      # triggers with next fire times
+GET  /api/v1/triggers/{id}                 # trigger detail
+GET  /api/v1/explain/{workflow}            # dry-run execution plan
+GET  /health                               # liveness (no auth)
+GET  /metrics                              # Prometheus text (no auth)
+
+# Write
+POST   /api/v1/workflows                   # create (YAML body) → 201
+PUT    /api/v1/workflows/{name}            # update (backs up to .yaml.bak)
+DELETE /api/v1/workflows/{name}            # delete (backs up to .yaml.bak)
+POST   /api/v1/watches                     # create watch group (YAML body)
+PUT    /api/v1/watches/{name}              # update (backs up)
+DELETE /api/v1/watches/{name}              # delete (backs up)
+POST   /api/v1/config/validate?kind=workflow|watch   # validate YAML, no writes
+POST   /api/v1/workflows/{name}/run        # trigger a run (resolves real run_id)
+POST   /api/v1/jobs/{id}/run               # trigger a standalone job
+POST   /api/v1/runs/{id}/cancel            # cancel a running run
+POST   /api/v1/config/reload               # reload configuration
+GET    /api/v1/audit                       # audit trail (who changed what)
+POST   /api/v1/kel/eval                    # {"expr": "..."} → {value, type}
+GET    /api/v1/runs/{id}/outputs            # captured ${{ }} outputs (§8)
+
+# Streaming
+GET  /sse/logs/{run_id}                    # live log stream (SSE)
+GET  /sse/runs                             # run started/finished events (SSE)
+GET  /sse/events                           # watch event stream (SSE)
+```
+
+Every write endpoint follows the safety contract (Roadmap §3.8.2):
+schema-validate the YAML first (structured errors with locations on 400),
+back the target file up to `<name>.yaml.bak`, write atomically, trigger a
+config reload, and append an `audit_log` entry with actor `http`.
+
+Example — trigger a run and wait for it:
+
+```bash
+RUN=$(curl -s -X POST http://127.0.0.1:8420/api/v1/workflows/backup/run \
+      -d '' | jq -r .run_id)
+curl -s "http://127.0.0.1:8420/api/v1/runs/$RUN" | jq .status
+```
+
+### 18.4 Workflow Intelligence (v0.2)
+
+**Env files (§11)** — jobs can load `.env` files; inline `env:` wins:
+
+```yaml
+jobs:
+  deploy:
+    env_file: [.env, .env.production]
+    env: { OVERRIDE: wins }
+```
+
+**Step outputs & variable passing (§8)** — steps append `KEY=VALUE`
+lines to `$KAIROS_OUTPUT`; later steps and jobs read them back:
+
+```yaml
+jobs:
+  build:
+    steps:
+      - name: compile
+        run: echo "VERSION=1.2.3" >> "$KAIROS_OUTPUT"
+  deploy:
+    needs: [build]
+    steps:
+      - run: deploy --version ${{ jobs.build.compile.VERSION }}
+```
+
+Job-scoped `${{ steps.<step>.KEY }}` and workflow-scoped
+`${{ jobs.<job>.<step>.KEY }}` are substituted server-side (unknown
+references fail the job with a precise error). Conditions can read the
+live run context with `output('job', 'step', 'key')`. Outputs are
+persisted (`GET /api/v1/runs/{id}/outputs`) and capped at 64 KiB per
+value / 1 MiB per run; invalid keys are dropped, not fatal.
+
+**Retries (§15.2)**:
+
+```yaml
+steps:
+  - run: curl -f https://api
+    retry:
+      max_attempts: 3
+      delay: 5s
+      backoff: exponential   # fixed | linear | exponential
+      retry_on: [1, 2]       # default: any non-zero exit
+```
+
+Each attempt is its own `step_runs` row (attempt 1-based).
+
+**Dry-run (§15.1)** — `kairos workflows run <id> --dry-run` executes
+the whole DAG with every step as a no-op that logs what would run;
+the run is recorded with trigger type `dry-run`.
+
+**Watch actions (§10)** — explicit action blocks with cooldowns:
+
+```yaml
+rules:
+  - name: new_package
+    condition: "event.type == 'created'"
+    action:
+      type: run_workflow      # or run_job
+      target: deploy_pipeline
+      cooldown: 60s
+```
+
+Triggered runs receive `KAIROS_TRIGGER_EVENT_TYPE`,
+`KAIROS_TRIGGER_WATCH_GROUP`, `KAIROS_TRIGGER_RULE`, and
+`KAIROS_TRIGGER_AFFECTED_FILES` (comma-separated).
+
+
+### 18.5 Notifications, Health, and Secrets (v0.2)
+
+**Notification hooks (§15.4)** — per workflow, on run completion:
+
+```yaml
+name: backup
+notifications:
+  on_failure:
+    - type: webhook
+      url: https://hooks.slack.com/services/...
+      template: "Kairos: {{ workflow }} failed (run {{ run_id }})"
+    - type: command
+      run: notify-send 'Kairos' '{{ workflow }} failed'
+  on_success:
+    - type: command
+      command: echo done >> /var/log/kairos-notify.log
+```
+
+Delivery is fire-and-forget (10s budget per hook, the pipeline never
+blocks); only SUCCESS and FAILURE fire. Commands receive
+`KAIROS_NOTIFY_MESSAGE`, `KAIROS_RUN_ID`, `KAIROS_WORKFLOW`. Webhooks
+POST `{"text": …}` (Slack-compatible) — requires KAIROS_HTTP=ON.
+
+**Health checks (§15.5)**:
+
+```bash
+kairos status --health
+#   Health: OK
+#     [ok] db_size — 12 MiB / limit 1024 MiB
+#     [ok] stale_runs — no runs stuck longer than 3600s
+```
+
+The same snapshot is served at `GET /health` (with checks) and the
+daemon logs degraded states every `kairos.health.check_interval_seconds`
+(configure limits under `[kairos.health]`). A Prometheus alerting
+template ships at `deploy/prometheus/kairos_alerts.yml` (§15.15).
+
+**Secrets (§12.2)** — three backends via `[kairos.security]`:
+
+```toml
+[kairos.security]
+backend = "file"        # "" | "vault" | "env" | "file"
+env_prefix = "KAIROS_SECRET_"
+```
+
+- `env` — every `KAIROS_SECRET_<KEY>` variable becomes
+  `${{ secrets.<KEY> }}` (§12.2.3).
+- `file` — the native AES-256-GCM store (§12.2.1), managed by:
+
+```bash
+export KAIROS_SECRETS_PASSWORD=…        # or pass --password / prompt
+kairos secrets init                     # create <data_dir>/secrets.enc
+echo "tok-123" | kairos secrets set deploy_api_key
+kairos secrets set region --value eu    # or --value
+kairos secrets list                     # keys only, never values
+kairos secrets remove region            # add -f to ignore missing
+kairos secrets rotate-password          # re-encrypt under a new password
+```
+
+The daemon loads the file at startup (password from
+`KAIROS_SECRETS_PASSWORD`). Every mutation across CLI, MCP, and HTTP is
+recorded in the audit trail (`GET /api/v1/audit`; §15.14).
+
+
+### 18.6 Advanced Features (v0.2, Roadmap Phase 15)
+
+**Run pinning (§15.6)** — pinned runs survive retention pruning:
+
+```bash
+kairos runs pin run-48ee00       # unique prefix is fine
+kairos runs list --pinned        # 📌 marks pinned runs
+kairos runs unpin run-48ee00
+```
+
+**In-step queries (§9.3)** — every step receives sequential and
+previous-run context as environment variables:
+
+| Variable | Meaning |
+|----------|---------|
+| `KAIROS_RUN_NUMBER` | Sequential run number for this target |
+| `KAIROS_PREV_RUN_STATUS` | Status of the previous run |
+| `KAIROS_PREV_RUN_ID` | Run ID of the previous run |
+
+**Per-workflow retention (§15.11)**:
+
+```yaml
+name: high_frequency_monitor
+retention:
+  max_runs: 100         # Keep the newest 100 runs
+  max_age: 7d           # Prune older (accepts "7d" or days as int)
+  keep_failures: true   # Failures survive age pruning
+```
+
+**MCP `kairos.search` (§15.13)** — agents search across entities:
+
+```json
+{"name": "kairos.search",
+ "arguments": {"query": "deploy", "entity_types": ["workflows", "runs"],
+                "limit": 10}}
+```
+
+**Export/import (§15.9)**:
+
+```bash
+kairos export --since 2026-03-01 --output runs_march.json
+kairos import runs_march.json     # INSERT OR IGNORE on run_id — safe to repeat
+```
+
+**Workflow templates (§15.3)** — `templates/` beside the workflows dir:
+
+```yaml
+# workflows/templates/standard_build.yaml
+jobs:
+  build:
+    steps:
+      - run: make build-${{ params.language }}
+  test:
+    needs: [build]
+    steps:
+      - run: ${{ params.test_command }}
+
+# workflows/my_app.yaml
+name: my_app
+uses: standard_build
+with:
+  language: cpp
+  test_command: ctest --output-on-failure
+```
+
+Missing `with:` values fail the load with the offending token.
+
+> **curl note:** always pass `-d ''` on bodiless POSTs. Plain
+> `curl -X POST` sends no `Content-Length` header, and the server then
+> waits for the read timeout before treating the body as empty. Browsers
+> and HTTP libraries send `Content-Length: 0` automatically.
+
+Example — create a workflow from a file, then edit it in the browser:
+
+```bash
+curl -s -X POST http://127.0.0.1:8420/api/v1/workflows \
+     -H "Content-Type: text/yaml" --data-binary @backup.yaml
+# → {"name":"backup","file":"…/workflows/backup.yaml","reloaded":true}
+# Then open http://127.0.0.1:8420/workflows/backup/edit
+```
+
+The `tag` filter uses AND semantics for comma-separated tags, mirroring
+`kairos runs list --tag`.
 
 ---
 

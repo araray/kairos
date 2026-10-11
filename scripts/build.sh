@@ -55,6 +55,7 @@ BUILD_DIR=""                # Auto-computed if empty
 ENABLE_TESTS="ON"
 ENABLE_HTTP="OFF"
 ENABLE_OTEL="OFF"
+ENABLE_OTEL_SYSTEM="OFF"
 ENABLE_VAULT="OFF"
 ENABLE_DOCKER="OFF"
 ENABLE_TUI="OFF"
@@ -97,6 +98,7 @@ HEADER
     echo "    --tests / --no-tests   Build test suite (default: on)"
     echo "    --http                 Build HTTP server + Web UI"
     echo "    --otel                 Build with OpenTelemetry tracing"
+    echo "    --system-otel          Use system OTel SDK (enables OTLP; needs protobuf)"
     echo "    --vault                Build with Ansible Vault support (OpenSSL)"
     echo "    --docker               Build with Docker runner support"
     echo "    --tui / --no-tui       Build TUI dashboard (FTXUI)"
@@ -185,6 +187,7 @@ while [[ $# -gt 0 ]]; do
         --http)             ENABLE_HTTP="ON"; shift ;;
         --no-http)          ENABLE_HTTP="OFF"; shift ;;
         --otel)             ENABLE_OTEL="ON"; shift ;;
+        --system-otel)      ENABLE_OTEL="ON"; ENABLE_OTEL_SYSTEM="ON"; shift ;;
         --vault)            ENABLE_VAULT="ON"; shift ;;
         --no-vault)         ENABLE_VAULT="OFF"; shift ;;
         --docker)           ENABLE_DOCKER="ON"; shift ;;
@@ -354,6 +357,7 @@ CMAKE_ARGS=(
     -DKAIROS_BUILD_TESTS="${ENABLE_TESTS}"
     -DKAIROS_HTTP="${ENABLE_HTTP}"
     -DKAIROS_OTEL="${ENABLE_OTEL}"
+    -DKAIROS_OTEL_SYSTEM="${ENABLE_OTEL_SYSTEM}"
     -DKAIROS_VAULT="${ENABLE_VAULT}"
     -DKAIROS_DOCKER="${ENABLE_DOCKER}"
     -DKAIROS_TUI="${ENABLE_TUI}"
@@ -426,7 +430,7 @@ fi
 features=""
 [[ "$ENABLE_TESTS" == "ON" ]] && features+="tests "
 [[ "$ENABLE_HTTP"  == "ON" ]] && features+="http "
-[[ "$ENABLE_OTEL"  == "ON" ]] && features+="otel "
+[[ "$ENABLE_OTEL"  == "ON" ]] && features+="otel($([ "$ENABLE_OTEL_SYSTEM" == "ON" ] && echo "system" || echo "fetch")) "
 [[ "$ENABLE_VAULT" == "ON" ]] && features+="vault "
 [[ "$ENABLE_DOCKER" == "ON" ]] && features+="docker "
 [[ "$ENABLE_TUI"   == "ON" ]] && features+="tui "

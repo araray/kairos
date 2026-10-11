@@ -89,13 +89,16 @@ bool glob_match_simple(const std::string& pattern, const std::string& str) {
 ///   data, event, watch_group, file, prev_file
 ///
 /// Also registers aggregate(data, glob, metric, func) which operates on
-/// the sample passed by reference through the closure.
+/// the sample passed by reference through the closure, and — when a tag
+/// store is available — has_tag(entity_id, tag) for tag-gated rules
+/// (Roadmap §6; same semantics as the pipeline condition context).
 kel::EvalContext build_watch_kel_context(
     const std::string& group_name,
     const std::string& event_type,
     const FileMetrics& file_metrics,
     const FileMetrics* prev_metrics,
-    const Sample* current_sample = nullptr)
+    const Sample* current_sample = nullptr,
+    persist::TagStore* tag_store = nullptr)
 {
     auto ctx = kel::make_default_context();
 
@@ -228,6 +231,32 @@ kel::EvalContext build_watch_kel_context(
                 return kel::KelValue(static_cast<int64_t>(result));
             }
             return kel::KelValue(result);
+        };
+    }
+
+    // has_tag(entity_id, tag) → bool — tag-gated watch rules (§6).
+    // Same semantics as the pipeline condition context: checks all
+    // entity types sequentially, first match wins.
+    if (tag_store) {
+        auto* ts = tag_store;
+        ctx.functions["has_tag"] = [ts](
+            const std::vector<kel::KelValue>& args) -> kel::KelValue
+        {
+            if (args.size() != 2 || !args[0].is_string() ||
+                !args[1].is_string()) {
+                throw kel::KelEvalError(
+                    "has_tag() requires two string arguments "
+                    "(entity_id, tag)");
+            }
+            const auto& entity_id = args[0].as_string();
+            const auto& tag = args[1].as_string();
+            static const std::string types[] = {
+                "workflow", "job", "watch_group", "trigger"};
+            for (const auto& t : types) {
+                if (ts->has_tag(t, entity_id, tag))
+                    return kel::KelValue(true);
+            }
+            return kel::KelValue(false);
         };
     }
 
@@ -889,7 +918,7 @@ std::vector<WatchTriggerResult> WatchEngine::evaluate_rules(
 
         auto ctx = build_watch_kel_context(
             group.group_name, event_str, file_metrics, prev_metrics,
-            &current);
+            &current, deps_.tag_store);
 
         // Evaluate the KEL expression.
         try {
@@ -976,6 +1005,32 @@ void WatchEngine::emit_triggers(
         // Only emit a TriggerEvent if the rule has a trigger target.
         if (!tr.trigger_target.has_value()) continue;
 
+        // §10.4 cooldown: drop triggers fired too soon after the last
+        // one from the same rule.
+        std::string rule_key =
+            tr.watch_group_name + "/" + tr.rule_name;
+        std::chrono::seconds cooldown{0};
+        for (const auto& r : group.rules) {
+            if (r.rule_name == tr.rule_name) {
+                cooldown = r.cooldown;
+                break;
+            }
+        }
+        if (cooldown.count() > 0) {
+            auto now = deps_.clock ? deps_.clock->now()
+                                   : std::chrono::system_clock::now();
+            std::lock_guard lock(cooldown_mu_);
+            auto it = last_trigger_at_.find(rule_key);
+            if (it != last_trigger_at_.end() &&
+                now - it->second < cooldown) {
+                spdlog::debug(
+                    "Watch rule '{}': suppressed by cooldown ({}s)",
+                    rule_key, cooldown.count());
+                continue;
+            }
+            last_trigger_at_[rule_key] = now;
+        }
+
         auto correlation_id = core::generate_correlation_id();
         auto target_kind = tr.trigger_is_workflow
             ? engine::TriggerEvent::TargetKind::Workflow
@@ -983,6 +1038,7 @@ void WatchEngine::emit_triggers(
 
         engine::FileDiffPayload payload;
         payload.watch_group = group.group_name;
+        payload.rule_name = tr.rule_name;
         payload.affected_paths = tr.affected_paths;
         payload.diff_summary = tr.event_type;
         // Count by diff type from the affected paths.

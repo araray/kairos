@@ -509,6 +509,55 @@ void QueryReader::register_watch_kel_bindings(
     };
 }
 
+std::vector<QueryReader::RunOutputRow> QueryReader::get_run_outputs(
+    const std::string& run_id) const
+{
+    std::vector<RunOutputRow> results;
+    SQLite::Statement q(db_,
+        "SELECT job_id, step_id, key, value FROM run_outputs "
+        "WHERE run_id = ? ORDER BY job_id, step_id, key");
+    q.bind(1, run_id);
+    while (q.executeStep()) {
+        results.push_back(RunOutputRow{
+            q.getColumn(0).getString(),
+            q.getColumn(1).getString(),
+            q.getColumn(2).getString(),
+            q.getColumn(3).getString(),
+        });
+    }
+    return results;
+}
+
+std::optional<QueryReader::WatchEventRow> QueryReader::get_watch_event(
+    const std::string& event_uid) const
+{
+    WatchEventRow row;
+    SQLite::Statement query(db_,
+        "SELECT id, watch_group, rule_name, event_type, action_taken, "
+        "file_path, details_json, created_at "
+        "FROM watch_events WHERE id = ?");
+
+    // event_uid is the row id (see query_watch_events) — numeric.
+    try {
+        query.bind(1, static_cast<int64_t>(std::stoll(event_uid)));
+    } catch (...) {
+        return std::nullopt;  // Non-numeric uid — cannot match.
+    }
+
+    if (!query.executeStep()) return std::nullopt;
+
+    row.event_uid           = std::to_string(query.getColumn(0).getInt64());
+    row.watch_group         = query.getColumn(1).getString();
+    row.rule_name           = query.getColumn(2).getString();
+    row.event_type          = query.getColumn(3).getString();
+    row.severity            = query.getColumn(4).getString();
+    row.affected_files_json = query.getColumn(5).getString();
+    row.details_json        = query.getColumn(6).getString();
+    row.created_at          = query.getColumn(7).getString();
+    row.sample_epoch        = 0;
+    return row;
+}
+
 std::vector<QueryReader::WatchEventRow> QueryReader::query_watch_events(
     int limit, const std::string& watch_group) const
 {
@@ -618,7 +667,8 @@ std::vector<QueryReader::RunSummary> QueryReader::query_recent_runs(
     std::string sql =
         "SELECT run_id, target_type, target_id, target_name, "
         "trigger_type, status, COALESCE(exit_code, 0), "
-        "start_ts, COALESCE(end_ts, ''), COALESCE(duration_ms, 0) "
+        "start_ts, COALESCE(end_ts, ''), COALESCE(duration_ms, 0), "
+        "COALESCE(tags_json, ''), COALESCE(pinned, 0) "
         "FROM runs WHERE 1=1 ";
 
     if (!status_filter.empty()) {
@@ -658,10 +708,77 @@ std::vector<QueryReader::RunSummary> QueryReader::query_recent_runs(
         r.start_ts     = query.getColumn(7).getString();
         r.end_ts       = query.getColumn(8).getString();
         r.duration_ms  = query.getColumn(9).getInt64();
+        r.tags_json    = query.getColumn(10).getString();
+        r.pinned       = query.getColumn(11).getInt() != 0;
         results.push_back(std::move(r));
     }
 
     return results;
+}
+
+// ── Run ID prefix resolution (§1.1) ──────────────────────────────────────
+
+QueryReader::PrefixResult QueryReader::resolve_run_id_prefix(
+    const std::string& prefix) const
+{
+    PrefixResult result;
+
+    if (prefix.empty()) {
+        result.status = PrefixResult::kEmpty;
+        return result;
+    }
+
+    // Full UUID length (run-XXXXXXXX-XXXX-XXXX-XXXX-XXXXXXXXXXXX = 40 chars,
+    // or just the UUID part = 36). If the input is already >= 36 chars,
+    // treat as exact match to avoid LIKE overhead.
+    if (prefix.size() >= 36) {
+        SQLite::Statement query(db_,
+            "SELECT run_id FROM runs WHERE run_id = ?");
+        query.bind(1, prefix);
+        if (query.executeStep()) {
+            result.status = PrefixResult::kExact;
+            result.resolved_id = query.getColumn(0).getString();
+        } else {
+            result.status = PrefixResult::kNotFound;
+        }
+        return result;
+    }
+
+    // Prefix search: LIKE prefix% (limited to 10 candidates for
+    // ambiguity reporting).
+    std::string like_pattern = prefix + "%";
+    SQLite::Statement query(db_,
+        "SELECT run_id FROM runs WHERE run_id LIKE ? "
+        "ORDER BY start_ts DESC LIMIT 10");
+    query.bind(1, like_pattern);
+
+    std::vector<std::string> matches;
+    while (query.executeStep()) {
+        matches.push_back(query.getColumn(0).getString());
+    }
+
+    if (matches.empty()) {
+        result.status = PrefixResult::kNotFound;
+    } else if (matches.size() == 1) {
+        result.status = PrefixResult::kUnique;
+        result.resolved_id = matches[0];
+    } else {
+        result.status = PrefixResult::kAmbiguous;
+        result.candidates = std::move(matches);
+    }
+
+    return result;
+}
+
+std::optional<std::string> QueryReader::get_run_id_by_correlation(
+    const std::string& correlation_id) const
+{
+    SQLite::Statement q(db_,
+        "SELECT run_id FROM runs WHERE correlation_id = ? "
+        "ORDER BY start_ts DESC LIMIT 1");
+    q.bind(1, correlation_id);
+    if (!q.executeStep()) return std::nullopt;
+    return q.getColumn(0).getString();
 }
 
 std::optional<QueryReader::RunSummary> QueryReader::get_run_summary(
@@ -670,7 +787,8 @@ std::optional<QueryReader::RunSummary> QueryReader::get_run_summary(
     SQLite::Statement query(db_,
         "SELECT run_id, target_type, target_id, target_name, "
         "trigger_type, status, COALESCE(exit_code, 0), "
-        "start_ts, COALESCE(end_ts, ''), COALESCE(duration_ms, 0) "
+        "start_ts, COALESCE(end_ts, ''), COALESCE(duration_ms, 0), "
+        "COALESCE(tags_json, ''), COALESCE(pinned, 0) "
         "FROM runs WHERE run_id = ?");
     query.bind(1, run_id);
 
@@ -686,6 +804,8 @@ std::optional<QueryReader::RunSummary> QueryReader::get_run_summary(
         r.start_ts     = query.getColumn(7).getString();
         r.end_ts       = query.getColumn(8).getString();
         r.duration_ms  = query.getColumn(9).getInt64();
+        r.tags_json    = query.getColumn(10).getString();
+        r.pinned       = query.getColumn(11).getInt() != 0;
         return r;
     }
     return std::nullopt;
@@ -943,6 +1063,150 @@ std::vector<QueryReader::WatchEventRow> QueryReader::query_watch_events_since(
         results.push_back(std::move(row));
     }
 
+    return results;
+}
+
+int64_t QueryReader::count_stale_runs(int timeout_seconds) const {
+    // start_ts is ISO-8601 UTC; compare lexicographically against the
+    // cutoff in the same format.
+    auto cutoff_sys = std::chrono::system_clock::now() -
+                      std::chrono::seconds(timeout_seconds);
+    auto tt = std::chrono::system_clock::to_time_t(cutoff_sys);
+    std::tm tm{};
+#ifdef _WIN32
+    gmtime_s(&tm, &tt);
+#else
+    gmtime_r(&tt, &tm);
+#endif
+    char buf[24];
+    std::strftime(buf, sizeof(buf), "%Y-%m-%dT%H:%M:%S", &tm);
+
+    SQLite::Statement q(db_,
+        "SELECT COUNT(*) FROM runs "
+        "WHERE status = 'RUNNING' AND start_ts < ?");
+    q.bind(1, std::string(buf));
+    if (!q.executeStep()) return 0;
+    return q.getColumn(0).getInt64();
+}
+
+int64_t QueryReader::run_number_for(
+    const std::string& target_name,
+    const std::string& run_start_ts) const
+{
+    SQLite::Statement q(db_,
+        "SELECT COUNT(*) FROM runs WHERE target_name = ? "
+        "AND start_ts < ?");
+    q.bind(1, target_name);
+    q.bind(2, run_start_ts);
+    if (q.executeStep()) return q.getColumn(0).getInt64();
+    return 0;
+}
+
+std::string QueryReader::previous_run_id(
+    const std::string& target_name,
+    const std::string& run_start_ts) const
+{
+    SQLite::Statement q(db_,
+        "SELECT run_id FROM runs WHERE target_name = ? "
+        "AND start_ts < ? ORDER BY start_ts DESC LIMIT 1");
+    q.bind(1, target_name);
+    q.bind(2, run_start_ts);
+    if (q.executeStep()) return q.getColumn(0).getString();
+    return "";
+}
+
+std::string QueryReader::run_status_by_id(
+    const std::string& run_id) const
+{
+    SQLite::Statement q(db_,
+        "SELECT status FROM runs WHERE run_id = ?");
+    q.bind(1, run_id);
+    if (q.executeStep()) return q.getColumn(0).getString();
+    return "";
+}
+
+std::vector<QueryReader::ExportedRun> QueryReader::export_runs(
+    const std::string& since) const
+{
+    std::vector<ExportedRun> out;
+    auto summaries = query_recent_runs(100000, "", "", since);
+    for (auto& sum : summaries) {
+        ExportedRun er;
+        er.run = std::move(sum);
+        auto detail = get_run_detail(er.run.run_id);
+        if (detail) er.jobs = std::move(detail->jobs);
+        er.logs = get_log_chunks(er.run.run_id, 0, 100000);
+        out.push_back(std::move(er));
+    }
+    return out;
+}
+
+std::vector<QueryReader::WatchEventRow> QueryReader::export_events(
+    const std::string& since) const
+{
+    std::string sql =
+        "SELECT id, watch_group, rule_name, event_type, action_taken, "
+        "file_path, details_json, created_at FROM watch_events ";
+    if (!since.empty()) sql += "WHERE created_at >= ? ";
+    sql += "ORDER BY id ASC";
+    SQLite::Statement q(db_, sql);
+    if (!since.empty()) q.bind(1, since);
+
+    std::vector<WatchEventRow> out;
+    while (q.executeStep()) {
+        WatchEventRow row;
+        row.event_uid = std::to_string(q.getColumn(0).getInt64());
+        row.watch_group = q.getColumn(1).getString();
+        row.rule_name = q.getColumn(2).getString();
+        row.event_type = q.getColumn(3).getString();
+        row.severity = q.getColumn(4).getString();
+        row.affected_files_json = q.getColumn(5).getString();
+        row.details_json = q.getColumn(6).getString();
+        row.created_at = q.getColumn(7).getString();
+        out.push_back(std::move(row));
+    }
+    return out;
+}
+
+std::vector<QueryReader::AuditRow> QueryReader::export_audit(
+    int limit) const
+{
+    std::vector<AuditRow> out;
+    SQLite::Statement q(db_,
+        "SELECT id, timestamp, actor, action, target, detail_json "
+        "FROM audit_log ORDER BY id ASC LIMIT ?");
+    q.bind(1, limit);
+    while (q.executeStep()) {
+        out.push_back(AuditRow{
+            q.getColumn(0).getInt64(),
+            q.getColumn(1).getString(),
+            q.getColumn(2).getString(),
+            q.getColumn(3).getString(),
+            q.getColumn(4).getString(),
+            q.getColumn(5).getString(),
+        });
+    }
+    return out;
+}
+
+std::vector<QueryReader::AuditRow> QueryReader::query_audit_log(
+    int limit) const
+{
+    std::vector<AuditRow> results;
+    SQLite::Statement q(db_,
+        "SELECT id, timestamp, actor, action, target, detail_json "
+        "FROM audit_log ORDER BY id DESC LIMIT ?");
+    q.bind(1, limit);
+    while (q.executeStep()) {
+        AuditRow row;
+        row.id           = q.getColumn(0).getInt64();
+        row.timestamp    = q.getColumn(1).getString();
+        row.actor        = q.getColumn(2).getString();
+        row.action       = q.getColumn(3).getString();
+        row.target       = q.getColumn(4).getString();
+        row.detail_json  = q.getColumn(5).getString();
+        results.push_back(std::move(row));
+    }
     return results;
 }
 

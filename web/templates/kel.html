@@ -1,0 +1,41 @@
+<!-- KEL playground (wrapped by base.html) — Roadmap §3.8.7 -->
+<!-- Static page; all behavior lives in static/js/kel_playground.js -->
+
+<h4 class="page-header">KEL Playground</h4>
+
+<div class="row g-4">
+  <div class="col-lg-7">
+    <div class="card p-3">
+      <div class="d-flex justify-content-between align-items-center mb-2">
+        <span class="text-muted small">Expression — evaluated on the server with job()/has_tag() bindings</span>
+        <span id="kel-status" class="small text-muted"></span>
+      </div>
+      <textarea id="kel-expr" class="yaml-block w-100" rows="4" spellcheck="false"
+                style="resize: vertical;" placeholder='job("backup").last_success'>1 + 2 * 3</textarea>
+      <div class="d-flex gap-2 mt-3">
+        <button id="kel-run" class="btn btn-info btn-sm" type="button">Evaluate ⏎</button>
+        <button id="kel-clear" class="btn btn-outline-secondary btn-sm" type="button">Clear</button>
+      </div>
+      <div id="kel-result" class="log-panel mt-3"></div>
+    </div>
+  </div>
+  <div class="col-lg-5">
+    <div class="card p-3 mb-4">
+      <h5>History</h5>
+      <ul id="kel-history" class="list-unstyled mb-0 small"></ul>
+    </div>
+    <div class="card p-3" data-kairos-nofilter>
+      <h5>Cheat sheet</h5>
+      <ul class="small text-muted mb-0 ps-3">
+        <li><code>job("name").last_success</code> — did the job last succeed?</li>
+        <li><code>job("name").finished_within(24h)</code></li>
+        <li><code>job("name").run_count</code> / <code>.success_rate</code></li>
+        <li><code>has_tag("entity_id", "tag")</code></li>
+        <li><code>len()</code>, <code>matches(s, re)</code>, <code>contains(a, b)</code></li>
+        <li>Not Turing-complete: no loops, no I/O, 100ms eval budget.</li>
+      </ul>
+    </div>
+  </div>
+</div>
+
+<script src="/static/js/kel_playground.js"></script>

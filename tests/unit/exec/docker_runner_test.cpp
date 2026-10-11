@@ -20,6 +20,14 @@
 
 #include <nlohmann/json.hpp>
 
+#ifndef KAIROS_DOCKER_ENABLED
+// Without KAIROS_DOCKER=ON the DockerProcessHandle is the stub; the
+// behavioral tests below only make sense against the real runner.
+TEST(DockerRunner, DisabledBuildSkipsBehaviorTests) {
+    GTEST_SKIP() << "Docker runner tests require KAIROS_DOCKER=ON";
+}
+#else
+
 using namespace kairos::exec;
 using json = nlohmann::json;
 
@@ -324,3 +332,5 @@ TEST(DockerConfig, DefaultNetworkModeValues) {
             << "Mode: " << mode;
     }
 }
+
+#endif  // KAIROS_DOCKER_ENABLED

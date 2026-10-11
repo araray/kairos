@@ -16,6 +16,9 @@
 #include "kairos/persist/query_reader.hpp"
 
 #include <gtest/gtest.h>
+
+#include <chrono>
+#include <thread>
 #include <SQLiteCpp/SQLiteCpp.h>
 
 #include <memory>
@@ -113,12 +116,16 @@ static std::unique_ptr<SQLite::Database> make_test_db() {
             target_id TEXT NOT NULL,
             target_name TEXT NOT NULL DEFAULT '',
             trigger_type TEXT NOT NULL DEFAULT 'manual',
+            trigger_id TEXT NOT NULL DEFAULT '',
+            correlation_id TEXT NOT NULL DEFAULT '',
             status TEXT NOT NULL DEFAULT 'RUNNING',
             exit_code INTEGER NOT NULL DEFAULT 0,
             start_ts TEXT NOT NULL DEFAULT '',
             end_ts TEXT NOT NULL DEFAULT '',
             duration_ms INTEGER NOT NULL DEFAULT 0,
-            created_at TEXT NOT NULL DEFAULT (datetime('now'))
+            created_at TEXT NOT NULL DEFAULT (datetime('now')),
+            tags_json TEXT,
+            pinned INTEGER NOT NULL DEFAULT 0
         );
 
         CREATE TABLE IF NOT EXISTS job_runs (
@@ -148,8 +155,40 @@ static std::unique_ptr<SQLite::Database> make_test_db() {
             end_ts TEXT NOT NULL DEFAULT '',
             duration_ms INTEGER NOT NULL DEFAULT 0,
             command TEXT NOT NULL DEFAULT '',
+            attempt INTEGER NOT NULL DEFAULT 1,
             created_at TEXT NOT NULL DEFAULT (datetime('now')),
             FOREIGN KEY(run_id) REFERENCES runs(run_id)
+        );
+
+        CREATE TABLE IF NOT EXISTS trigger_history (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            trigger_id TEXT NOT NULL,
+            trigger_type TEXT NOT NULL DEFAULT '',
+            target_id TEXT NOT NULL DEFAULT '',
+            fired_at TEXT NOT NULL DEFAULT '',
+            status TEXT NOT NULL DEFAULT '',
+            run_id TEXT
+        );
+
+        CREATE TABLE IF NOT EXISTS watch_samples (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            watch_group TEXT NOT NULL,
+            sample_epoch INTEGER NOT NULL DEFAULT 0,
+            file_path TEXT NOT NULL,
+            is_dir INTEGER NOT NULL DEFAULT 0,
+            file_size INTEGER NOT NULL DEFAULT 0,
+            mtime TEXT DEFAULT '',
+            hash TEXT DEFAULT '',
+            scan_duration_ms INTEGER NOT NULL DEFAULT 0
+        );
+
+        CREATE TABLE IF NOT EXISTS audit_log (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            timestamp TEXT NOT NULL DEFAULT (datetime('now')),
+            actor TEXT NOT NULL,
+            action TEXT NOT NULL,
+            target TEXT,
+            detail_json TEXT
         );
 
         CREATE TABLE IF NOT EXISTS log_chunks (
@@ -172,6 +211,8 @@ static std::unique_ptr<SQLite::Database> make_test_db() {
             event_type TEXT NOT NULL DEFAULT '',
             severity TEXT NOT NULL DEFAULT 'info',
             affected_files_json TEXT NOT NULL DEFAULT '[]',
+            file_path TEXT DEFAULT '',
+            action_taken TEXT DEFAULT '',
             sample_epoch INTEGER NOT NULL DEFAULT 0,
             details_json TEXT NOT NULL DEFAULT '{}',
             created_at TEXT NOT NULL DEFAULT (datetime('now'))
@@ -270,6 +311,12 @@ protected:
         seed_test_runs(*db_);
         query_reader_ = std::make_unique<persist::QueryReader>(*db_);
 
+        // §15.14: audit writer to observe MCP-originated entries.
+        writer_ = std::make_unique<persist::DBWriter>(
+            *db_, persist::DBWriterConfig{});
+        writer_stop_ = std::stop_source{};
+        writer_->start(writer_stop_.get_token());
+
         // Track submitted runs.
         submitted_runs_.clear();
 
@@ -286,8 +333,17 @@ protected:
             return run_id;
         };
         deps.server_info.version = "test";
+        deps.db_writer = writer_.get();
 
         handler_ = std::make_unique<McpHandler>(std::move(deps));
+    }
+
+    void TearDown() override {
+        if (writer_) {
+            writer_stop_.request_stop();
+            writer_->flush();
+            writer_.reset();
+        }
     }
 
     /// Helper: call a tool by name and return the result JSON.
@@ -303,6 +359,8 @@ protected:
     std::shared_ptr<const engine::WorkflowRegistry> registry_;
     std::unique_ptr<SQLite::Database> db_;
     std::unique_ptr<persist::QueryReader> query_reader_;
+    std::unique_ptr<persist::DBWriter> writer_;
+    std::stop_source writer_stop_;
     std::unique_ptr<McpHandler> handler_;
 
     struct SubmittedRun {
@@ -835,8 +893,8 @@ TEST_F(McpToolsTest, ToolsList_Contains14Tools) {
     auto result = handler_->dispatch("tools/list", {}, 1);
     auto tools = result["tools"];
 
-    // 14 tools from spec §22.4 + 1 additional (watchScanOnce) = 15.
-    EXPECT_EQ(tools.size(), 15u);
+    // 14 tools from spec §22.4 + watchScanOnce + kairos.search = 16.
+    EXPECT_EQ(tools.size(), 16u);
 
     // Verify all expected tool names are present.
     std::vector<std::string> expected_tools = {
@@ -848,7 +906,7 @@ TEST_F(McpToolsTest, ToolsList_Contains14Tools) {
         "kairos.getEvents",     "kairos.watchScanOnce",
         "kairos.reloadConfig",  "kairos.explainPlan",
         "kairos.getMetrics",
-    };
+        "kairos.search"};
 
     EXPECT_EQ(tools.size(), expected_tools.size());
 }
@@ -861,6 +919,134 @@ TEST_F(McpToolsTest, ToolsList_AllHaveInputSchema) {
         EXPECT_TRUE(tool.contains("description"));
         EXPECT_TRUE(tool.contains("inputSchema"));
     }
+}
+
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  §15.14 audit trail (actor "mcp")
+// ═══════════════════════════════════════════════════════════════════════════
+
+TEST_F(McpToolsTest, RunWorkflowWritesAuditEntry) {
+    auto result = call_tool("kairos.runWorkflow",
+                            {{"workflow_id", "wfl-abc123"}});
+    EXPECT_EQ(result["run_id"], "run-new-001");
+
+    writer_stop_.request_stop();
+    writer_->flush();
+    persist::QueryReader reader(*db_);
+    auto entries = reader.query_audit_log(5);
+    ASSERT_GE(entries.size(), 1u);
+    EXPECT_EQ(entries[0].actor, "mcp");
+    EXPECT_EQ(entries[0].action, "run_workflow");
+    EXPECT_EQ(entries[0].target, "wfl-abc123");
+}
+
+TEST_F(McpToolsTest, RunJobWritesAuditEntry) {
+    auto result = call_tool("kairos.runJob", {{"job_id", "job-backup"}});
+    (void)result;
+
+    // Poll briefly — the async writer's first batch can lag a cold
+    // fixture start.
+    persist::QueryReader reader(*db_);
+    std::vector<persist::QueryReader::AuditRow> entries;
+    for (int i = 0; i < 20 && entries.empty(); ++i) {
+        writer_->flush();
+        entries = reader.query_audit_log(5);
+        if (!entries.empty()) break;
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    }
+    writer_stop_.request_stop();
+    writer_->flush();
+    if (entries.empty()) {
+        entries = reader.query_audit_log(5);
+    }
+    ASSERT_GE(entries.size(), 1u);
+    EXPECT_EQ(entries[0].actor, "mcp");
+    EXPECT_EQ(entries[0].action, "run_job");
+}
+
+TEST_F(McpToolsTest, NoWriterMeansNoAuditButToolWorks) {
+    // Rebuild the handler without a writer.
+    McpHandler::Dependencies deps;
+    deps.registry = registry_;
+    deps.query_reader = query_reader_.get();
+    deps.submit_run = [](const std::string&,
+                         engine::TriggerEvent::TargetKind) {
+        return "run-x";
+    };
+    McpHandler bare(std::move(deps));
+    json args{{"workflow_id", "wfl-abc123"}};
+    auto result = bare.dispatch("tools/call",
+        {{"name", "kairos.runWorkflow"},
+         {"arguments", args}}, 1);
+    // Tool still succeeded (no crash, run submitted).
+    EXPECT_TRUE(result.is_object() || result.is_array());
+}
+
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  kairos.search (§15.13)
+// ═══════════════════════════════════════════════════════════════════════════
+
+TEST_F(McpToolsTest, SearchFindsWorkflows) {
+    // Restrict to workflows for an exact assertion (the same query
+    // also matches the workflow's runs).
+    auto result = call_tool("kairos.search",
+                            {{"query", "deploy"},
+                             {"entity_types",
+                              json::array({"workflows"})}});
+    EXPECT_EQ(result["count"], 1);
+    ASSERT_EQ(result["results"].size(), 1u);
+    EXPECT_EQ(result["results"][0]["type"], "workflow");
+    EXPECT_EQ(result["results"][0]["name"], "Deploy Pipeline");
+}
+
+TEST_F(McpToolsTest, SearchFindsRunsByStatus) {
+    auto result = call_tool("kairos.search",
+                            {{"query", "FAILURE"}});
+    EXPECT_GE(result["count"], 1);
+    bool found_run = false;
+    for (const auto& r : result["results"]) {
+        if (r["type"] == "run" && r["detail"] == "FAILURE") {
+            found_run = true;
+        }
+    }
+    EXPECT_TRUE(found_run);
+}
+
+TEST_F(McpToolsTest, SearchEntityFilter) {
+    // "backup" matches a workflow-less job only when jobs are allowed;
+    // restricting to workflows must return zero.
+    auto result = call_tool("kairos.search",
+                            {{"query", "backup"},
+                             {"entity_types",
+                              json::array({"workflows"})}});
+    EXPECT_EQ(result["count"], 0);
+
+    auto with_jobs = call_tool("kairos.search",
+                               {{"query", "backup"},
+                                {"entity_types",
+                                 json::array({"jobs"})}});
+    EXPECT_EQ(with_jobs["count"], 1);
+    EXPECT_EQ(with_jobs["results"][0]["type"], "job");
+}
+
+TEST_F(McpToolsTest, SearchMissingQuery) {
+    auto result = call_tool("kairos.search", json::object());
+    EXPECT_TRUE(result.contains("error"));
+}
+
+TEST_F(McpToolsTest, SearchListedInTools) {
+    // tools/list includes the new tool.
+    auto handler_copy = handler_.get();
+    // dispatch tools/list directly.
+    auto listed = handler_copy->dispatch(
+        "tools/list", json::object(), 1);
+    bool found = false;
+    for (const auto& t : listed["tools"]) {
+        if (t["name"] == "kairos.search") found = true;
+    }
+    EXPECT_TRUE(found);
 }
 
 }  // namespace kairos::mcp::test

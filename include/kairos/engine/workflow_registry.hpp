@@ -14,6 +14,7 @@
 #include "kairos/engine/trigger_types.hpp"
 #include "kairos/watch/watch_group_def.hpp"
 
+#include <algorithm>
 #include <chrono>
 #include <filesystem>
 #include <memory>
@@ -26,6 +27,35 @@ namespace kairos::engine {
 
 // ── Step definition (parsed from YAML) ──────────────────────────────────
 
+/// Per-step retry policy (Roadmap §15.2).
+struct RetryPolicy {
+    int max_attempts = 1;   ///< Total attempts (1 = no retry).
+    std::chrono::milliseconds delay{0};  ///< Delay before retry #1.
+    enum class Backoff { Fixed, Linear, Exponential };
+    Backoff backoff = Backoff::Fixed;
+    /// Exit codes that trigger a retry. Empty = any non-zero code.
+    std::vector<int> retry_on;
+
+    [[nodiscard]] bool enabled() const { return max_attempts > 1; }
+
+    /// Delay before the given attempt (1-based) under the backoff mode.
+    /// Fixed: `delay` every time. Linear: delay × attempt.
+    /// Exponential: delay × 2^(attempt-1).
+    [[nodiscard]] std::chrono::milliseconds delay_for(
+        int attempt) const {
+        if (attempt < 1) return delay;
+        switch (backoff) {
+            case Backoff::Linear:
+                return delay * attempt;
+            case Backoff::Exponential:
+                return delay * (1 << std::min(attempt - 1, 10));
+            case Backoff::Fixed:
+            default:
+                return delay;
+        }
+    }
+};
+
 /// A single step within a job. Maps to a ProcessSpec at execution time.
 struct StepDef {
     std::string step_id;         ///< Content-addressable ID (stp-xxx)
@@ -35,6 +65,7 @@ struct StepDef {
     std::unordered_map<std::string, std::string> env;  ///< Extra env vars
     std::optional<std::chrono::seconds> timeout;  ///< Per-step timeout
     bool use_shell = true;       ///< Execute via shell (default)
+    std::optional<RetryPolicy> retry;  ///< §15.2 retries
 };
 
 // ── Job definition (parsed from YAML) ───────────────────────────────────
@@ -48,7 +79,45 @@ struct JobDef {
     std::optional<std::string> condition_expr;  ///< KEL condition
     bool continue_on_error = false;
     std::unordered_map<std::string, std::string> env;  ///< Job-level env
+    std::vector<std::string> env_files;  ///< §11 .env files, loaded at
+                                         ///< execution; inline env wins.
     std::filesystem::path working_dir;  ///< Job-level working dir
+    std::vector<std::string> tags;  ///< §6 Tags from YAML `tags:` array
+};
+
+// ── Notifications (Roadmap §15.4) ───────────────────────────────────────
+
+/// One notification action fired when a run finishes.
+struct NotificationDef {
+    enum class Type { Webhook, Command };
+    Type type = Type::Command;
+
+    /// Webhook: POST {"text": <rendered template>} to this URL.
+    std::string url;
+
+    /// Command: shell command; the rendered template is available as
+    /// $KAIROS_NOTIFY_MESSAGE.
+    std::string command;
+
+    /// Message template with {{ workflow }} / {{ run_id }} /
+    /// {{ status }} / {{ trigger }} placeholders.
+    std::string message_template;
+};
+
+/// Per-workflow notification hooks.
+struct WorkflowNotifications {
+    std::vector<NotificationDef> on_success;
+    std::vector<NotificationDef> on_failure;
+};
+
+// ── Per-workflow retention (Roadmap §15.11) ──────────────────────────────
+
+/// Retention override for a single workflow. Zero/empty fields fall
+/// back to the global kairos.persistence.* settings.
+struct WorkflowRetention {
+    int max_runs = 0;           ///< Keep at most N runs (0 = global).
+    int max_age_days = 0;       ///< Prune runs older than N days.
+    bool keep_failures = true;  ///< Failed runs survive age pruning.
 };
 
 // ── Workflow definition (parsed from YAML) ──────────────────────────────
@@ -59,6 +128,11 @@ struct WorkflowDef {
     std::string workflow_name;   ///< Human-readable name
     std::vector<JobDef> jobs;    ///< All jobs in the workflow
     WorkflowDag dag;             ///< Pre-built DAG from job definitions
+    std::vector<std::string> tags;  ///< §6 Tags from YAML `tags:` array
+    std::string source_path;     ///< YAML file loaded from ("" for inline).
+                                  ///< Not part of the content ID hash.
+    WorkflowNotifications notifications;  ///< §15.4 (not in content hash).
+    WorkflowRetention retention;          ///< §15.11 (not in content hash).
 };
 
 // ── Workflow Registry ───────────────────────────────────────────────────

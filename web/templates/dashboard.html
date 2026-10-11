@@ -1,0 +1,117 @@
+<!-- Dashboard content (wrapped by base.html) — data-kairos-live enables
+     SSE-driven updates (§3.8.6). -->
+<!-- Data: total_runs, active_runs, runs_today, failures_today, uptime,
+     recent_runs[], recent_events[] -->
+
+<div data-kairos-live="dashboard">
+
+<div class="row mb-4">
+  <div class="col-6 col-md-3">
+    <div class="card p-3 text-center h-100">
+      <div class="stat-value">{{ total_runs }}</div>
+      <div class="stat-label">Total Runs</div>
+    </div>
+  </div>
+  <div class="col-6 col-md-3">
+    <div class="card p-3 text-center h-100">
+      <div class="stat-value">{{ active_runs }}</div>
+      <div class="stat-label">Active Runs</div>
+    </div>
+  </div>
+  <div class="col-6 col-md-3">
+    <div class="card p-3 text-center h-100">
+      <div class="stat-value">{{ runs_today }}</div>
+      <div class="stat-label">Runs Today</div>
+    </div>
+  </div>
+  <div class="col-6 col-md-3">
+    <div class="card p-3 text-center h-100">
+      <div class="stat-value {% if failures_today > 0 %}danger{% endif %}">{{ failures_today }}</div>
+      <div class="stat-label">Failures Today</div>
+    </div>
+  </div>
+</div>
+
+<div class="row mb-4">
+  <div class="col-md-6">
+    <div class="card p-3 h-100">
+      <h5>Daemon Uptime</h5>
+      <p class="mb-0" style="color: var(--k-accent); font-size: 1.2rem;">{{ uptime }}</p>
+    </div>
+  </div>
+  <div class="col-md-6">
+    <div class="card p-3 h-100">
+      <h5>Quick Actions</h5>
+      <a href="/workflows" class="btn btn-outline-info btn-sm me-2">Workflows</a>
+      <a href="/runs" class="btn btn-outline-info btn-sm me-2">Runs</a>
+      <a href="/triggers" class="btn btn-outline-info btn-sm me-2">Triggers</a>
+      <a href="/metrics" class="btn btn-outline-info btn-sm me-2">Metrics</a>
+      <a href="/health" class="btn btn-outline-info btn-sm">Health</a>
+    </div>
+  </div>
+</div>
+
+<div class="card p-3">
+  <div class="d-flex justify-content-between align-items-center mb-3">
+    <h5 class="mb-0">Recent Runs</h5>
+    <a href="/runs" class="btn btn-outline-info btn-sm">View All</a>
+  </div>
+  <div class="table-responsive">
+    <table class="table table-sm table-hover mb-0">
+      <thead>
+        <tr>
+          <th>Run ID</th><th>Target</th><th>Status</th>
+          <th>Trigger</th><th>Started</th><th>Duration</th>
+        </tr>
+      </thead>
+      <tbody>
+{% for run in recent_runs %}
+        <tr id="live-runs">
+          <td><a href="/runs/{{ run.run_id }}"><code>{{ run.run_id_short }}</code></a></td>
+          <td>{{ run.target_name }}</td>
+          <td><span class="badge badge-{{ run.badge }}">{{ run.status }}</span></td>
+          <td>{{ run.trigger_type }}</td>
+          <td class="fit">{{ run.start_ts }}</td>
+          <td class="fit">{{ run.duration_ms }}ms</td>
+        </tr>
+{% endfor %}
+{% if length(recent_runs) == 0 %}
+        <tr><td colspan="6" class="text-center k-empty py-4">No runs recorded yet</td></tr>
+{% endif %}
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<div class="card p-3 mt-4">
+  <div class="d-flex justify-content-between align-items-center mb-3">
+    <h5 class="mb-0">Recent Events</h5>
+    <a href="/events" class="btn btn-outline-info btn-sm">View All</a>
+  </div>
+  <div class="table-responsive">
+    <table class="table table-sm table-hover mb-0">
+      <thead>
+        <tr>
+          <th>Event</th><th>Watch Group</th><th>Rule</th>
+          <th>Type</th><th>Affected Files</th><th>Time</th>
+        </tr>
+      </thead>
+      <tbody>
+{% for event in recent_events %}
+        <tr id="live-events">
+          <td><a href="/events/{{ event.event_uid }}"><code>{{ event.event_uid_short }}</code></a></td>
+          <td>{{ event.watch_group }}</td>
+          <td>{{ event.rule_name }}</td>
+          <td>{{ event.event_type }}</td>
+          <td class="text-muted" style="max-width: 240px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">{{ event.files_summary }}</td>
+          <td class="fit">{{ event.created_at }}</td>
+        </tr>
+{% endfor %}
+{% if length(recent_events) == 0 %}
+        <tr><td colspan="6" class="text-center k-empty py-4">No events recorded yet</td></tr>
+{% endif %}
+      </tbody>
+    </table>
+  </div>
+</div>
+</div>

@@ -1,0 +1,39 @@
+<!-- Watch groups list (wrapped by base.html) -->
+<!-- Data: groups[{name, id, mode, items_count, rules_count, tags[], enabled,
+     last_scan, status}] -->
+
+<h4 class="page-header">
+  Watch Groups
+  <a href="/watches/new" class="btn btn-info btn-sm">+ New Watch Group</a>
+</h4>
+
+<div class="card p-3">
+  <div class="table-responsive">
+    <table class="table table-sm table-hover mb-0">
+      <thead>
+        <tr><th>Group</th><th>Mode</th><th>Watch Items</th><th>Rules</th><th>Tags</th><th>Status</th></tr>
+      </thead>
+      <tbody>
+{% for g in groups %}
+        <tr>
+          <td><a href="/watches/{{ g.name }}"><strong>{{ g.name }}</strong></a></td>
+          <td class="fit"><span class="badge badge-primary">{{ g.mode }}</span></td>
+          <td class="fit">{{ g.items_count }}</td>
+          <td class="fit">{{ g.rules_count }}</td>
+          <td>{% for t in g.tags %}<span class="kairos-tag">{{ t }}</span>{% endfor %}</td>
+          <td class="fit">
+{% if g.enabled %}
+            <span class="badge badge-success">enabled</span>
+{% else %}
+            <span class="badge badge-secondary">disabled</span>
+{% endif %}
+          </td>
+        </tr>
+{% endfor %}
+{% if length(groups) == 0 %}
+        <tr><td colspan="6" class="text-center k-empty py-4">No watch groups configured</td></tr>
+{% endif %}
+      </tbody>
+    </table>
+  </div>
+</div>

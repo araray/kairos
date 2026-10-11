@@ -66,7 +66,8 @@ protected:
                 exit_code INTEGER DEFAULT 0,
                 start_ts TEXT NOT NULL,
                 end_ts TEXT DEFAULT '',
-                duration_ms INTEGER DEFAULT 0
+                duration_ms INTEGER DEFAULT 0,
+                tags_json TEXT
             )
         )");
         db_->exec(R"(
@@ -95,6 +96,7 @@ protected:
                 end_ts TEXT DEFAULT '',
                 exit_code INTEGER DEFAULT 0,
                 duration_ms INTEGER DEFAULT 0,
+                attempt INTEGER NOT NULL DEFAULT 1,
                 PRIMARY KEY (run_id, job_id, step_id)
             )
         )");
@@ -142,7 +144,17 @@ protected:
                 rule_name TEXT DEFAULT '',
                 details_json TEXT DEFAULT '{}',
                 action_taken TEXT DEFAULT '',
-                created_at TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+                created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+            )
+        )");
+        db_->exec(R"(
+            CREATE TABLE IF NOT EXISTS audit_log (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+                actor TEXT NOT NULL,
+                action TEXT NOT NULL,
+                target TEXT,
+                detail_json TEXT
             )
         )");
         db_->exec(R"(

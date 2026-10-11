@@ -20,10 +20,13 @@
 #include "kairos/core/version.hpp"
 #include "kairos/engine/dag.hpp"
 #include "kairos/engine/execution_plan.hpp"
+#include "kairos/engine/explain.hpp"
 
 #include <spdlog/spdlog.h>
 
+#include <algorithm>
 #include <array>
+#include <cctype>
 #include <stdexcept>
 #include <thread>
 #include <unordered_map>
@@ -77,6 +80,21 @@ McpHandler::McpHandler(Dependencies deps)
     : deps_(std::move(deps)) {}
 
 // ── Main dispatch ──────────────────────────────────────────────────────────
+
+// ── §15.14 audit trail ────────────────────────────────────────────────────
+
+void McpHandler::audit(const std::string& action,
+                       const std::string& target,
+                       const std::string& detail_json) const {
+    if (deps_.db_writer) {
+        deps_.db_writer->enqueue(persist::InsertAuditEntry{
+            .actor = "mcp",
+            .action = action,
+            .target = target,
+            .detail_json = detail_json.empty() ? "{}" : detail_json,
+        });
+    }
+}
 
 json McpHandler::dispatch(const std::string& method,
                           const json& params, const json& id) {
@@ -143,6 +161,7 @@ json McpHandler::handle_tools_call(const json& params) {
         {"kairos.watchScanOnce",   &McpHandler::tool_watch_scan_once},
         // Config/Metrics
         {"kairos.reloadConfig",    &McpHandler::tool_reload_config},
+        {"kairos.search",          &McpHandler::tool_search},
         {"kairos.getMetrics",      &McpHandler::tool_get_metrics},
         // Workflows (Phase 4 Batch 3)
         {"kairos.listWorkflows",   &McpHandler::tool_list_workflows},
@@ -329,6 +348,137 @@ json McpHandler::tool_watch_scan_once(const json& args) {
 //  Tool implementations: Config
 // ═══════════════════════════════════════════════════════════════════════════
 
+json McpHandler::tool_search(const json& args) {
+    auto query = args.value("query", std::string{});
+    if (query.empty()) {
+        return {{"error", "Missing required parameter: query"}};
+    }
+    int limit = args.value("limit", 20);
+    if (limit < 1) limit = 1;
+    if (limit > 100) limit = 100;
+
+    // Whether the optional entity_types array allows a kind.
+    // (nlohmann contains() is object-key lookup; arrays need find.)
+    auto wants = [&args](const char* kind) -> bool {
+        if (!args.contains("entity_types")) return true;
+        const auto& types = args["entity_types"];
+        if (!types.is_array() || types.empty()) return true;
+        return std::find(types.begin(), types.end(), json(kind)) !=
+               types.end();
+    };
+
+    // Case-insensitive substring across entity types.
+    auto matches = [&query](std::initializer_list<
+                            const std::string*> fields) -> bool {
+        std::string needle;
+        needle.reserve(query.size());
+        for (char c : query) {
+            needle += static_cast<char>(
+                std::tolower(static_cast<unsigned char>(c)));
+        }
+        for (const std::string* f : fields) {
+            std::string hay;
+            hay.reserve(f->size());
+            for (char c : *f) {
+                hay += static_cast<char>(
+                    std::tolower(static_cast<unsigned char>(c)));
+            }
+            if (hay.find(needle) != std::string::npos) return true;
+        }
+        return false;
+    };
+
+    json results = json::array();
+
+    auto reg = get_registry();
+
+    int emitted = 0;
+    if (reg && wants("workflows")) {
+        for (const auto* wf : reg->workflows()) {
+            if (emitted >= limit) break;
+            if (matches({&wf->workflow_name, &wf->workflow_id})) {
+                results.push_back({
+                    {"type", "workflow"},
+                    {"id", wf->workflow_id},
+                    {"name", wf->workflow_name},
+                    {"detail", std::to_string(wf->jobs.size()) +
+                               " job(s)"},
+                });
+                ++emitted;
+            }
+        }
+    }
+
+    if (reg && wants("jobs")) {
+        for (const auto* j : reg->standalone_jobs()) {
+            if (emitted >= limit) break;
+            if (matches({&j->job_name, &j->job_id})) {
+                results.push_back({
+                    {"type", "job"},
+                    {"id", j->job_id},
+                    {"name", j->job_name},
+                });
+                ++emitted;
+            }
+        }
+    }
+
+    if (reg && wants("watches")) {
+        for (const auto& g : reg->watch_groups()) {
+            if (emitted >= limit) break;
+            if (matches({&g.group_name, &g.group_id})) {
+                results.push_back({
+                    {"type", "watch_group"},
+                    {"id", g.group_id},
+                    {"name", g.group_name},
+                });
+                ++emitted;
+            }
+        }
+    }
+
+    if (deps_.query_reader &&
+        wants("runs")) {
+        auto runs = deps_.query_reader->query_recent_runs(100);
+        for (const auto& r : runs) {
+            if (emitted >= limit) break;
+            if (matches({&r.run_id, &r.target_name, &r.status})) {
+                results.push_back({
+                    {"type", "run"},
+                    {"id", r.run_id},
+                    {"name", r.target_name},
+                    {"detail", r.status},
+                });
+                ++emitted;
+            }
+        }
+    }
+
+    if (deps_.query_reader &&
+        wants("events")) {
+        auto events = deps_.query_reader->query_watch_events(100);
+        for (const auto& e : events) {
+            if (emitted >= limit) break;
+            if (matches({&e.watch_group, &e.rule_name,
+                         &e.event_type})) {
+                results.push_back({
+                    {"type", "event"},
+                    {"id", e.event_uid},
+                    {"name", e.watch_group + "/" + e.rule_name},
+                    {"detail", e.event_type},
+                });
+                ++emitted;
+            }
+        }
+    }
+
+    return {
+        {"query", query},
+        {"results", std::move(results)},
+        {"count", emitted},
+    };
+}
+
 json McpHandler::tool_reload_config(const json& /*args*/) {
     if (!deps_.reload_config) {
         return {{"success", false},
@@ -337,6 +487,7 @@ json McpHandler::tool_reload_config(const json& /*args*/) {
 
     std::vector<std::string> errors;
     bool ok = deps_.reload_config(errors);
+    if (ok) audit("reload_config", "");
 
     json err_arr = json::array();
     for (const auto& e : errors) {
@@ -480,6 +631,7 @@ json McpHandler::tool_run_workflow(const json& args) {
 
     auto run_id = deps_.submit_run(
         workflow_id, engine::TriggerEvent::TargetKind::Workflow);
+    audit("run_workflow", workflow_id);
 
     if (run_id.empty()) {
         return {{"error", "Failed to submit workflow run (queue full?)"}};
@@ -513,69 +665,11 @@ json McpHandler::tool_explain_plan(const json& args) {
         return {{"error", "Workflow not found: " + workflow_id}};
     }
 
-    // Build execution plan from the DAG structure.
-    // Walk the DAG level-by-level, marking conditions as pending
-    // if they reference same-workflow jobs (can't evaluate until runtime).
-    engine::ExecutionPlan plan;
-    plan.workflow_id = wf->workflow_id;
-    plan.workflow_name = wf->workflow_name;
-    plan.trigger_type = "explain";
-
-    // Collect all job names in this workflow for self-reference detection.
-    std::unordered_set<std::string> wf_job_names;
-    for (const auto& job : wf->jobs) {
-        wf_job_names.insert(job.job_name);
-    }
-
-    for (int lvl = 0; lvl < wf->dag.level_count(); ++lvl) {
-        for (const auto& job_id : wf->dag.jobs_at_level(lvl)) {
-            const auto& node = wf->dag.node(job_id);
-            engine::PlanEntry entry;
-            entry.job_id = node.job_id;
-            entry.job_name = node.job_name;
-            entry.level = node.topo_level;
-            entry.needs = node.needs;
-            entry.condition_expr =
-                node.condition_expr.value_or("");
-
-            if (node.condition_expr.has_value() &&
-                !node.condition_expr->empty()) {
-                // Check if the condition references a job in the same
-                // workflow — if so, mark as ConditionPending because
-                // we can't evaluate it before the run starts.
-                bool refs_self = false;
-                for (const auto& jn : wf_job_names) {
-                    if (node.condition_expr->find(
-                            "\"" + jn + "\"") != std::string::npos) {
-                        refs_self = true;
-                        break;
-                    }
-                }
-
-                if (refs_self) {
-                    entry.action = engine::PlanAction::ConditionPending;
-                    entry.reason = "Condition references same-workflow "
-                                   "job — will be evaluated at runtime";
-                    entry.condition_result = "pending";
-                } else {
-                    // External condition — could potentially evaluate
-                    // against the database, but for safety we mark
-                    // as Run (the condition will be evaluated at runtime).
-                    entry.action = engine::PlanAction::Run;
-                    entry.reason = "External condition (evaluated at "
-                                   "runtime)";
-                }
-            } else if (node.needs.empty()) {
-                entry.action = engine::PlanAction::Run;
-                entry.reason = "No dependencies, no condition";
-            } else {
-                entry.action = engine::PlanAction::Run;
-                entry.reason = "Dependencies will be met";
-            }
-
-            plan.entries.push_back(std::move(entry));
-        }
-    }
+    // Build the plan with the shared dry-run builder (Roadmap Phase 9):
+    // conditions decidable from run history are evaluated via the query
+    // reader when available; same-workflow references stay pending.
+    engine::ExecutionPlan plan = engine::build_explain_plan(
+        *wf, deps_.query_reader);
 
     // Return as parsed JSON (from render_json).
     auto json_str = plan.render_json();
@@ -633,6 +727,7 @@ json McpHandler::tool_run_job(const json& args) {
 
     auto run_id = deps_.submit_run(
         job_id, engine::TriggerEvent::TargetKind::StandaloneJob);
+    audit("run_job", job_id);
 
     if (run_id.empty()) {
         return {{"error", "Failed to submit job run (queue full?)"}};
@@ -1224,6 +1319,36 @@ json McpHandler::build_tool_schemas() const {
                      "Specific watch group to scan (all if omitted)"}
                 }}
             }}
+        }}
+    });
+
+    // kairos.search (§15.13)
+    tools.push_back({
+        {"name", "kairos.search"},
+        {"description",
+         "Search across Kairos entities (workflows, jobs, watch "
+         "groups, runs, events) by case-insensitive substring"},
+        {"inputSchema", {
+            {"type", "object"},
+            {"properties", {
+                {"query", {
+                    {"type", "string"},
+                    {"description", "Search text"}
+                }},
+                {"entity_types", {
+                    {"type", "array"},
+                    {"items", {{"enum", json::array(
+                        {"workflows", "jobs", "watches",
+                         "runs", "events"})}}},
+                    {"description",
+                     "Restrict to these types (default: all)"}
+                }},
+                {"limit", {
+                    {"type", "integer"},
+                    {"description", "Max results (default 20)"}
+                }}
+            }},
+            {"required", json::array({"query"})}
         }}
     });
 

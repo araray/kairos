@@ -1,8 +1,6 @@
 <p align="center">
-  <img src="docs/kairos-logo.svg" alt="Kairos" width="200"/>
+  <img src="assets/brand/kairos-logo.svg" alt="Kairos" width="420"/>
 </p>
-
-<h1 align="center">Kairos</h1>
 
 <p align="center">
   <strong>Unified local orchestration daemon — scheduling, workflows, and filesystem monitoring in a single C++20 binary.</strong>
@@ -24,12 +22,7 @@
   <img src="https://img.shields.io/badge/tests-1100+-brightgreen" alt="Tests"/>
 </p>
 
----
-
 > *"Καιρός (Kairos) — the ancient Greek concept of the opportune, decisive moment."*
-
-Kairos replaces three legacy Python tools — **LocalFlow** (workflow/DAG execution), **AVScheduler** (job scheduling), and **EventWatcher** (filesystem monitoring) — with a single, production-grade C++20 daemon. It runs on developer machines like a production service: deterministic, observable, secure, and agent-ready.
-
 ---
 
 ## Features
@@ -38,9 +31,16 @@ Kairos replaces three legacy Python tools — **LocalFlow** (workflow/DAG execut
 
 Every trigger — schedule tick, filesystem change, manual run, or MCP agent call — flows through the same pipeline:
 
+![Unified Pipeline](assets/diagrams/repository/readme-unified-pipeline.svg)
+
+<details>
+<summary>Text version</summary>
+
 ```
 Trigger → Evaluate Conditions (KEL) → Plan (DAG) → Execute → Persist → Emit Observability
 ```
+
+</details>
 
 ### Scheduling Engine
 
@@ -97,6 +97,19 @@ kairos.queryRuns        kairos.getRunDetail    kairos.getRunLogs
 kairos.getStepOutput    kairos.listWatchGroups kairos.getEvents
 kairos.reloadConfig     kairos.watchScanOnce
 ```
+
+### Web Console
+
+A server-rendered web UI ships embedded in the binary (build with `KAIROS_HTTP=ON`, enable `kairos.http.enabled`):
+
+- **Full read console** — dashboard, workflows (with DAG view + dry-run plan + YAML source), jobs, runs (SSE live logs), events (affected files), watches, triggers.
+- **Real-time** — dashboard updates live over SSE; toasts announce run completions and critical events; run comparison side-by-side.
+- **Management** — YAML editors with live validation for workflows/watches, run/cancel/re-run buttons, audit trail.
+- **KEL playground** — evaluate expressions with `job()`/`has_tag()` bindings in the browser.
+- **Three themes** — blue / dark / light via CSS custom properties, persisted per browser.
+- **Instant search** — one filter bar searches every table (plain text or `/regex/`).
+- **Hot-editable** — set `kairos.http.web_root` to override the embedded templates without rebuilding.
+- **REST API** — token-authenticated read/write endpoints for every entity plus triggering, cancellation, and live SSE streams.
 
 ### Observability
 
@@ -202,6 +215,11 @@ docker run -v /path/to/config:/etc/kairos kairos
 
 ## Architecture
 
+![Architecture](assets/diagrams/repository/readme-architecture.svg)
+
+<details>
+<summary>Text version</summary>
+
 ```
 ┌─────────────────────────────────────────────────────────────────────────┐
 │                          INTERFACE LAYER                                 │
@@ -248,6 +266,8 @@ docker run -v /path/to/config:/etc/kairos kairos
 │  └──────────────┘  └──────────────┘  └────────────────┘  └──────────┘│
 └─────────────────────────────────────────────────────────────────────────┘
 ```
+
+</details>
 
 ### Threading Model
 
@@ -337,9 +357,10 @@ See [`deploy/kairos.toml.example`](deploy/kairos.toml.example) for the complete 
 | Document | Description |
 |----------|-------------|
 | [`USAGE.md`](USAGE.md) | Complete CLI reference, examples, and operational guide |
-| [`BUILD.md`](BUILD.md) | Build system, options, cross-platform instructions, and testing |
-| [`AUTHORING.md`](AUTHORING.md) | Workflow, watch group, and KEL authoring guide |
+| [`Build.md`](Build.md) | Build system, options, cross-platform instructions, and testing |
+| [`Authoring.md`](Authoring.md) | Workflow, watch group, and KEL authoring guide |
 | [`deploy/kairos.toml.example`](deploy/kairos.toml.example) | Annotated default configuration reference |
+| [Artwork and diagram assets](assets/README.md) | Approved cobalt/coral identity, palette, editable source, and SVG diagrams |
 | [`docs/DESIGN_SPEC_PART1-7.md`](docs/) | Complete design and architecture specification |
 
 ---
@@ -372,6 +393,7 @@ kairos/
 │   ├── security/                   #   Secret store (Vault)
 │   ├── testing/                    #   Fake clock, filesystem, process
 │   └── watch/                      #   Watch engine, scanners, debounce
+├── web/                            # Web UI templates + static (embedded at build)
 ├── src/                            # Implementation sources
 ├── tests/                          # Test suite (Google Test)
 │   ├── unit/                       #   ~1100 unit tests

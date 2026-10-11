@@ -93,16 +93,31 @@ confy::Value build_kairos_defaults() {
                 {"color",              "auto"},       // "auto"|"always"|"never"
             }},
 
-            // ─── HTTP (Phase 4, but defaults included for completeness)
+            // ─── HTTP (§26; Web UI foundation — Roadmap Phase 9)
             {"http", {
                 {"enabled",            false},
                 {"listen_addr",        "127.0.0.1"},
                 {"listen_port",        8420},
                 {"api_token",          ""},
-                {"static_dir",         ""},
+                {"web_root",           ""},
                 {"cors_enabled",       false},
                 {"cors_origins",       "*"},
                 {"read_timeout_s",     30},
+            }},
+
+            // ─── Health / self-monitoring (Roadmap §15.5) ────────────
+            {"health", {
+                {"enabled",                 true},
+                {"check_interval_seconds",  60},
+                {"max_db_size_mb",          1024},
+                {"max_queue_depth",         100},
+                {"stale_run_timeout_seconds", 3600},
+            }},
+
+            // ─── Secrets backend (§12.2) ─────────────────────────────
+            {"security", {
+                {"backend",     ""},            // "vault" | "env"
+                {"env_prefix",  "KAIROS_SECRET_"},
             }},
 
             // ─── Vault / Secrets (§17) ────────────────────────────────

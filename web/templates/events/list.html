@@ -1,0 +1,48 @@
+<!-- Events list (wrapped by base.html) -->
+<!-- Data: events[{event_uid, event_uid_short, watch_group, rule_name,
+     event_type, severity, files_summary, files_list[], created_at}] -->
+
+<h4 class="page-header">Watch Events</h4>
+
+<div class="card p-3">
+  <div class="table-responsive">
+    <table class="table table-sm table-hover mb-0">
+      <thead>
+        <tr>
+          <th>Event</th><th>Watch Group</th><th>Rule</th>
+          <th>Type</th><th>Severity</th>
+          <th>Affected Files</th><th>Time</th>
+        </tr>
+      </thead>
+      <tbody>
+{% for event in events %}
+        <tr>
+          <td><a href="/events/{{ event.event_uid }}"><code>{{ event.event_uid_short }}</code></a></td>
+          <td>{{ event.watch_group }}</td>
+          <td>{{ event.rule_name }}</td>
+          <td>{{ event.event_type }}</td>
+          <td class="fit sev-{{ severity_class(event.severity) }}">{{ event.severity }}</td>
+          <td>
+{% if length(event.files_list) > 0 %}
+            <details>
+              <summary style="max-width:240px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;cursor:pointer;">{{ event.files_summary }}</summary>
+              <ul class="mt-1 mb-0 ps-3" style="font-size:0.85em;">
+{% for f in event.files_list %}
+                <li><code>{{ f }}</code></li>
+{% endfor %}
+              </ul>
+            </details>
+{% else %}
+            <span class="text-muted">—</span>
+{% endif %}
+          </td>
+          <td class="fit">{{ event.created_at }}</td>
+        </tr>
+{% endfor %}
+{% if length(events) == 0 %}
+        <tr><td colspan="7" class="text-center k-empty py-4">No events recorded yet</td></tr>
+{% endif %}
+      </tbody>
+    </table>
+  </div>
+</div>

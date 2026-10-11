@@ -1,0 +1,64 @@
+{
+  "scope": "Main architecture and execution diagrams only",
+  "unique_diagrams": 3,
+  "source_occurrences": 3,
+  "diagrams": [
+    {
+      "id": "readme-unified-pipeline",
+      "category": "diagrams/repository",
+      "width": 1320,
+      "height": 360,
+      "status": "Repository documentation",
+      "sources": [
+        {
+          "source": "/media/araray/kilgharrah/repos/kairos/README.md",
+          "section": "Unified Pipeline",
+          "start_line": 41,
+          "end_line": 43,
+          "language": "",
+          "current_document": true
+        }
+      ],
+      "original_text": "Trigger → Evaluate Conditions (KEL) → Plan (DAG) → Execute → Persist → Emit Observability",
+      "original_index": 0
+    },
+    {
+      "id": "readme-architecture",
+      "category": "diagrams/repository",
+      "width": 1200,
+      "height": 1150,
+      "status": "Repository documentation",
+      "sources": [
+        {
+          "source": "/media/araray/kilgharrah/repos/kairos/README.md",
+          "section": "Architecture",
+          "start_line": 205,
+          "end_line": 250,
+          "language": "",
+          "current_document": true
+        }
+      ],
+      "original_text": "┌─────────────────────────────────────────────────────────────────────────┐\n│                          INTERFACE LAYER                                 │\n│                                                                         │\n│  ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌───────────────────────┐  │\n│  │ CLI      │  │ MCP      │  │ HTTP API │  │ Service Integration   │  │\n│  │ (CLI11)  │  │ (stdio)  │  │ (opt.)   │  │ systemd/launchd/SCM  │  │\n│  └────┬─────┘  └────┬─────┘  └────┬─────┘  └──────────┬────────────┘  │\n│       └──────────────┴─────────────┴───────────────────┘               │\n├─────────────────────────────────────────────────────────────────────────┤\n│                          DAEMON CORE                                    │\n│                                                                         │\n│  ┌────────────────────┐       ┌───────────────────────────────────────┐│\n│  │   Trigger Bus       │──────│  Pipeline (DAG Planner + Dispatcher)  ││\n│  │   (bounded queue)   │      │  • Topological sort (Kahn's)          ││\n│  └──┬──────────┬───────┘      │  • Level-by-level parallel execution  ││\n│     │          │              │  • KEL condition evaluation            ││\n│     │          │              │  • Execution plan generation           ││\n│     │          │              └──────────────────┬────────────────────┘│\n│  ┌──┴────┐ ┌──┴──────────┐                      │                     │\n│  │Sched- │ │Watch Engine │               ┌──────┴──────────┐          │\n│  │uler   │ │             │               │ Runner Pool      │          │\n│  │       │ │• inotify    │               │                  │          │\n│  │• cron │ │• FSEvents   │               │• LocalShellRunner│          │\n│  │• intv │ │• RDCW       │               │• DockerRunner    │          │\n│  │• date │ │• sample+diff│               │• (Ansible opt.)  │          │\n│  └───────┘ └─────────────┘               └─────────────────┘          │\n├─────────────────────────────────────────────────────────────────────────┤\n│                          ENGINE LAYER                                   │\n│                                                                         │\n│  ┌──────────────┐  ┌──────────────┐  ┌──────────────────────────────┐ │\n│  │ KEL Evaluator│  │ Config Store │  │ Workflow Registry             │ │\n│  │ parser → AST │  │ (confy-cpp)  │  │ (immutable, atomic reload)   │ │\n│  │ → evaluator  │  │ layered conf │  │ workflows + jobs + triggers  │ │\n│  └──────────────┘  └──────────────┘  └──────────────────────────────┘ │\n├─────────────────────────────────────────────────────────────────────────┤\n│                       INFRASTRUCTURE LAYER                              │\n│                                                                         │\n│  ┌──────────────┐  ┌──────────────┐  ┌────────────────┐  ┌──────────┐│\n│  │ SQLite Store │  │ Logging      │  │ Metrics        │  │ Tracer   ││\n│  │ (WAL mode)   │  │ (spdlog)     │  │ counters/gauge │  │ (OTel    ││\n│  │ runs/steps/  │  │ JSON + text  │  │ periodic snap  │  │  opt.)   ││\n│  │ events/state │  │ secret mask  │  │ retention prune│  │          ││\n│  └──────────────┘  └──────────────┘  └────────────────┘  └──────────┘│\n└─────────────────────────────────────────────────────────────────────────┘",
+      "original_index": 1
+    },
+    {
+      "id": "authoring-parallel-execution",
+      "category": "diagrams/repository",
+      "width": 1080,
+      "height": 690,
+      "status": "Repository documentation",
+      "sources": [
+        {
+          "source": "/media/araray/kilgharrah/repos/kairos/Authoring.md",
+          "section": "Parallel Execution",
+          "start_line": 252,
+          "end_line": 258,
+          "language": "",
+          "current_document": true
+        }
+      ],
+      "original_text": "Level 0:  fetch-data    fetch-config\n              ↓   ↘          ↓\nLevel 1:  validate   transform\n              ↓       ↓\nLevel 2:      load",
+      "original_index": 4
+    }
+  ]
+}

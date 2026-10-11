@@ -164,6 +164,146 @@ TEST(CronTriggerTest, ConsecutiveFiresIncrease) {
 }
 
 // ═══════════════════════════════════════════════════════════════════════
+//  SUB-SECOND PRECISION — SCHEDULER SPIN BUG REGRESSION
+// ═══════════════════════════════════════════════════════════════════════
+//
+//  Reproduces the bug where CronTrigger::next_fire_after returned
+//  the SAME cron-match second when called with a sub-second
+//  time_point, causing the scheduler to spin-loop and produce
+//  duplicate runs.
+//
+//  Root cause: system_clock::to_time_t truncates sub-seconds, so
+//  23:55:00.300 → time_t 23:55:00 → croncpp returns 23:55:00 again.
+//  Fix: ceil to next whole second before passing to croncpp.
+
+TEST(CronTriggerTest, SubSecondAtExactCronMatch_DailyAt2AM) {
+    CronTrigger ct{"0 2 * * *"};  // Daily at 02:00.
+
+    // Create a time_point at exactly 02:00:00.500 (sub-second past match).
+    auto exact = make_time(2026, 3, 7, 2, 0, 0);
+    auto sub_second = exact + std::chrono::milliseconds(500);
+
+    auto next = ct.next_fire_after(sub_second);
+
+    // Must be strictly after the input (next day's 02:00:00).
+    EXPECT_GT(next, sub_second);
+    auto tm = to_local_tm(next);
+    EXPECT_EQ(tm.tm_hour, 2);
+    EXPECT_EQ(tm.tm_min, 0);
+    EXPECT_EQ(tm.tm_mday, 8);  // Next day!
+}
+
+TEST(CronTriggerTest, SubSecondAtExactCronMatch_LoteriasPattern) {
+    // Exact pattern from production: "55 23 * * *" (daily at 23:55).
+    // This is the trigger that exposed the bug.
+    CronTrigger ct{"55 23 * * *"};
+
+    // Simulate: cron fires at 23:55:00, scheduler calls reschedule
+    // a few milliseconds later at 23:55:00.300.
+    auto exact = make_time(2026, 3, 11, 23, 55, 0);
+    auto sub_second = exact + std::chrono::milliseconds(300);
+
+    auto next = ct.next_fire_after(sub_second);
+
+    // Must advance to the NEXT day's 23:55:00, not return same day.
+    EXPECT_GT(next, sub_second);
+    auto tm = to_local_tm(next);
+    EXPECT_EQ(tm.tm_hour, 23);
+    EXPECT_EQ(tm.tm_min, 55);
+    EXPECT_EQ(tm.tm_mday, 12);  // March 12, not March 11.
+}
+
+TEST(CronTriggerTest, SubSecondJustPastMatch_EveryMinute) {
+    CronTrigger ct{"* * * * *"};
+
+    // At 14:30:00.001 — 1ms past the match at 14:30:00.
+    auto exact = make_time(2026, 3, 7, 14, 30, 0);
+    auto sub_second = exact + std::chrono::milliseconds(1);
+
+    auto next = ct.next_fire_after(sub_second);
+
+    // Must return 14:31:00, not 14:30:00.
+    EXPECT_GT(next, sub_second);
+    auto tm = to_local_tm(next);
+    EXPECT_EQ(tm.tm_min, 31);
+    EXPECT_EQ(tm.tm_hour, 14);
+}
+
+TEST(CronTriggerTest, SubSecondJustPastMatch_EveryFiveMinutes) {
+    CronTrigger ct{"*/5 * * * *"};
+
+    // At 14:30:00.999 — 999ms past the :30 match.
+    auto exact = make_time(2026, 3, 7, 14, 30, 0);
+    auto sub_second = exact + std::chrono::milliseconds(999);
+
+    auto next = ct.next_fire_after(sub_second);
+
+    // Must skip to 14:35:00, not return 14:30:00.
+    EXPECT_GT(next, sub_second);
+    auto tm = to_local_tm(next);
+    EXPECT_EQ(tm.tm_min, 35);
+}
+
+TEST(CronTriggerTest, ExactSecondBoundaryStillAdvances) {
+    // At exact second boundary (no sub-second component), should still
+    // return a strictly-later time (croncpp's own "strictly after" guarantee).
+    CronTrigger ct{"30 14 * * *"};  // Daily at 14:30.
+
+    auto exact = make_time(2026, 3, 7, 14, 30, 0);
+    auto next = ct.next_fire_after(exact);
+
+    EXPECT_GT(next, exact);
+    auto tm = to_local_tm(next);
+    EXPECT_EQ(tm.tm_hour, 14);
+    EXPECT_EQ(tm.tm_min, 30);
+    EXPECT_EQ(tm.tm_mday, 8);  // Next day.
+}
+
+TEST(CronTriggerTest, SubSecondMidSecond_NonMatchingSecond) {
+    // Sub-second at a non-matching second (14:30:15.500 for hourly cron).
+    // This should NOT be affected by the bug, but verifying correctness.
+    CronTrigger ct{"0 * * * *"};
+
+    auto base = make_time(2026, 3, 7, 14, 30, 15);
+    auto sub_second = base + std::chrono::milliseconds(500);
+
+    auto next = ct.next_fire_after(sub_second);
+
+    EXPECT_GT(next, sub_second);
+    auto tm = to_local_tm(next);
+    EXPECT_EQ(tm.tm_hour, 15);
+    EXPECT_EQ(tm.tm_min, 0);
+}
+
+TEST(CronTriggerTest, SubSecondRapidFireSimulation) {
+    // Simulate the exact scheduler spin scenario: call next_fire_after
+    // repeatedly with the returned value + small offset, verify each
+    // call advances by at least the cron resolution.
+    CronTrigger ct{"55 23 * * *"};
+
+    auto t0 = make_time(2026, 3, 11, 23, 55, 0);
+    auto call_time = t0 + std::chrono::milliseconds(100);  // 23:55:00.100
+
+    auto next1 = ct.next_fire_after(call_time);
+    EXPECT_GT(next1, call_time);
+
+    // Simulate: scheduler fires at next1, pipeline finishes a few ms later.
+    auto call_time2 = next1 + std::chrono::milliseconds(50);
+    auto next2 = ct.next_fire_after(call_time2);
+    EXPECT_GT(next2, call_time2);
+    EXPECT_GT(next2, next1);
+
+    // Verify they're on consecutive days.
+    auto tm1 = to_local_tm(next1);
+    auto tm2 = to_local_tm(next2);
+    EXPECT_EQ(tm1.tm_hour, 23);
+    EXPECT_EQ(tm1.tm_min, 55);
+    EXPECT_EQ(tm2.tm_hour, 23);
+    EXPECT_EQ(tm2.tm_min, 55);
+    EXPECT_EQ(tm2.tm_mday, tm1.tm_mday + 1);
+}
+
+// ═══════════════════════════════════════════════════════════════════════
 //  ERROR HANDLING
 // ═══════════════════════════════════════════════════════════════════════
 
