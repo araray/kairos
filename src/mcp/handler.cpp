@@ -24,7 +24,9 @@
 
 #include <spdlog/spdlog.h>
 
+#include <algorithm>
 #include <array>
+#include <cctype>
 #include <stdexcept>
 #include <thread>
 #include <unordered_map>
@@ -159,6 +161,7 @@ json McpHandler::handle_tools_call(const json& params) {
         {"kairos.watchScanOnce",   &McpHandler::tool_watch_scan_once},
         // Config/Metrics
         {"kairos.reloadConfig",    &McpHandler::tool_reload_config},
+        {"kairos.search",          &McpHandler::tool_search},
         {"kairos.getMetrics",      &McpHandler::tool_get_metrics},
         // Workflows (Phase 4 Batch 3)
         {"kairos.listWorkflows",   &McpHandler::tool_list_workflows},
@@ -344,6 +347,137 @@ json McpHandler::tool_watch_scan_once(const json& args) {
 // ═══════════════════════════════════════════════════════════════════════════
 //  Tool implementations: Config
 // ═══════════════════════════════════════════════════════════════════════════
+
+json McpHandler::tool_search(const json& args) {
+    auto query = args.value("query", std::string{});
+    if (query.empty()) {
+        return {{"error", "Missing required parameter: query"}};
+    }
+    int limit = args.value("limit", 20);
+    if (limit < 1) limit = 1;
+    if (limit > 100) limit = 100;
+
+    // Whether the optional entity_types array allows a kind.
+    // (nlohmann contains() is object-key lookup; arrays need find.)
+    auto wants = [&args](const char* kind) -> bool {
+        if (!args.contains("entity_types")) return true;
+        const auto& types = args["entity_types"];
+        if (!types.is_array() || types.empty()) return true;
+        return std::find(types.begin(), types.end(), json(kind)) !=
+               types.end();
+    };
+
+    // Case-insensitive substring across entity types.
+    auto matches = [&query](std::initializer_list<
+                            const std::string*> fields) -> bool {
+        std::string needle;
+        needle.reserve(query.size());
+        for (char c : query) {
+            needle += static_cast<char>(
+                std::tolower(static_cast<unsigned char>(c)));
+        }
+        for (const std::string* f : fields) {
+            std::string hay;
+            hay.reserve(f->size());
+            for (char c : *f) {
+                hay += static_cast<char>(
+                    std::tolower(static_cast<unsigned char>(c)));
+            }
+            if (hay.find(needle) != std::string::npos) return true;
+        }
+        return false;
+    };
+
+    json results = json::array();
+
+    auto reg = get_registry();
+
+    int emitted = 0;
+    if (reg && wants("workflows")) {
+        for (const auto* wf : reg->workflows()) {
+            if (emitted >= limit) break;
+            if (matches({&wf->workflow_name, &wf->workflow_id})) {
+                results.push_back({
+                    {"type", "workflow"},
+                    {"id", wf->workflow_id},
+                    {"name", wf->workflow_name},
+                    {"detail", std::to_string(wf->jobs.size()) +
+                               " job(s)"},
+                });
+                ++emitted;
+            }
+        }
+    }
+
+    if (reg && wants("jobs")) {
+        for (const auto* j : reg->standalone_jobs()) {
+            if (emitted >= limit) break;
+            if (matches({&j->job_name, &j->job_id})) {
+                results.push_back({
+                    {"type", "job"},
+                    {"id", j->job_id},
+                    {"name", j->job_name},
+                });
+                ++emitted;
+            }
+        }
+    }
+
+    if (reg && wants("watches")) {
+        for (const auto& g : reg->watch_groups()) {
+            if (emitted >= limit) break;
+            if (matches({&g.group_name, &g.group_id})) {
+                results.push_back({
+                    {"type", "watch_group"},
+                    {"id", g.group_id},
+                    {"name", g.group_name},
+                });
+                ++emitted;
+            }
+        }
+    }
+
+    if (deps_.query_reader &&
+        wants("runs")) {
+        auto runs = deps_.query_reader->query_recent_runs(100);
+        for (const auto& r : runs) {
+            if (emitted >= limit) break;
+            if (matches({&r.run_id, &r.target_name, &r.status})) {
+                results.push_back({
+                    {"type", "run"},
+                    {"id", r.run_id},
+                    {"name", r.target_name},
+                    {"detail", r.status},
+                });
+                ++emitted;
+            }
+        }
+    }
+
+    if (deps_.query_reader &&
+        wants("events")) {
+        auto events = deps_.query_reader->query_watch_events(100);
+        for (const auto& e : events) {
+            if (emitted >= limit) break;
+            if (matches({&e.watch_group, &e.rule_name,
+                         &e.event_type})) {
+                results.push_back({
+                    {"type", "event"},
+                    {"id", e.event_uid},
+                    {"name", e.watch_group + "/" + e.rule_name},
+                    {"detail", e.event_type},
+                });
+                ++emitted;
+            }
+        }
+    }
+
+    return {
+        {"query", query},
+        {"results", std::move(results)},
+        {"count", emitted},
+    };
+}
 
 json McpHandler::tool_reload_config(const json& /*args*/) {
     if (!deps_.reload_config) {
@@ -1185,6 +1319,36 @@ json McpHandler::build_tool_schemas() const {
                      "Specific watch group to scan (all if omitted)"}
                 }}
             }}
+        }}
+    });
+
+    // kairos.search (§15.13)
+    tools.push_back({
+        {"name", "kairos.search"},
+        {"description",
+         "Search across Kairos entities (workflows, jobs, watch "
+         "groups, runs, events) by case-insensitive substring"},
+        {"inputSchema", {
+            {"type", "object"},
+            {"properties", {
+                {"query", {
+                    {"type", "string"},
+                    {"description", "Search text"}
+                }},
+                {"entity_types", {
+                    {"type", "array"},
+                    {"items", {{"enum", json::array(
+                        {"workflows", "jobs", "watches",
+                         "runs", "events"})}}},
+                    {"description",
+                     "Restrict to these types (default: all)"}
+                }},
+                {"limit", {
+                    {"type", "integer"},
+                    {"description", "Max results (default 20)"}
+                }}
+            }},
+            {"required", json::array({"query"})}
         }}
     });
 

@@ -168,6 +168,7 @@ private:
 
     /// kairos.reloadConfig — Reload configuration.
     json tool_reload_config(const json& args);
+    json tool_search(const json& args);
 
     /// kairos.getMetrics — Get current metrics snapshot.
     json tool_get_metrics(const json& args);

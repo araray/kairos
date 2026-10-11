@@ -124,7 +124,8 @@ static std::unique_ptr<SQLite::Database> make_test_db() {
             end_ts TEXT NOT NULL DEFAULT '',
             duration_ms INTEGER NOT NULL DEFAULT 0,
             created_at TEXT NOT NULL DEFAULT (datetime('now')),
-            tags_json TEXT
+            tags_json TEXT,
+            pinned INTEGER NOT NULL DEFAULT 0
         );
 
         CREATE TABLE IF NOT EXISTS job_runs (
@@ -892,8 +893,8 @@ TEST_F(McpToolsTest, ToolsList_Contains14Tools) {
     auto result = handler_->dispatch("tools/list", {}, 1);
     auto tools = result["tools"];
 
-    // 14 tools from spec §22.4 + 1 additional (watchScanOnce) = 15.
-    EXPECT_EQ(tools.size(), 15u);
+    // 14 tools from spec §22.4 + watchScanOnce + kairos.search = 16.
+    EXPECT_EQ(tools.size(), 16u);
 
     // Verify all expected tool names are present.
     std::vector<std::string> expected_tools = {
@@ -905,7 +906,7 @@ TEST_F(McpToolsTest, ToolsList_Contains14Tools) {
         "kairos.getEvents",     "kairos.watchScanOnce",
         "kairos.reloadConfig",  "kairos.explainPlan",
         "kairos.getMetrics",
-    };
+        "kairos.search"};
 
     EXPECT_EQ(tools.size(), expected_tools.size());
 }
@@ -980,6 +981,72 @@ TEST_F(McpToolsTest, NoWriterMeansNoAuditButToolWorks) {
          {"arguments", args}}, 1);
     // Tool still succeeded (no crash, run submitted).
     EXPECT_TRUE(result.is_object() || result.is_array());
+}
+
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  kairos.search (§15.13)
+// ═══════════════════════════════════════════════════════════════════════════
+
+TEST_F(McpToolsTest, SearchFindsWorkflows) {
+    // Restrict to workflows for an exact assertion (the same query
+    // also matches the workflow's runs).
+    auto result = call_tool("kairos.search",
+                            {{"query", "deploy"},
+                             {"entity_types",
+                              json::array({"workflows"})}});
+    EXPECT_EQ(result["count"], 1);
+    ASSERT_EQ(result["results"].size(), 1u);
+    EXPECT_EQ(result["results"][0]["type"], "workflow");
+    EXPECT_EQ(result["results"][0]["name"], "Deploy Pipeline");
+}
+
+TEST_F(McpToolsTest, SearchFindsRunsByStatus) {
+    auto result = call_tool("kairos.search",
+                            {{"query", "FAILURE"}});
+    EXPECT_GE(result["count"], 1);
+    bool found_run = false;
+    for (const auto& r : result["results"]) {
+        if (r["type"] == "run" && r["detail"] == "FAILURE") {
+            found_run = true;
+        }
+    }
+    EXPECT_TRUE(found_run);
+}
+
+TEST_F(McpToolsTest, SearchEntityFilter) {
+    // "backup" matches a workflow-less job only when jobs are allowed;
+    // restricting to workflows must return zero.
+    auto result = call_tool("kairos.search",
+                            {{"query", "backup"},
+                             {"entity_types",
+                              json::array({"workflows"})}});
+    EXPECT_EQ(result["count"], 0);
+
+    auto with_jobs = call_tool("kairos.search",
+                               {{"query", "backup"},
+                                {"entity_types",
+                                 json::array({"jobs"})}});
+    EXPECT_EQ(with_jobs["count"], 1);
+    EXPECT_EQ(with_jobs["results"][0]["type"], "job");
+}
+
+TEST_F(McpToolsTest, SearchMissingQuery) {
+    auto result = call_tool("kairos.search", json::object());
+    EXPECT_TRUE(result.contains("error"));
+}
+
+TEST_F(McpToolsTest, SearchListedInTools) {
+    // tools/list includes the new tool.
+    auto handler_copy = handler_.get();
+    // dispatch tools/list directly.
+    auto listed = handler_copy->dispatch(
+        "tools/list", json::object(), 1);
+    bool found = false;
+    for (const auto& t : listed["tools"]) {
+        if (t["name"] == "kairos.search") found = true;
+    }
+    EXPECT_TRUE(found);
 }
 
 }  // namespace kairos::mcp::test
