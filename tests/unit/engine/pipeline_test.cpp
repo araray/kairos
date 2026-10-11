@@ -600,7 +600,7 @@ TEST_F(PipelineTest, StepFailsAfterExhaustedRetries) {
 // is validated on Windows by the daemon e2e (`workflows run` with
 // output capture + substitution works — verified manually) and by
 // RunContextTest which passes on all platforms.
-TEST(PipelineTest, StepOutputsSkippedOnWindows) {
+TEST_F(PipelineTest, StepOutputsSkippedOnWindows) {
     GTEST_SKIP() << "cmd.exe quoting; validated via RunContextTest + e2e";
 }
 #else
@@ -717,7 +717,7 @@ TEST_F(PipelineTest, StepOutputsCapturedAndPersisted) {
 #endif  // _WIN32 (StepOutputs skip)
 
 #ifdef _WIN32
-TEST(PipelineTest, InvalidKeysSkippedOnWindows) {
+TEST_F(PipelineTest, InvalidKeysSkippedOnWindows) {
     GTEST_SKIP() << "cmd.exe !! is a delayed-expansion sigil; see above";
 }
 #else
