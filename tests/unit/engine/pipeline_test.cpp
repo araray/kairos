@@ -610,6 +610,10 @@ TEST_F(PipelineTest, StepOutputsCapturedAndPersisted) {
     StepDef produce;
     produce.step_id = "stp-produce";
     produce.step_name = "produce";
+    JobDef job;
+    job.job_id = "job-out";
+    job.job_name = "producer";
+
 #ifdef _WIN32
     // cmd.exe's /C quoting with CreateProcess makes multi-key output
     // from one &&-chained command unreliable — split into two steps
@@ -620,27 +624,26 @@ TEST_F(PipelineTest, StepOutputsCapturedAndPersisted) {
     produce2.step_name = "produce2";
     produce2.command =
         "echo COMMIT_SHA=abc123>>%KAIROS_OUTPUT%";
-    StepDef consume;
-    consume.step_id = "stp-consume";
-    consume.step_name = "consume";
-    consume.command = "echo got-%KAIROS_OUTPUT%";
-    job.steps = {produce, produce2, consume};
+    job.steps = {produce, produce2};
 #else
     produce.command =
         "echo VERSION=9.9.9 >> \"$KAIROS_OUTPUT\"\n"
         "echo COMMIT_SHA=abc123 >> \"$KAIROS_OUTPUT\"";
+    job.steps = {produce};
+#endif
 
+    // Consume step (common).
+    job.steps.back().command = job.steps.back().command;  // no-op
     StepDef consume;
     consume.step_id = "stp-consume";
     consume.step_name = "consume";
-    consume.command = "echo got-$KAIROS_OUTPUT";
-    job.steps = {produce, consume};
+    consume.command =
+#ifdef _WIN32
+        "echo got-%KAIROS_OUTPUT%";
+#else
+        "echo got-$KAIROS_OUTPUT";
 #endif
-
-    JobDef job;
-    job.job_id = "job-out";
-    job.job_name = "producer";
-    job.steps = {produce, consume};
+    job.steps.push_back(consume);
     DagNode node;
     node.job_id = "job-out";
     node.job_name = "producer";
