@@ -321,6 +321,15 @@ TEST(SecretStoreVaultTest, LoadVaultThrowsWhenNotCompiled) {
 //  §12.2.3 environment-only secrets backend (Roadmap Phase 13)
 // ═══════════════════════════════════════════════════════════════════════════
 
+#ifdef _WIN32
+static int setenv_wrapper(const char* name, const char* value, int) {
+    return _putenv_s(name, value) == 0 ? 0 : -1;
+}
+static void unsetenv_wrapper(const char* name) { _putenv_s(name, ""); }
+#define setenv setenv_wrapper
+#define unsetenv(nm) unsetenv_wrapper(nm)
+#endif
+
 TEST(SecretEnvTest, LoadsPrefixedVariables) {
     ASSERT_EQ(0, ::setenv("KAIROS_SECRET_DEPLOY_API_KEY", "tok-123", 1));
     ASSERT_EQ(0, ::setenv("KAIROS_SECRET_DB_PASSWORD", "hunter2", 1));
