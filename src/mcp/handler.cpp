@@ -79,6 +79,21 @@ McpHandler::McpHandler(Dependencies deps)
 
 // ── Main dispatch ──────────────────────────────────────────────────────────
 
+// ── §15.14 audit trail ────────────────────────────────────────────────────
+
+void McpHandler::audit(const std::string& action,
+                       const std::string& target,
+                       const std::string& detail_json) const {
+    if (deps_.db_writer) {
+        deps_.db_writer->enqueue(persist::InsertAuditEntry{
+            .actor = "mcp",
+            .action = action,
+            .target = target,
+            .detail_json = detail_json.empty() ? "{}" : detail_json,
+        });
+    }
+}
+
 json McpHandler::dispatch(const std::string& method,
                           const json& params, const json& id) {
     // MCP protocol methods.
@@ -338,6 +353,7 @@ json McpHandler::tool_reload_config(const json& /*args*/) {
 
     std::vector<std::string> errors;
     bool ok = deps_.reload_config(errors);
+    if (ok) audit("reload_config", "");
 
     json err_arr = json::array();
     for (const auto& e : errors) {
@@ -481,6 +497,7 @@ json McpHandler::tool_run_workflow(const json& args) {
 
     auto run_id = deps_.submit_run(
         workflow_id, engine::TriggerEvent::TargetKind::Workflow);
+    audit("run_workflow", workflow_id);
 
     if (run_id.empty()) {
         return {{"error", "Failed to submit workflow run (queue full?)"}};
@@ -576,6 +593,7 @@ json McpHandler::tool_run_job(const json& args) {
 
     auto run_id = deps_.submit_run(
         job_id, engine::TriggerEvent::TargetKind::StandaloneJob);
+    audit("run_job", job_id);
 
     if (run_id.empty()) {
         return {{"error", "Failed to submit job run (queue full?)"}};

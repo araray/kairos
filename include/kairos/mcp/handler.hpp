@@ -20,6 +20,7 @@
 #include "kairos/engine/workflow_registry.hpp"
 #include "kairos/exec/output_sink.hpp"
 #include "kairos/observability/metrics.hpp"
+#include "kairos/persist/db_writer.hpp"
 #include "kairos/persist/query_reader.hpp"
 #include "kairos/watch/watch_engine.hpp"
 
@@ -91,9 +92,18 @@ public:
         /// Submit a run via the trigger bus. Returns run_id on success,
         /// empty string on failure (queue full, target not found).
         SubmitRunFn submit_run;
+
+        /// §15.14: async writer for audit entries (actor "mcp").
+        /// Null disables auditing (tools still work).
+        persist::DBWriter* db_writer = nullptr;
     };
 
     explicit McpHandler(Dependencies deps);
+
+    /// §15.14: append an audit entry (actor "mcp"); no-op without a
+    /// writer.
+    void audit(const std::string& action, const std::string& target,
+               const std::string& detail_json = "{}") const;
 
     /// Main dispatch function. Called by StdioTransport for each
     /// incoming JSON-RPC request.

@@ -774,6 +774,7 @@ int run_daemon(std::shared_ptr<const kairos::config::ConfigState> config) {
         // Phase 4 Batch 3: wire workflow/run dependencies.
         mcp_deps.registry = registry;
         mcp_deps.query_reader = &query_reader;
+        mcp_deps.db_writer = &db_writer;
         mcp_deps.submit_run =
             [&trigger_bus](const std::string& target_id,
                            engine::TriggerEvent::TargetKind kind)
@@ -1261,6 +1262,12 @@ int run_daemon(std::shared_ptr<const kairos::config::ConfigState> config) {
             switch (cmd.type) {
                 case daemon::Command::Type::Cancel:
                     log->info("Command: cancel run '{}'", cmd.run_id);
+                    db_writer.enqueue(persist::InsertAuditEntry{
+                        .actor = "cli",
+                        .action = "cancel_run",
+                        .target = cmd.run_id,
+                        .detail_json = "{}",
+                    });
                     // Request cancellation of the in-flight run via
                     // CancelRegistry. This fires the per-run stop_token,
                     // which propagates to ProcessHandle::wait() in the
@@ -1276,6 +1283,12 @@ int run_daemon(std::shared_ptr<const kairos::config::ConfigState> config) {
                     break;
                 case daemon::Command::Type::Reload:
                     log->info("Command: config reload (via CLI)");
+                    db_writer.enqueue(persist::InsertAuditEntry{
+                        .actor = "cli",
+                        .action = "reload_config",
+                        .target = "",
+                        .detail_json = "{}",
+                    });
                     platform::g_reload_requested.store(true);
                     break;
                 default:

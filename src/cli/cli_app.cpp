@@ -3402,6 +3402,12 @@ int run(int argc, char** argv) {
             found_wf->workflow_id,
             engine::TriggerEvent::TargetKind::Workflow,
             correlation_id, "cli");
+        db_writer.enqueue(persist::InsertAuditEntry{
+            .actor = "cli",
+            .action = "run_workflow",
+            .target = found_wf->workflow_id,
+            .detail_json = "{}",
+        });
         if (workflows_run_dry_run) {
             auto* payload = std::get_if<engine::ManualRunPayload>(
                 &event.payload);
@@ -4018,6 +4024,12 @@ int run(int argc, char** argv) {
             found_job->job_id,
             engine::TriggerEvent::TargetKind::StandaloneJob,
             correlation_id, "cli");
+        db_writer.enqueue(persist::InsertAuditEntry{
+            .actor = "cli",
+            .action = "run_job",
+            .target = found_job->job_id,
+            .detail_json = "{}",
+        });
 
         // Execute synchronously via the pipeline.
         auto status = pipeline.process_event(event, stop_token);

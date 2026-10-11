@@ -113,6 +113,8 @@ static std::unique_ptr<SQLite::Database> make_test_db() {
             target_id TEXT NOT NULL,
             target_name TEXT NOT NULL DEFAULT '',
             trigger_type TEXT NOT NULL DEFAULT 'manual',
+            trigger_id TEXT NOT NULL DEFAULT '',
+            correlation_id TEXT NOT NULL DEFAULT '',
             status TEXT NOT NULL DEFAULT 'RUNNING',
             exit_code INTEGER NOT NULL DEFAULT 0,
             start_ts TEXT NOT NULL DEFAULT '',
@@ -154,6 +156,37 @@ static std::unique_ptr<SQLite::Database> make_test_db() {
             FOREIGN KEY(run_id) REFERENCES runs(run_id)
         );
 
+        CREATE TABLE IF NOT EXISTS trigger_history (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            trigger_id TEXT NOT NULL,
+            trigger_type TEXT NOT NULL DEFAULT '',
+            target_id TEXT NOT NULL DEFAULT '',
+            fired_at TEXT NOT NULL DEFAULT '',
+            status TEXT NOT NULL DEFAULT '',
+            run_id TEXT
+        );
+
+        CREATE TABLE IF NOT EXISTS watch_samples (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            watch_group TEXT NOT NULL,
+            sample_epoch INTEGER NOT NULL DEFAULT 0,
+            file_path TEXT NOT NULL,
+            is_dir INTEGER NOT NULL DEFAULT 0,
+            file_size INTEGER NOT NULL DEFAULT 0,
+            mtime TEXT DEFAULT '',
+            hash TEXT DEFAULT '',
+            scan_duration_ms INTEGER NOT NULL DEFAULT 0
+        );
+
+        CREATE TABLE IF NOT EXISTS audit_log (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            timestamp TEXT NOT NULL DEFAULT (datetime('now')),
+            actor TEXT NOT NULL,
+            action TEXT NOT NULL,
+            target TEXT,
+            detail_json TEXT
+        );
+
         CREATE TABLE IF NOT EXISTS log_chunks (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             run_id TEXT NOT NULL,
@@ -174,6 +207,8 @@ static std::unique_ptr<SQLite::Database> make_test_db() {
             event_type TEXT NOT NULL DEFAULT '',
             severity TEXT NOT NULL DEFAULT 'info',
             affected_files_json TEXT NOT NULL DEFAULT '[]',
+            file_path TEXT DEFAULT '',
+            action_taken TEXT DEFAULT '',
             sample_epoch INTEGER NOT NULL DEFAULT 0,
             details_json TEXT NOT NULL DEFAULT '{}',
             created_at TEXT NOT NULL DEFAULT (datetime('now'))
@@ -272,6 +307,12 @@ protected:
         seed_test_runs(*db_);
         query_reader_ = std::make_unique<persist::QueryReader>(*db_);
 
+        // §15.14: audit writer to observe MCP-originated entries.
+        writer_ = std::make_unique<persist::DBWriter>(
+            *db_, persist::DBWriterConfig{});
+        writer_stop_ = std::stop_source{};
+        writer_->start(writer_stop_.get_token());
+
         // Track submitted runs.
         submitted_runs_.clear();
 
@@ -288,8 +329,17 @@ protected:
             return run_id;
         };
         deps.server_info.version = "test";
+        deps.db_writer = writer_.get();
 
         handler_ = std::make_unique<McpHandler>(std::move(deps));
+    }
+
+    void TearDown() override {
+        if (writer_) {
+            writer_stop_.request_stop();
+            writer_->flush();
+            writer_.reset();
+        }
     }
 
     /// Helper: call a tool by name and return the result JSON.
@@ -305,6 +355,8 @@ protected:
     std::shared_ptr<const engine::WorkflowRegistry> registry_;
     std::unique_ptr<SQLite::Database> db_;
     std::unique_ptr<persist::QueryReader> query_reader_;
+    std::unique_ptr<persist::DBWriter> writer_;
+    std::stop_source writer_stop_;
     std::unique_ptr<McpHandler> handler_;
 
     struct SubmittedRun {
@@ -863,6 +915,57 @@ TEST_F(McpToolsTest, ToolsList_AllHaveInputSchema) {
         EXPECT_TRUE(tool.contains("description"));
         EXPECT_TRUE(tool.contains("inputSchema"));
     }
+}
+
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  §15.14 audit trail (actor "mcp")
+// ═══════════════════════════════════════════════════════════════════════════
+
+TEST_F(McpToolsTest, RunWorkflowWritesAuditEntry) {
+    auto result = call_tool("kairos.runWorkflow",
+                            {{"workflow_id", "wfl-abc123"}});
+    EXPECT_EQ(result["run_id"], "run-new-001");
+
+    writer_stop_.request_stop();
+    writer_->flush();
+    persist::QueryReader reader(*db_);
+    auto entries = reader.query_audit_log(5);
+    ASSERT_GE(entries.size(), 1u);
+    EXPECT_EQ(entries[0].actor, "mcp");
+    EXPECT_EQ(entries[0].action, "run_workflow");
+    EXPECT_EQ(entries[0].target, "wfl-abc123");
+}
+
+TEST_F(McpToolsTest, RunJobWritesAuditEntry) {
+    auto result = call_tool("kairos.runJob", {{"job_id", "job-backup"}});
+    (void)result;
+
+    writer_stop_.request_stop();
+    writer_->flush();
+    persist::QueryReader reader(*db_);
+    auto entries = reader.query_audit_log(5);
+    ASSERT_GE(entries.size(), 1u);
+    EXPECT_EQ(entries[0].actor, "mcp");
+    EXPECT_EQ(entries[0].action, "run_job");
+}
+
+TEST_F(McpToolsTest, NoWriterMeansNoAuditButToolWorks) {
+    // Rebuild the handler without a writer.
+    McpHandler::Dependencies deps;
+    deps.registry = registry_;
+    deps.query_reader = query_reader_.get();
+    deps.submit_run = [](const std::string&,
+                         engine::TriggerEvent::TargetKind) {
+        return "run-x";
+    };
+    McpHandler bare(std::move(deps));
+    json args{{"workflow_id", "wfl-abc123"}};
+    auto result = bare.dispatch("tools/call",
+        {{"name", "kairos.runWorkflow"},
+         {"arguments", args}}, 1);
+    // Tool still succeeded (no crash, run submitted).
+    EXPECT_TRUE(result.is_object() || result.is_array());
 }
 
 }  // namespace kairos::mcp::test
