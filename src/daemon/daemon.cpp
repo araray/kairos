@@ -43,6 +43,7 @@
 #include "kairos/platform/sd_notify.hpp"
 #include "kairos/platform/environment.hpp"
 #include "kairos/platform/timezone.hpp"
+#include "kairos/security/native_secret_file.hpp"
 #include "kairos/security/secret_store.hpp"
 #include "kairos/testing/fake_clock.hpp"
 #include "kairos/watch/real_scanner.hpp"
@@ -452,6 +453,34 @@ int run_daemon(std::shared_ptr<const kairos::config::ConfigState> config) {
         // Legacy: kairos.vault.enabled implies the vault backend.
         if (config->global.get<bool>("kairos.vault.enabled", false)) {
             secrets_backend = "vault";
+        }
+    }
+
+    if (secrets_backend == "file") {
+        // §12.2.1: native AES-256-GCM store at <data_dir>/secrets.enc.
+        auto secrets_file = config->data_dir /
+            security::NativeSecretFile::kDefaultName;
+        if (!security::NativeSecretFile::exists(secrets_file)) {
+            log->error("Secrets backend 'file' but {} is missing — "
+                       "run 'kairos secrets init' first",
+                       secrets_file.string());
+            return 1;
+        }
+        auto pw = platform::get_env("KAIROS_SECRETS_PASSWORD");
+        if (!pw || pw->empty()) {
+            log->error("Secrets backend 'file' requires the "
+                       "KAIROS_SECRETS_PASSWORD env var");
+            return 1;
+        }
+        try {
+            secret_store.load_from_map(
+                security::NativeSecretFile::load(secrets_file, *pw));
+            log->info("Secrets: native file backend loaded {} key(s) "
+                      "from {}",
+                      secret_store.size(), secrets_file.string());
+        } catch (const std::exception& e) {
+            log->error("Native secrets load failed: {}", e.what());
+            return 1;
         }
     }
 

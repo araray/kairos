@@ -190,6 +190,13 @@ void NativeSecretFile::save(
         throw std::runtime_error("secrets file: encryption failed");
     }
 
+    // Ensure the parent directory exists (first `secrets init`).
+    if (path.has_parent_path()) {
+        std::error_code ec;
+        std::filesystem::create_directories(
+            path.parent_path(), ec);  // best-effort; rename reports
+    }
+
     // Atomic write: temp + rename.
     std::ostringstream ss;
     ss << kMagic << "\n"

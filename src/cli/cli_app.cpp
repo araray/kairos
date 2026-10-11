@@ -28,6 +28,7 @@
 #include "kairos/mcp/transport.hpp"
 #include "kairos/observability/health.hpp"
 #include "kairos/observability/logging.hpp"
+#include "kairos/security/native_secret_file.hpp"
 #include "kairos/persist/database.hpp"
 #include "kairos/persist/migration.hpp"
 #include "kairos/persist/query_reader.hpp"
@@ -629,6 +630,42 @@ int run(int argc, char** argv) {
         "Run self-monitoring checks (Roadmap \u00a715.5)");
 
     // ── config ───────────────────────────────────────────────────
+    // ── secrets (§12.2.1) ────────────────────────────────────────
+    auto* cmd_secrets = app.add_subcommand(
+        "secrets", "Manage the native encrypted secrets file");
+    cmd_secrets->require_subcommand(1);
+
+    std::string secrets_file_override;
+    cmd_secrets->add_option("--file", secrets_file_override,
+        "Secrets file path (default: <data_dir>/secrets.enc)");
+    std::string secrets_password;
+    cmd_secrets->add_option("--password", secrets_password,
+        "Master password (default: KAIROS_SECRETS_PASSWORD env, "
+        "or prompt)");
+
+    auto* secrets_init = cmd_secrets->add_subcommand(
+        "init", "Create an empty secrets file");
+    std::string secrets_set_key;
+    auto* secrets_set = cmd_secrets->add_subcommand(
+        "set", "Add or update a secret (value read from stdin)");
+    secrets_set->add_option("key", secrets_set_key, "Secret key")
+        ->required();
+    std::string secrets_set_value;
+    secrets_set->add_option("--value", secrets_set_value,
+        "Value (if omitted, read one line from stdin)");
+    std::string secrets_rm_key;
+    bool secrets_rm_force = false;
+    auto* secrets_remove = cmd_secrets->add_subcommand(
+        "remove", "Remove a secret");
+    secrets_remove->add_option("key", secrets_rm_key, "Secret key")
+        ->required();
+    secrets_remove->add_flag("-f,--force", secrets_rm_force,
+        "Do not error when the key is absent");
+    auto* secrets_list = cmd_secrets->add_subcommand(
+        "list", "List secret keys (values are never shown)");
+    auto* secrets_rotate = cmd_secrets->add_subcommand(
+        "rotate-password", "Re-encrypt under a new master password");
+
     auto* cmd_config = app.add_subcommand("config",
         "Configuration management");
     cmd_config->require_subcommand(1);
@@ -1970,6 +2007,115 @@ int run(int argc, char** argv) {
         }
         return 1;
 #endif
+    }
+
+    // ── secrets (§12.2.1) ────────────────────────────────────────
+    if (cmd_secrets->parsed()) {
+        setup_logging(log_level, json_output, false);
+        auto cfg = load_config_or_die(config_path, {});
+        if (!cfg) return static_cast<int>(ExitCode::kConfigError);
+
+        std::filesystem::path file = !secrets_file_override.empty()
+            ? std::filesystem::path(secrets_file_override)
+            : cfg->data_dir / security::NativeSecretFile::kDefaultName;
+
+        // Password resolution: --password > env > prompt.
+        auto resolve_password = [&](bool confirm) -> std::string {
+            if (!secrets_password.empty()) return secrets_password;
+            auto env_pw = platform::get_env("KAIROS_SECRETS_PASSWORD");
+            if (env_pw && !env_pw->empty()) return *env_pw;
+            std::cout << (confirm ? "New master password: "
+                                  : "Master password: ");
+            std::string pw;
+            std::getline(std::cin, pw);
+            if (confirm) {
+                std::cout << "Confirm password: ";
+                std::string pw2;
+                std::getline(std::cin, pw2);
+                if (pw != pw2) {
+                    throw std::runtime_error("passwords do not match");
+                }
+            }
+            return pw;
+        };
+
+        try {
+            if (secrets_init->parsed()) {
+                if (security::NativeSecretFile::exists(file)) {
+                    std::cerr << "Secrets file already exists: "
+                              << file.string() << "\n";
+                    return 1;
+                }
+                auto pw = resolve_password(true);
+                security::NativeSecretFile::save(file, pw, {});
+                std::cout << "Initialized " << file.string() << "\n";
+            } else if (secrets_set->parsed()) {
+                auto pw = resolve_password(false);
+                auto secrets = security::NativeSecretFile::exists(file)
+                    ? security::NativeSecretFile::load(file, pw)
+                    : std::unordered_map<std::string, std::string>{};
+                std::string value = secrets_set_value;
+                if (value.empty()) {
+                    std::cout << "Value for '" << secrets_set_key
+                              << "': ";
+                    std::getline(std::cin, value);
+                }
+                secrets[secrets_set_key] = value;
+                security::NativeSecretFile::save(file, pw, secrets);
+                std::cout << "Set '" << secrets_set_key << "' ("
+                          << secrets.size() << " secret(s))\n";
+            } else if (secrets_remove->parsed()) {
+                auto pw = resolve_password(false);
+                auto secrets = security::NativeSecretFile::load(file, pw);
+                auto it = secrets.find(secrets_rm_key);
+                if (it == secrets.end()) {
+                    if (!secrets_rm_force) {
+                        std::cerr << "Key not found: "
+                                  << secrets_rm_key << "\n";
+                        return static_cast<int>(ExitCode::kNotFound);
+                    }
+                } else {
+                    secrets.erase(it);
+                    security::NativeSecretFile::save(file, pw, secrets);
+                }
+                std::cout << "Removed '" << secrets_rm_key << "' ("
+                          << secrets.size() << " secret(s))\n";
+            } else if (secrets_list->parsed()) {
+                auto pw = resolve_password(false);
+                auto secrets = security::NativeSecretFile::load(file, pw);
+                if (json_output) {
+                    json arr = json::array();
+                    for (const auto& [k, _] : secrets) arr.push_back(k);
+                    std::cout << arr.dump(2) << "\n";
+                } else {
+                    if (secrets.empty()) {
+                        std::cout << "(no secrets)\n";
+                    }
+                    for (const auto& [k, _] : secrets) {
+                        std::cout << k << "\n";
+                    }
+                }
+            } else if (secrets_rotate->parsed()) {
+                if (!security::NativeSecretFile::exists(file)) {
+                    std::cerr << "Secrets file not found: "
+                              << file.string() << "\n";
+                    return static_cast<int>(ExitCode::kNotFound);
+                }
+                std::string old_pw;
+                std::cout << "Current master password: ";
+                std::getline(std::cin, old_pw);
+                auto secrets =
+                    security::NativeSecretFile::load(file, old_pw);
+                auto new_pw = resolve_password(true);
+                security::NativeSecretFile::save(file, new_pw, secrets);
+                std::cout << "Password rotated ("
+                          << secrets.size() << " secret(s))\n";
+            }
+        } catch (const std::exception& e) {
+            std::cerr << "Error: " << e.what() << "\n";
+            return 1;
+        }
+        return 0;
     }
 
     // ── config show ──────────────────────────────────────────────
