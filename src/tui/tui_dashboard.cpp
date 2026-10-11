@@ -500,6 +500,8 @@ int run_dashboard(const DashboardConfig& config) {
     DashboardState state;
     state.config_path = config.config_path.string();
     std::mutex state_mutex;
+
+
     std::atomic<bool> should_quit{false};
     std::atomic<bool> force_refresh{false};
     bool show_logs = true;
@@ -507,6 +509,47 @@ int run_dashboard(const DashboardConfig& config) {
     // Phase 8.5: Filter bar state (§4.1 TUI search/filter).
     std::string filter_text;
     bool filter_active = false;
+
+    // §4.2/§4.3: selection + modal state for the events panel.
+    int event_selection = 0;
+    int event_modal = 0;  // >0 while open: index+1; 0 = closed.
+
+    // §4.2/§4.3: events that pass the current filter (shared by the
+    // renderer and the keyboard navigation handler). Takes the mutex
+    // itself; callers must not hold it.
+    auto matches_filter_events =
+        [&state = state, &filter_text](void) -> std::vector<EventInfo> {
+        std::string lower_filter = filter_text;
+        std::transform(lower_filter.begin(), lower_filter.end(),
+                       lower_filter.begin(),
+                       [](unsigned char c) {
+                           return std::tolower(c);
+                       });
+        std::vector<EventInfo> out;
+        for (const auto& ev : state.events) {
+            if (lower_filter.empty()) {
+                out.push_back(ev);
+                continue;
+            }
+            bool hit = false;
+            for (const std::string* field :
+                 {&ev.event_uid, &ev.watch_group, &ev.rule_name,
+                  &ev.event_type, &ev.affected_files}) {
+                std::string lower(*field);
+                std::transform(lower.begin(), lower.end(),
+                               lower.begin(),
+                               [](unsigned char c) {
+                                   return std::tolower(c);
+                               });
+                if (lower.find(lower_filter) != std::string::npos) {
+                    hit = true;
+                    break;
+                }
+            }
+            if (hit) out.push_back(ev);
+        }
+        return out;
+    };
 
     // Initial refresh.
     refresh_state(state, config);
@@ -559,7 +602,7 @@ int run_dashboard(const DashboardConfig& config) {
                 | color(Color::GrayLight),
             filler(),
             text(state.last_refresh + " ") | color(Color::GrayDark),
-            text("q=quit r=refresh l=logs /=filter") | dim,
+            text("q=quit r=refresh l=logs /=filter j/k=select ⏎=detail") | dim,
         }) | borderLight;
 
         // ── Error banner ─────────────────────────────────────────
@@ -693,30 +736,91 @@ int run_dashboard(const DashboardConfig& config) {
         if (state.events.empty()) {
             event_items.push_back(text("  No events") | dim);
         } else {
+            int visible_idx = 0;
+            int selected_visible = -1;
+            const EventInfo* selected_event = nullptr;
             for (const auto& ev : state.events) {
                 if (!matches_filter(ev.watch_group) &&
                     !matches_filter(ev.rule_name) &&
                     !matches_filter(ev.event_type) &&
                     !matches_filter(ev.affected_files))
                     continue;
+                bool is_selected =
+                    (visible_idx == event_selection);
+                if (is_selected) {
+                    selected_visible = visible_idx;
+                    selected_event = &ev;
+                }
                 auto short_uid = ev.event_uid.size() > 8
                     ? ev.event_uid.substr(0, 8) : ev.event_uid;
                 auto short_group = ev.watch_group.size() > 14
                     ? ev.watch_group.substr(0, 14) : ev.watch_group;
-                event_items.push_back(hbox({
-                    text("  " + short_uid) | dim
-                        | size(WIDTH, EQUAL, 11),
+                auto row = hbox({
+                    text((is_selected ? " > " : "  ") + short_uid)
+                        | (is_selected ? bold | color(Color::Cyan)
+                                       : dim)
+                        | size(WIDTH, EQUAL, 13),
                     text(short_group)
+                        | (is_selected ? bold : nothing)
                         | size(WIDTH, EQUAL, 16),
                     text(ev.event_type)
                         | color(Color::Yellow)
                         | size(WIDTH, EQUAL, 10),
                     text(ev.affected_files) | dim | flex,
                     text("  " + ev.created_at) | dim,
-                }));
+                });
+                event_items.push_back(
+                    is_selected
+                        ? row | inverted
+                        : std::move(row));
+                ++visible_idx;
             }
-            if (event_items.empty())
+            if (event_items.empty()) {
                 event_items.push_back(text("  (filtered)") | dim);
+            } else if (event_modal > 0 && selected_visible >= 0 &&
+                       event_modal - 1 < static_cast<int>(
+                           event_items.size())) {
+                // §4.2: event detail modal over the panel — full
+                // affected files, one per line.
+                const auto& ev = *selected_event;
+                Elements files;
+                std::istringstream files_stream(ev.affected_files);
+                std::string f;
+                while (std::getline(files_stream, f, ',')) {
+                    if (!f.empty() && f.front() == ' ') {
+                        f.erase(0, 1);
+                    }
+                    files.push_back(text("  " + f) | dim);
+                }
+                if (files.empty()) {
+                    files.push_back(text("  (none)") | dim);
+                }
+                auto modal = window(
+                    vbox({
+                        text(" Event Detail") | bold
+                            | color(Color::Yellow),
+                        separator(),
+                        hbox({text(" UID     ") | dim,
+                              text(ev.event_uid)}),
+                        hbox({text(" Group   ") | dim,
+                              text(ev.watch_group)}),
+                        hbox({text(" Rule    ") | dim,
+                              text(ev.rule_name)}),
+                        hbox({text(" Type    ") | dim,
+                              text(ev.event_type)}),
+                        hbox({text(" Time    ") | dim,
+                              text(ev.created_at)}),
+                        separator(),
+                        text(" Affected files") | dim,
+                        vbox(std::move(files)),
+                    }) | size(WIDTH, GREATER_THAN, 44),
+                    text(" any key closes ") | dim | center);
+                auto base = std::move(event_items[event_modal - 1]);
+                auto overlay = modal | hcenter |
+                               size(HEIGHT, LESS_THAN, 20);
+                event_items[event_modal - 1] =
+                    dbox(std::move(base), std::move(overlay));
+            }
         }
         auto events_panel = vbox({
             text(" Events (" +
@@ -811,9 +915,19 @@ int run_dashboard(const DashboardConfig& config) {
             return false;
         }
 
+        // Event-detail modal open: any key closes it (§4.2).
+        if (event_modal > 0) {
+            event_modal = 0;
+            return true;
+        }
+
         // Normal mode key handling.
-        if (event == Event::Character('q') ||
-            event == Event::Escape) {
+        if (event == Event::Character('q')) {
+            should_quit = true;
+            screen.Exit();
+            return true;
+        }
+        if (event == Event::Escape) {
             should_quit = true;
             screen.Exit();
             return true;
@@ -830,6 +944,38 @@ int run_dashboard(const DashboardConfig& config) {
             filter_active = true;
             filter_text.clear();
             return true;
+        }
+
+        // §4.3 vim-style navigation over the events panel.
+        {
+            int event_count = static_cast<int>(
+                matches_filter_events().size());
+            if (event == Event::Character('j') ||
+                event == Event::ArrowDown) {
+                if (event_selection < event_count - 1) ++event_selection;
+                return true;
+            }
+            if (event == Event::Character('k') ||
+                event == Event::ArrowUp) {
+                if (event_selection > 0) --event_selection;
+                return true;
+            }
+            if (event == Event::Character('g')) {
+                event_selection = 0;
+                return true;
+            }
+            if (event == Event::Character('G')) {
+                event_selection = std::max(0, event_count - 1);
+                return true;
+            }
+            if ((event == Event::Return ||
+                 event == Event::Character(' ')) &&
+                event_count > 0) {
+                event_selection =
+                    std::min(event_selection, event_count - 1);
+                event_modal = event_selection + 1;
+                return true;
+            }
         }
         return false;
     });
