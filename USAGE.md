@@ -288,6 +288,13 @@ kairos
 │
 ├── init-db                  Initialize the SQLite database
 │   └── --db-path            Override database path
+││
+├── secrets                 Manage the native encrypted secrets file
+│   ├── init                Create an empty secrets file
+│   ├── set <key>           Add/update a secret (value from stdin/--value)
+│   ├── list                List secret keys (never values)
+│   ├── remove <key>        Remove a secret (-f: ignore missing)
+│   └── rotate-password     Re-encrypt under a new master password
 │
 ├── migrate-config           Migrate legacy tool configuration
 │   ├── --source             Source tool (avscheduler|eventwatcher|localflow)
@@ -1280,6 +1287,70 @@ rules:
 Triggered runs receive `KAIROS_TRIGGER_EVENT_TYPE`,
 `KAIROS_TRIGGER_WATCH_GROUP`, `KAIROS_TRIGGER_RULE`, and
 `KAIROS_TRIGGER_AFFECTED_FILES` (comma-separated).
+
+
+### 18.5 Notifications, Health, and Secrets (v0.2)
+
+**Notification hooks (§15.4)** — per workflow, on run completion:
+
+```yaml
+name: backup
+notifications:
+  on_failure:
+    - type: webhook
+      url: https://hooks.slack.com/services/...
+      template: "Kairos: {{ workflow }} failed (run {{ run_id }})"
+    - type: command
+      run: notify-send 'Kairos' '{{ workflow }} failed'
+  on_success:
+    - type: command
+      command: echo done >> /var/log/kairos-notify.log
+```
+
+Delivery is fire-and-forget (10s budget per hook, the pipeline never
+blocks); only SUCCESS and FAILURE fire. Commands receive
+`KAIROS_NOTIFY_MESSAGE`, `KAIROS_RUN_ID`, `KAIROS_WORKFLOW`. Webhooks
+POST `{"text": …}` (Slack-compatible) — requires KAIROS_HTTP=ON.
+
+**Health checks (§15.5)**:
+
+```bash
+kairos status --health
+#   Health: OK
+#     [ok] db_size — 12 MiB / limit 1024 MiB
+#     [ok] stale_runs — no runs stuck longer than 3600s
+```
+
+The same snapshot is served at `GET /health` (with checks) and the
+daemon logs degraded states every `kairos.health.check_interval_seconds`
+(configure limits under `[kairos.health]`). A Prometheus alerting
+template ships at `deploy/prometheus/kairos_alerts.yml` (§15.15).
+
+**Secrets (§12.2)** — three backends via `[kairos.security]`:
+
+```toml
+[kairos.security]
+backend = "file"        # "" | "vault" | "env" | "file"
+env_prefix = "KAIROS_SECRET_"
+```
+
+- `env` — every `KAIROS_SECRET_<KEY>` variable becomes
+  `${{ secrets.<KEY> }}` (§12.2.3).
+- `file` — the native AES-256-GCM store (§12.2.1), managed by:
+
+```bash
+export KAIROS_SECRETS_PASSWORD=…        # or pass --password / prompt
+kairos secrets init                     # create <data_dir>/secrets.enc
+echo "tok-123" | kairos secrets set deploy_api_key
+kairos secrets set region --value eu    # or --value
+kairos secrets list                     # keys only, never values
+kairos secrets remove region            # add -f to ignore missing
+kairos secrets rotate-password          # re-encrypt under a new password
+```
+
+The daemon loads the file at startup (password from
+`KAIROS_SECRETS_PASSWORD`). Every mutation across CLI, MCP, and HTTP is
+recorded in the audit trail (`GET /api/v1/audit`; §15.14).
 
 > **curl note:** always pass `-d ''` on bodiless POSTs. Plain
 > `curl -X POST` sends no `Content-Length` header, and the server then
