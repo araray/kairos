@@ -79,6 +79,14 @@ public:
         const std::string& data_dir,
         const std::string& db_path);
 
+    /// §9.3: in-step query variables — sequential run number and the
+    /// previous run's status/id for this target. Call after
+    /// add_kairos_vars; empty values are skipped.
+    EnvBuilder& add_query_vars(
+        int64_t run_number,
+        const std::string& prev_run_status,
+        const std::string& prev_run_id);
+
     /// Build the final environment map.
     [[nodiscard]] std::unordered_map<std::string, std::string>
     build() const;

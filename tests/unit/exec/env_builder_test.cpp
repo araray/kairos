@@ -300,4 +300,27 @@ TEST(EnvFileTest, EnvFileLayerBelowInlineEnv) {
     EXPECT_EQ(env["A"], "file");
     EXPECT_EQ(env["B"], "job");
     EXPECT_EQ(env["C"], "step");
+
+}
+
+// ── §9.3 in-step query variables ────────────────────────────────────────
+
+TEST(EnvBuilderTest, QueryVarsInjected) {
+    EnvBuilder b;
+    b.add_kairos_vars("r1", "j1", "s1", "w1", "manual",
+                      "c1", "/data", "/data/db");
+    b.add_query_vars(6, "SUCCESS", "run-prev-001");
+    auto env = b.build();
+    EXPECT_EQ(env["KAIROS_RUN_NUMBER"], "7");   // 6 prior + this one
+    EXPECT_EQ(env["KAIROS_PREV_RUN_STATUS"], "SUCCESS");
+    EXPECT_EQ(env["KAIROS_PREV_RUN_ID"], "run-prev-001");
+}
+
+TEST(EnvBuilderTest, QueryVarsEmptyPrevSkipped) {
+    EnvBuilder b;
+    b.add_query_vars(0, "", "");
+    auto env = b.build();
+    EXPECT_EQ(env["KAIROS_RUN_NUMBER"], "1");
+    EXPECT_FALSE(env.contains("KAIROS_PREV_RUN_STATUS"));
+    EXPECT_FALSE(env.contains("KAIROS_PREV_RUN_ID"));
 }

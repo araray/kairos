@@ -1089,6 +1089,42 @@ int64_t QueryReader::count_stale_runs(int timeout_seconds) const {
     return q.getColumn(0).getInt64();
 }
 
+int64_t QueryReader::run_number_for(
+    const std::string& target_name,
+    const std::string& run_start_ts) const
+{
+    SQLite::Statement q(db_,
+        "SELECT COUNT(*) FROM runs WHERE target_name = ? "
+        "AND start_ts < ?");
+    q.bind(1, target_name);
+    q.bind(2, run_start_ts);
+    if (q.executeStep()) return q.getColumn(0).getInt64();
+    return 0;
+}
+
+std::string QueryReader::previous_run_id(
+    const std::string& target_name,
+    const std::string& run_start_ts) const
+{
+    SQLite::Statement q(db_,
+        "SELECT run_id FROM runs WHERE target_name = ? "
+        "AND start_ts < ? ORDER BY start_ts DESC LIMIT 1");
+    q.bind(1, target_name);
+    q.bind(2, run_start_ts);
+    if (q.executeStep()) return q.getColumn(0).getString();
+    return "";
+}
+
+std::string QueryReader::run_status_by_id(
+    const std::string& run_id) const
+{
+    SQLite::Statement q(db_,
+        "SELECT status FROM runs WHERE run_id = ?");
+    q.bind(1, run_id);
+    if (q.executeStep()) return q.getColumn(0).getString();
+    return "";
+}
+
 std::vector<QueryReader::AuditRow> QueryReader::query_audit_log(
     int limit) const
 {

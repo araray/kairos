@@ -191,6 +191,24 @@ public:
     /// (Roadmap §15.5 stale-run check).
     [[nodiscard]] int64_t count_stale_runs(int timeout_seconds) const;
 
+    // ── In-step query env (Roadmap §9.3) ──────────────────────────
+
+    /// Sequential run number for a target: count of prior runs with
+    /// the same target_name started before the given run's start_ts.
+    [[nodiscard]] int64_t run_number_for(
+        const std::string& target_name,
+        const std::string& run_start_ts) const;
+
+    /// The run_id immediately preceding the given run for the same
+    /// target (by start_ts). Empty when none exists.
+    [[nodiscard]] std::string previous_run_id(
+        const std::string& target_name,
+        const std::string& run_start_ts) const;
+
+    /// Status of the run with the given id (empty when unknown).
+    [[nodiscard]] std::string run_status_by_id(
+        const std::string& run_id) const;
+
     /// Query the database file size in bytes.
     /// @param db_path  Path to the SQLite database file.
     [[nodiscard]] static int64_t query_db_size(

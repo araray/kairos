@@ -1032,3 +1032,88 @@ TEST_F(RunContextTest, WebhookNotificationDelivered) {
               std::string::npos)
         << "body: " << delivered[0].second;
 }
+
+// ── §9.3 in-step query env vars ──────────────────────────────────────────
+
+TEST_F(RunContextTest, QueryEnvVarsInjectedIntoSteps) {
+    kairos::testing::TempDir data_dir;
+
+    // Seed a previous run for the same target.
+    {
+        SQLite::Statement q(*db_,
+            "INSERT INTO runs (run_id, target_type, target_id, "
+            "target_name, trigger_type, trigger_id, correlation_id, "
+            "status, start_ts, end_ts, duration_ms) VALUES "
+            "('run-prev-0001','workflow','wfl-q','queried','manual',"
+            "'t','c','SUCCESS','2020-01-01T00:00:00Z',"
+            "'2020-01-01T00:00:01Z',10)");
+        q.exec();
+    }
+
+    StepDef step;
+    step.step_id = "stp-q";
+    step.step_name = "probe";
+    step.command =
+        "echo num=$KAIROS_RUN_NUMBER "
+        "prev=$KAIROS_PREV_RUN_STATUS id=$KAIROS_PREV_RUN_ID";
+    JobDef job;
+    job.job_id = "job-q";
+    job.job_name = "queried";
+    job.steps = {step};
+    DagNode node{.job_id = "job-q", .job_name = "queried"};
+    auto wf = build_workflow_def("wfl-q", "queried", {job}, {node});
+
+    pool_ = std::make_unique<exec::RunnerPool>(
+        exec::RunnerPoolConfig{.worker_count = 1, .queue_capacity = 8});
+    pool_->set_process_handle_factory([](const exec::ProcessSpec&) {
+        return exec::create_process_handle();
+    });
+    pool_->start(stop_source_.get_token());
+
+    auto registry = std::make_shared<WorkflowRegistry>(
+        std::vector<WorkflowDef>{std::move(wf)},
+        std::vector<TimerEntry>{});
+    kairos::persist::QueryReader reader(*db_);
+    TriggerBus bus(64);
+    Pipeline pipeline(PipelineConfig{}, Pipeline::Dependencies{
+        .clock = &clock_,
+        .trigger_bus = &bus,
+        .runner_pool = pool_.get(),
+        .registry = registry,
+        .active_runs = &active_runs_,
+        .db_writer = writer_.get(),
+        .query_reader = &reader,
+        .data_dir = data_dir.path(),
+        .notification_process_factory = []() {
+            return exec::create_process_handle();
+        },
+    });
+
+    auto status = pipeline.process_event(
+        make_manual_trigger("wfl-q"), stop_source_.get_token());
+    EXPECT_EQ(status, RunStatus::Success);
+
+    writer_stop_.request_stop();
+    writer_->flush();
+    std::string run_id;
+    {
+        SQLite::Statement q(*db_,
+            "SELECT run_id FROM runs ORDER BY start_ts DESC LIMIT 1");
+        ASSERT_TRUE(q.executeStep());
+        run_id = q.getColumn(0).getString();
+    }
+    std::string logs;
+    {
+        SQLite::Statement q(*db_,
+            "SELECT content FROM log_chunks WHERE run_id = ? "
+            "ORDER BY id");
+        q.bind(1, run_id);
+        while (q.executeStep()) logs += q.getColumn(0).getString();
+    }
+    EXPECT_NE(logs.find("num=2 "), std::string::npos)
+        << "logs: " << logs;   // 1 prior run → this is #2
+    EXPECT_NE(logs.find("prev=SUCCESS"), std::string::npos)
+        << "logs: " << logs;
+    EXPECT_NE(logs.find("id=run-prev-0001"), std::string::npos)
+        << "logs: " << logs;
+}

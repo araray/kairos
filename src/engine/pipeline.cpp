@@ -1038,6 +1038,20 @@ exec::ProcessSpec Pipeline::build_process_spec(
         ctx.correlation_id,
         deps_.data_dir.string(), "");
 
+    // §9.3: in-step query variables (best-effort — no reader, skip).
+    if (deps_.query_reader) {
+        auto start_iso = format_iso8601(ctx.now);
+        auto prev_id = deps_.query_reader->previous_run_id(
+            ctx.workflow_name, start_iso);
+        builder.add_query_vars(
+            deps_.query_reader->run_number_for(
+                ctx.workflow_name, start_iso),
+            prev_id.empty()
+                ? ""
+                : deps_.query_reader->run_status_by_id(prev_id),
+            prev_id);
+    }
+
     spec.environment = builder.build();
 
     // §10.3: forward watch-event metadata as environment variables.

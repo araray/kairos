@@ -139,6 +139,20 @@ EnvBuilder& EnvBuilder::add_kairos_vars(
     return *this;
 }
 
+EnvBuilder& EnvBuilder::add_query_vars(
+    int64_t run_number,
+    const std::string& prev_run_status,
+    const std::string& prev_run_id) {
+    env_["KAIROS_RUN_NUMBER"] = std::to_string(run_number + 1);
+    if (!prev_run_status.empty()) {
+        env_["KAIROS_PREV_RUN_STATUS"] = prev_run_status;
+    }
+    if (!prev_run_id.empty()) {
+        env_["KAIROS_PREV_RUN_ID"] = prev_run_id;
+    }
+    return *this;
+}
+
 std::unordered_map<std::string, std::string> EnvBuilder::build() const {
     // Ensure PATH is always present (defensive).
     auto result = env_;
