@@ -678,6 +678,7 @@ kairos_discover_tests(test_otel_tracer)
 
 add_executable(test_secret_store
     unit/security/secret_store_test.cpp
+    unit/security/native_secret_file_test.cpp
 )
 target_link_libraries(test_secret_store PRIVATE kairos_test_helpers)
 if(KAIROS_VAULT)

@@ -243,11 +243,15 @@ endif()
 
 # ── Optional: Ansible Vault support (KAIROS_VAULT=ON) ─────────────────────
 if(KAIROS_VAULT)
-    target_sources(kairos_core PRIVATE src/security/secret_store.cpp)
+    target_sources(kairos_core PRIVATE
+        src/security/secret_store.cpp
+        src/security/native_secret_file.cpp)
     target_compile_definitions(kairos_core PUBLIC KAIROS_VAULT)
     target_link_libraries(kairos_core PUBLIC OpenSSL::SSL OpenSSL::Crypto)
 else()
-    target_sources(kairos_core PRIVATE src/security/secret_store_stub.cpp)
+    target_sources(kairos_core PRIVATE
+        src/security/secret_store_stub.cpp
+        src/security/native_secret_file_stub.cpp)
 endif()
 
 # ── Optional: Docker runner support (KAIROS_DOCKER=ON) ───────────────────
