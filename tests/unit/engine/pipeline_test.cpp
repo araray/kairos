@@ -30,8 +30,10 @@
 // Platform-conditional output-append command for tests: POSIX shells
 // use "$VAR"; cmd.exe uses %VAR% with no space before >>.
 #ifdef _WIN32
+// cmd.exe /C breaks nested quotes in redirect targets — the temp
+// paths these tests use have no spaces, so no inner quotes needed.
 #define KAIROS_TEST_OUT_APPEND(var, kv) \
-    "echo " kv ">>\"" var "\""
+    "echo " kv ">>" var
 #else
 #define KAIROS_TEST_OUT_APPEND(var, kv) \
     "echo " kv " >> \"" var "\""
@@ -607,10 +609,11 @@ TEST_F(PipelineTest, StepOutputsCapturedAndPersisted) {
     produce.step_name = "produce";
 #ifdef _WIN32
     // cmd.exe: %VAR% expansion, `echo x>>file` (no space → no trailing
-    // space in the captured value).
+    // space in the value). Inner quotes break cmd /C's redirect — the
+    // temp path has no spaces so they're omitted.
     produce.command =
-        "echo VERSION=9.9.9>>\"%KAIROS_OUTPUT%\"\n"
-        "echo COMMIT_SHA=abc123>>\"%KAIROS_OUTPUT%\"";
+        "echo VERSION=9.9.9>>%KAIROS_OUTPUT%\n"
+        "echo COMMIT_SHA=abc123>>%KAIROS_OUTPUT%";
     StepDef consume;
     consume.step_id = "stp-consume";
     consume.step_name = "consume";
@@ -704,8 +707,8 @@ TEST_F(PipelineTest, InvalidOutputKeysAreDropped) {
     produce.step_name = "bad";
 #ifdef _WIN32
     produce.command =
-        "echo GOOD=1>>\"%KAIROS_OUTPUT%\" & echo bad-key!!=2>>"
-        "\"%KAIROS_OUTPUT%\"";
+        "echo GOOD=1>>%KAIROS_OUTPUT% & echo bad-key!!=2>>"
+        "%KAIROS_OUTPUT%";
 #else
     produce.command =
         "echo GOOD=1 >> \"$KAIROS_OUTPUT\"; "
