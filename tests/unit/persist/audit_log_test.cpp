@@ -97,3 +97,83 @@ TEST_F(AuditLogTest, LimitIsRespected) {
     EXPECT_EQ(reader.query_audit_log(3).size(), 3u);
     EXPECT_EQ(reader.query_audit_log(50).size(), 5u);
 }
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  §15.6 run pinning
+// ═══════════════════════════════════════════════════════════════════════════
+
+TEST_F(AuditLogTest, PinnedRunsSurvivePrune) {
+    // Two old runs: one pinned, one not.
+    {
+        SQLite::Statement a(*db_,
+            "INSERT INTO runs (run_id, target_type, target_id, "
+            "target_name, trigger_type, trigger_id, correlation_id, "
+            "status, start_ts, pinned) VALUES "
+            "('run-pin-me','workflow','w','w','manual','t','c',"
+            "'SUCCESS','2020-01-01T00:00:00Z',1)");
+        a.exec();
+        SQLite::Statement b(*db_,
+            "INSERT INTO runs (run_id, target_type, target_id, "
+            "target_name, trigger_type, trigger_id, correlation_id, "
+            "status, start_ts, pinned) VALUES "
+            "('run-plain','workflow','w','w','manual','t','c',"
+            "'SUCCESS','2020-01-01T00:00:00Z',0)");
+        b.exec();
+    }
+
+    DBWriter writer(*db_);
+    std::stop_source stop;
+    writer.start(stop.get_token());
+    writer.enqueue(PruneOlderThan{.cutoff_date = "2021-01-01T00:00:00Z"});
+    std::this_thread::sleep_for(std::chrono::milliseconds(300));
+    stop.request_stop();
+    writer.flush();
+
+    QueryReader reader(*db_);
+    EXPECT_FALSE(reader.get_run_summary("run-plain").has_value());
+    EXPECT_TRUE(reader.get_run_summary("run-pin-me").has_value());
+
+    auto pinned = reader.get_run_summary("run-pin-me");
+    ASSERT_TRUE(pinned.has_value());
+    EXPECT_TRUE(pinned->pinned);
+}
+
+TEST_F(AuditLogTest, PinUnpinRoundTrip) {
+    {
+        SQLite::Statement a(*db_,
+            "INSERT INTO runs (run_id, target_type, target_id, "
+            "target_name, trigger_type, trigger_id, correlation_id, "
+            "status, start_ts) VALUES "
+            "('run-rt','workflow','w','w','manual','t','c',"
+            "'SUCCESS','2026-01-01T00:00:00Z')");
+        a.exec();
+    }
+
+    DBWriter writer(*db_);
+    std::stop_source stop;
+    writer.start(stop.get_token());
+    writer.enqueue(UpdateRunPinned{
+        .run_id = "run-rt", .pinned = true});
+    std::this_thread::sleep_for(std::chrono::milliseconds(300));
+    stop.request_stop();
+    writer.flush();
+
+    QueryReader reader(*db_);
+    auto r = reader.get_run_summary("run-rt");
+    ASSERT_TRUE(r.has_value());
+    EXPECT_TRUE(r->pinned);
+
+    // Unpin via a second writer.
+    DBWriter writer2(*db_);
+    std::stop_source stop2;
+    writer2.start(stop2.get_token());
+    writer2.enqueue(UpdateRunPinned{
+        .run_id = "run-rt", .pinned = false});
+    std::this_thread::sleep_for(std::chrono::milliseconds(300));
+    stop2.request_stop();
+    writer2.flush();
+
+    auto r2 = reader.get_run_summary("run-rt");
+    ASSERT_TRUE(r2.has_value());
+    EXPECT_FALSE(r2->pinned);
+}

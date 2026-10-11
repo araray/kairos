@@ -710,6 +710,9 @@ int run(int argc, char** argv) {
         "Regex filter on displayed rows (§5.1)");
     runs_list->add_flag("-i,--interactive", runs_interactive,
         "Interactive selection mode (§2.1)");
+    bool runs_only_pinned = false;
+    runs_list->add_flag("--pinned", runs_only_pinned,
+        "Only pinned runs (§15.6)");
 
     auto* runs_show = cmd_runs->add_subcommand("show",
         "Show run detail with jobs and steps");
@@ -722,6 +725,17 @@ int run(int argc, char** argv) {
     std::string run_cancel_id;
     runs_cancel->add_option("run_id", run_cancel_id,
         "Run ID to cancel")->required();
+
+    std::string runs_pin_id;
+    auto* runs_pin = cmd_runs->add_subcommand("pin",
+        "Pin a run — survives retention pruning (§15.6)");
+    runs_pin->add_option("run_id", runs_pin_id,
+        "Run ID (unique prefix ok)")->required();
+    std::string runs_unpin_id;
+    auto* runs_unpin = cmd_runs->add_subcommand("unpin",
+        "Unpin a run");
+    runs_unpin->add_option("run_id", runs_unpin_id,
+        "Run ID (unique prefix ok)")->required();
 
     // ── logs ──────────────────────────────────────────────────────
     auto* cmd_logs = app.add_subcommand("logs",
@@ -2193,6 +2207,7 @@ int run(int argc, char** argv) {
             if (json_output) {
                 json arr = json::array();
                 for (const auto& r : runs) {
+                    if (runs_only_pinned && !r.pinned) continue;
                     // Apply filter to JSON rows too.
                     if (filter.active()) {
                         std::vector<std::string> row_fields = {
@@ -2209,7 +2224,8 @@ int run(int argc, char** argv) {
                         {"exit_code", r.exit_code},
                         {"started_at", format_display_ts(r.start_ts)},
                         {"finished_at", format_display_ts(r.end_ts)},
-                        {"duration_ms", r.duration_ms}
+                        {"duration_ms", r.duration_ms},
+                        {"pinned", r.pinned}
                     });
                 }
                 std::cout << json(arr).dump(2) << "\n";
@@ -2230,12 +2246,14 @@ int run(int argc, char** argv) {
                     int shown = 0;
 
                     for (const auto& r : runs) {
+                        if (runs_only_pinned && !r.pinned) continue;
                         std::string status_str =
                             cli::status_icon(r.status, use_color) + " " +
                             cli::colorize_status(r.status, use_color);
-                        std::string display_id = runs_full_id
+                        std::string display_id = (runs_full_id
                             ? r.run_id
-                            : cli::truncate(r.run_id, 12);
+                            : cli::truncate(r.run_id, 12))
+                            + (r.pinned ? " \xF0\x9F\x93\x8C" : "");
 
                         std::vector<std::string> row = {
                             display_id,
@@ -2446,6 +2464,59 @@ int run(int argc, char** argv) {
     }
 
     // ── runs cancel ──────────────────────────────────────────────
+    // ── runs pin/unpin (§15.6) ───────────────────────────────────
+    if (runs_pin->parsed() || runs_unpin->parsed()) {
+        setup_logging(log_level, json_output, false);
+        bool pin = runs_pin->parsed();
+        auto& id_ref = pin ? runs_pin_id : runs_unpin_id;
+
+        auto cfg = load_config_or_die(config_path, {});
+        if (!cfg) return static_cast<int>(ExitCode::kConfigError);
+
+        try {
+            auto db = persist::open_database(cfg->db_path);
+            persist::QueryReader reader(*db);
+
+            auto resolved = resolve_prefix_or_error(
+                reader, id_ref, json_output);
+            if (resolved.empty())
+                return static_cast<int>(ExitCode::kNotFound);
+            id_ref = resolved;
+
+            // Direct UPDATE — pinning is DB metadata, safe alongside
+            // the daemon under WAL.
+            SQLite::Statement up(*db,
+                "UPDATE runs SET pinned = ? WHERE run_id = ?");
+            up.bind(1, pin ? 1 : 0);
+            up.bind(2, id_ref);
+            int changed = up.exec();
+            if (changed == 0) {
+                if (json_output) {
+                    std::cout << json{{"error", "Run not found"},
+                                      {"run_id", id_ref}}.dump(2)
+                              << "\n";
+                } else {
+                    std::cerr << "Run '" << id_ref
+                              << "' not found.\n";
+                }
+                return static_cast<int>(ExitCode::kNotFound);
+            }
+
+            if (json_output) {
+                std::cout << json{{"run_id", id_ref},
+                                  {"pinned", pin}}.dump(2)
+                          << "\n";
+            } else {
+                std::cout << (pin ? "Pinned " : "Unpinned ")
+                          << id_ref << "\n";
+            }
+        } catch (const std::exception& e) {
+            std::cerr << "Error: " << e.what() << "\n";
+            return 1;
+        }
+        return 0;
+    }
+
     if (runs_cancel->parsed()) {
         setup_logging(log_level, json_output, false);
 

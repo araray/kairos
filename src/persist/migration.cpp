@@ -300,6 +300,15 @@ CREATE TABLE IF NOT EXISTS run_outputs (
 CREATE INDEX IF NOT EXISTS idx_run_outputs_run
     ON run_outputs (run_id);
         )SQL"
+    },
+    {
+        6,
+        "Run pinning — runs.pinned column (Roadmap §15.6)",
+        R"SQL(
+-- Pinned runs survive retention pruning. 0 = unpinned (default for
+-- all pre-existing rows).
+ALTER TABLE runs ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0;
+        )SQL"
     }
 };
 

@@ -344,10 +344,18 @@ void DBWriter::execute_request(const DBWriteRequest& req) {
                 }
             }
 
+        } else if constexpr (std::is_same_v<T, UpdateRunPinned>) {
+            SQLite::Statement up(db_,
+                "UPDATE runs SET pinned = ? WHERE run_id = ?");
+            up.bind(1, r.pinned ? 1 : 0);
+            up.bind(2, r.run_id);
+            up.exec();
+
         } else if constexpr (std::is_same_v<T, PruneOlderThan>) {
             // Prune runs older than cutoff.
             SQLite::Statement prune_runs(db_,
-                "DELETE FROM runs WHERE start_ts < ?");
+                "DELETE FROM runs WHERE start_ts < ? "
+                "AND pinned = 0");
             prune_runs.bind(1, r.cutoff_date);
             int deleted = prune_runs.exec();
             spdlog::info("Pruned {} runs older than {}",

@@ -172,6 +172,12 @@ struct PruneOlderThan {
     std::string cutoff_date;        ///< ISO-8601
 };
 
+/// Pin/unpin a run — pinned runs survive retention pruning (§15.6).
+struct UpdateRunPinned {
+    std::string run_id;
+    bool pinned = true;
+};
+
 /// Insert a metrics snapshot (periodic persistence per §20.5).
 struct InsertMetricsSnapshot {
     std::string metric_name;
@@ -223,7 +229,8 @@ using DBWriteRequest = std::variant<
     InsertMetricsSnapshot, BatchInsertMetricsSnapshots,
     PruneMetricsSnapshots,
     InsertAuditEntry,
-    BatchInsertRunOutputs
+    BatchInsertRunOutputs,
+    UpdateRunPinned
 >;
 
 // ── DB Writer ────────────────────────────────────────────────────────────
