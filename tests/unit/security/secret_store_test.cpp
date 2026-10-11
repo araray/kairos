@@ -24,6 +24,16 @@
 #include <unordered_map>
 #include <vector>
 
+#ifdef _WIN32
+// MSVC has no setenv/unsetenv — wrap _putenv_s (§12.2.3 tests).
+static int setenv_wrapper(const char* name, const char* value, int) {
+    return _putenv_s(name, value) == 0 ? 0 : -1;
+}
+static void unsetenv_wrapper(const char* name) { _putenv_s(name, ""); }
+#define setenv setenv_wrapper
+#define unsetenv(nm) unsetenv_wrapper(nm)
+#endif
+
 namespace kairos::security {
 namespace {
 
@@ -320,15 +330,6 @@ TEST(SecretStoreVaultTest, LoadVaultThrowsWhenNotCompiled) {
 // ═══════════════════════════════════════════════════════════════════════════
 //  §12.2.3 environment-only secrets backend (Roadmap Phase 13)
 // ═══════════════════════════════════════════════════════════════════════════
-
-#ifdef _WIN32
-static int setenv_wrapper(const char* name, const char* value, int) {
-    return _putenv_s(name, value) == 0 ? 0 : -1;
-}
-static void unsetenv_wrapper(const char* name) { _putenv_s(name, ""); }
-#define setenv setenv_wrapper
-#define unsetenv(nm) unsetenv_wrapper(nm)
-#endif
 
 TEST(SecretEnvTest, LoadsPrefixedVariables) {
     ASSERT_EQ(0, ::setenv("KAIROS_SECRET_DEPLOY_API_KEY", "tok-123", 1));
