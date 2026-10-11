@@ -451,12 +451,12 @@ TEST_F(HttpServerTest, ExternalWebRootOverridesEmbedded) {
     dir.create_file("templates/base.html",
                     "OVERRODE-BASE[{{ title }}]{{ content }}END-OVERRIDE");
 
-    auto server = make_server(18443, "", dir.path().string());
+    auto server = make_server(18543, "", dir.path().string());
     std::stop_source ss;
     server->start(ss.get_token());
     std::this_thread::sleep_for(std::chrono::milliseconds(200));
 
-    httplib::Client cli("http://127.0.0.1:18443");
+    httplib::Client cli("http://127.0.0.1:18543");
     auto res = cli.Get("/");
 
     ASSERT_TRUE(res);
@@ -484,12 +484,12 @@ jobs:
         run: "ctest"
 )");
 
-    auto server = make_server(18444);
+    auto server = make_server(18544);
     std::stop_source ss;
     server->start(ss.get_token());
     std::this_thread::sleep_for(std::chrono::milliseconds(200));
 
-    httplib::Client cli("http://127.0.0.1:18444");
+    httplib::Client cli("http://127.0.0.1:18544");
 
     // Jobs page lists workflow jobs (by job name).
     auto jobs = cli.Get("/jobs");

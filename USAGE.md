@@ -296,6 +296,19 @@ kairos
 │   ├── remove <key>        Remove a secret (-f: ignore missing)
 │   └── rotate-password     Re-encrypt under a new master password
 │
+├── export                  Export run history, events, and audit
+│   ├── --since             Only records after an ISO-8601 timestamp
+│   └── --output, -o        Output bundle file
+│
+├── import                  Import a JSON bundle (idempotent per run_id)
+│   ├── file                Bundle file path
+│   └── --merge             Insert only missing runs (default behavior)
+│   ├── init                Create an empty secrets file
+│   ├── set <key>           Add/update a secret (value from stdin/--value)
+│   ├── list                List secret keys (never values)
+│   ├── remove <key>        Remove a secret (-f: ignore missing)
+│   └── rotate-password     Re-encrypt under a new master password
+│
 ├── migrate-config           Migrate legacy tool configuration
 │   ├── --source             Source tool (avscheduler|eventwatcher|localflow)
 │   ├── --source-config      Path to source config file
@@ -1351,6 +1364,74 @@ kairos secrets rotate-password          # re-encrypt under a new password
 The daemon loads the file at startup (password from
 `KAIROS_SECRETS_PASSWORD`). Every mutation across CLI, MCP, and HTTP is
 recorded in the audit trail (`GET /api/v1/audit`; §15.14).
+
+
+### 18.6 Advanced Features (v0.2, Roadmap Phase 15)
+
+**Run pinning (§15.6)** — pinned runs survive retention pruning:
+
+```bash
+kairos runs pin run-48ee00       # unique prefix is fine
+kairos runs list --pinned        # 📌 marks pinned runs
+kairos runs unpin run-48ee00
+```
+
+**In-step queries (§9.3)** — every step receives sequential and
+previous-run context as environment variables:
+
+| Variable | Meaning |
+|----------|---------|
+| `KAIROS_RUN_NUMBER` | Sequential run number for this target |
+| `KAIROS_PREV_RUN_STATUS` | Status of the previous run |
+| `KAIROS_PREV_RUN_ID` | Run ID of the previous run |
+
+**Per-workflow retention (§15.11)**:
+
+```yaml
+name: high_frequency_monitor
+retention:
+  max_runs: 100         # Keep the newest 100 runs
+  max_age: 7d           # Prune older (accepts "7d" or days as int)
+  keep_failures: true   # Failures survive age pruning
+```
+
+**MCP `kairos.search` (§15.13)** — agents search across entities:
+
+```json
+{"name": "kairos.search",
+ "arguments": {"query": "deploy", "entity_types": ["workflows", "runs"],
+                "limit": 10}}
+```
+
+**Export/import (§15.9)**:
+
+```bash
+kairos export --since 2026-03-01 --output runs_march.json
+kairos import runs_march.json     # INSERT OR IGNORE on run_id — safe to repeat
+```
+
+**Workflow templates (§15.3)** — `templates/` beside the workflows dir:
+
+```yaml
+# workflows/templates/standard_build.yaml
+jobs:
+  build:
+    steps:
+      - run: make build-${{ params.language }}
+  test:
+    needs: [build]
+    steps:
+      - run: ${{ params.test_command }}
+
+# workflows/my_app.yaml
+name: my_app
+uses: standard_build
+with:
+  language: cpp
+  test_command: ctest --output-on-failure
+```
+
+Missing `with:` values fail the load with the offending token.
 
 > **curl note:** always pass `-d ''` on bodiless POSTs. Plain
 > `curl -X POST` sends no `Content-Length` header, and the server then
