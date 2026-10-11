@@ -27,6 +27,16 @@
 #include <stop_token>
 #include <thread>
 
+// Platform-conditional output-append command for tests: POSIX shells
+// use "$VAR"; cmd.exe uses %VAR% with no space before >>.
+#ifdef _WIN32
+#define KAIROS_TEST_OUT_APPEND(var, kv) \
+    "echo " kv ">>\"" var "\""
+#else
+#define KAIROS_TEST_OUT_APPEND(var, kv) \
+    "echo " kv " >> \"" var "\""
+#endif
+
 using namespace kairos;
 using namespace kairos::engine;
 using namespace kairos::exec;
@@ -595,6 +605,17 @@ TEST_F(PipelineTest, StepOutputsCapturedAndPersisted) {
     StepDef produce;
     produce.step_id = "stp-produce";
     produce.step_name = "produce";
+#ifdef _WIN32
+    // cmd.exe: %VAR% expansion, `echo x>>file` (no space → no trailing
+    // space in the captured value).
+    produce.command =
+        "echo VERSION=9.9.9>>\"%KAIROS_OUTPUT%\"\n"
+        "echo COMMIT_SHA=abc123>>\"%KAIROS_OUTPUT%\"";
+    StepDef consume;
+    consume.step_id = "stp-consume";
+    consume.step_name = "consume";
+    consume.command = "echo got-%KAIROS_OUTPUT%";
+#else
     produce.command =
         "echo VERSION=9.9.9 >> \"$KAIROS_OUTPUT\"\n"
         "echo COMMIT_SHA=abc123 >> \"$KAIROS_OUTPUT\"";
@@ -603,6 +624,7 @@ TEST_F(PipelineTest, StepOutputsCapturedAndPersisted) {
     consume.step_id = "stp-consume";
     consume.step_name = "consume";
     consume.command = "echo got-$KAIROS_OUTPUT";
+#endif
 
     JobDef job;
     job.job_id = "job-out";
@@ -680,9 +702,15 @@ TEST_F(PipelineTest, InvalidOutputKeysAreDropped) {
     StepDef produce;
     produce.step_id = "stp-bad";
     produce.step_name = "bad";
+#ifdef _WIN32
+    produce.command =
+        "echo GOOD=1>>\"%KAIROS_OUTPUT%\" & echo bad-key!!=2>>"
+        "\"%KAIROS_OUTPUT%\"";
+#else
     produce.command =
         "echo GOOD=1 >> \"$KAIROS_OUTPUT\"; "
         "echo bad-key!!=2 >> \"$KAIROS_OUTPUT\"";
+#endif
     // (bad-key!! isn't KEY=VALUE — the .env parser drops the line, so
     // this also covers parse-level leniency; run stays green.)
 
@@ -809,7 +837,7 @@ TEST_F(RunContextTest, StepsScopeSubstitutionWithinJob) {
     StepDef produce;
     produce.step_id = "stp-p";
     produce.step_name = "produce";
-    produce.command = "echo VERSION=7.7.7 >> \"$KAIROS_OUTPUT\"";
+    produce.command = KAIROS_TEST_OUT_APPEND("$KAIROS_OUTPUT", "VERSION=7.7.7");
 
     StepDef consume;
     consume.step_id = "stp-c";
@@ -834,7 +862,7 @@ TEST_F(RunContextTest, JobsScopeSubstitutionAcrossJobs) {
     StepDef produce;
     produce.step_id = "stp-p";
     produce.step_name = "produce";
-    produce.command = "echo SHA=deadbeef >> \"$KAIROS_OUTPUT\"";
+    produce.command = KAIROS_TEST_OUT_APPEND("$KAIROS_OUTPUT", "SHA=deadbeef");
 
     JobDef j1;
     j1.job_id = "job-a";
@@ -868,7 +896,7 @@ TEST_F(RunContextTest, OutputGatedCondition) {
     StepDef produce;
     produce.step_id = "stp-p";
     produce.step_name = "produce";
-    produce.command = "echo VERSION=42 >> \"$KAIROS_OUTPUT\"";
+    produce.command = KAIROS_TEST_OUT_APPEND("$KAIROS_OUTPUT", "VERSION=42");
     JobDef j1;
     j1.job_id = "job-a";
     j1.job_name = "producer";
@@ -1053,9 +1081,15 @@ TEST_F(RunContextTest, QueryEnvVarsInjectedIntoSteps) {
     StepDef step;
     step.step_id = "stp-q";
     step.step_name = "probe";
+#ifdef _WIN32
+    step.command =
+        "echo num=%KAIROS_RUN_NUMBER% "
+        "prev=%KAIROS_PREV_RUN_STATUS% id=%KAIROS_PREV_RUN_ID%";
+#else
     step.command =
         "echo num=$KAIROS_RUN_NUMBER "
         "prev=$KAIROS_PREV_RUN_STATUS id=$KAIROS_PREV_RUN_ID";
+#endif
     JobDef job;
     job.job_id = "job-q";
     job.job_name = "queried";
