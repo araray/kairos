@@ -1188,6 +1188,21 @@ int run_daemon(std::shared_ptr<const kairos::config::ConfigState> config) {
                     .cutoff_date = cutoff_date,
                 });
 
+                // §15.11: per-workflow retention overrides.
+                for (const auto* wf :
+                     registry->workflows()) {
+                    const auto& rt = wf->retention;
+                    if (rt.max_runs > 0 || rt.max_age_days > 0) {
+                        db_writer.enqueue(
+                            persist::PruneWorkflowRetention{
+                                .target_name = wf->workflow_name,
+                                .max_runs = rt.max_runs,
+                                .max_age_days = rt.max_age_days,
+                                .keep_failures = rt.keep_failures,
+                            });
+                    }
+                }
+
                 // 2. Prune old watch events.
                 // Uses the same cutoff as runs.
                 // (PruneOlderThan handles both runs and watch_events.)

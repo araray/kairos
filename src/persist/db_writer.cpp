@@ -351,6 +351,44 @@ void DBWriter::execute_request(const DBWriteRequest& req) {
             up.bind(2, r.run_id);
             up.exec();
 
+        } else if constexpr (std::is_same_v<T,
+                                            PruneWorkflowRetention>) {
+            // §15.11: count-based rule — keep the newest max_runs.
+            if (r.max_runs > 0) {
+                SQLite::Statement cutoff(db_,
+                    "SELECT MIN(start_ts) FROM ("
+                    " SELECT start_ts FROM runs"
+                    " WHERE target_name = ? AND pinned = 0"
+                    " ORDER BY start_ts DESC LIMIT ?)");
+                cutoff.bind(1, r.target_name);
+                cutoff.bind(2, r.max_runs);
+                if (cutoff.executeStep() &&
+                    !cutoff.getColumn(0).isNull()) {
+                    auto keep_from = cutoff.getColumn(0).getString();
+                    SQLite::Statement del(db_,
+                        "DELETE FROM runs WHERE target_name = ? "
+                        "AND pinned = 0 AND start_ts < ?");
+                    del.bind(1, r.target_name);
+                    del.bind(2, keep_from);
+                    del.exec();
+                }
+            }
+
+            // Age-based rule — with an optional failure exemption.
+            if (r.max_age_days > 0) {
+                // Compute the cutoff in SQL from Unix epoch days.
+                SQLite::Statement del(db_,
+                    "DELETE FROM runs WHERE target_name = ? "
+                    "AND pinned = 0 "
+                    "AND start_ts < strftime('%Y-%m-%dT%H:%M:%SZ', "
+                    "'now', ? || ' days') "
+                    "AND (? OR status != 'FAILURE')");
+                del.bind(1, r.target_name);
+                del.bind(2, std::to_string(-r.max_age_days));
+                del.bind(3, r.keep_failures ? 0 : 1);
+                del.exec();
+            }
+
         } else if constexpr (std::is_same_v<T, PruneOlderThan>) {
             // Prune runs older than cutoff.
             SQLite::Statement prune_runs(db_,

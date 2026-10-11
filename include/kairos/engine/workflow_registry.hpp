@@ -110,6 +110,16 @@ struct WorkflowNotifications {
     std::vector<NotificationDef> on_failure;
 };
 
+// ── Per-workflow retention (Roadmap §15.11) ──────────────────────────────
+
+/// Retention override for a single workflow. Zero/empty fields fall
+/// back to the global kairos.persistence.* settings.
+struct WorkflowRetention {
+    int max_runs = 0;           ///< Keep at most N runs (0 = global).
+    int max_age_days = 0;       ///< Prune runs older than N days.
+    bool keep_failures = true;  ///< Failed runs survive age pruning.
+};
+
 // ── Workflow definition (parsed from YAML) ──────────────────────────────
 
 /// A complete workflow definition with its pre-built DAG.
@@ -122,6 +132,7 @@ struct WorkflowDef {
     std::string source_path;     ///< YAML file loaded from ("" for inline).
                                   ///< Not part of the content ID hash.
     WorkflowNotifications notifications;  ///< §15.4 (not in content hash).
+    WorkflowRetention retention;          ///< §15.11 (not in content hash).
 };
 
 // ── Workflow Registry ───────────────────────────────────────────────────

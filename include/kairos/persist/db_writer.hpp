@@ -178,6 +178,17 @@ struct UpdateRunPinned {
     bool pinned = true;
 };
 
+/// §15.11: apply a per-workflow retention override. Deletes the
+/// oldest runs of one target beyond max_runs, and runs older than
+/// max_age_days (keeping failures when requested). Pinned runs and
+/// the global cutoff are unaffected.
+struct PruneWorkflowRetention {
+    std::string target_name;
+    int max_runs = 0;           ///< 0 = skip the count-based rule.
+    int max_age_days = 0;       ///< 0 = skip the age-based rule.
+    bool keep_failures = true;
+};
+
 /// Insert a metrics snapshot (periodic persistence per §20.5).
 struct InsertMetricsSnapshot {
     std::string metric_name;
@@ -230,7 +241,8 @@ using DBWriteRequest = std::variant<
     PruneMetricsSnapshots,
     InsertAuditEntry,
     BatchInsertRunOutputs,
-    UpdateRunPinned
+    UpdateRunPinned,
+    PruneWorkflowRetention
 >;
 
 // ── DB Writer ────────────────────────────────────────────────────────────

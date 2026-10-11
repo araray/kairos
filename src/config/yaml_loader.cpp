@@ -720,6 +720,33 @@ YamlLoadResult parse_workflow_node(
         // §15.4 notification hooks (not part of the content hash).
         wf.notifications = parse_notifications(root);
 
+        // §15.11 per-workflow retention override.
+        if (root["retention"] && root["retention"].IsMap()) {
+            const auto& r = root["retention"];
+            if (r["max_runs"]) {
+                wf.retention.max_runs = r["max_runs"].as<int>(0);
+            }
+            if (r["max_age"]) {
+                wf.retention.max_age_days =
+                    r["max_age"].as<std::string>("0") == "7d"
+                        ? 7  // tolerate the roadmap's "7d" spelling
+                        : r["max_age"].as<int>(0);
+                // Also accept plain "N" days via the int cast above;
+                // duration strings like "7d":
+                if (r["max_age"].IsScalar()) {
+                    auto v = r["max_age"].as<std::string>("0");
+                    if (v.size() > 1 && v.back() == 'd') {
+                        wf.retention.max_age_days =
+                            std::stoi(v.substr(0, v.size() - 1));
+                    }
+                }
+            }
+            if (r["keep_failures"]) {
+                wf.retention.keep_failures =
+                    r["keep_failures"].as<bool>(true);
+            }
+        }
+
         // ── Extract triggers ────────────────────────────────────
         auto triggers = parse_triggers(
             root["triggers"], wf.workflow_id, wf.workflow_name,

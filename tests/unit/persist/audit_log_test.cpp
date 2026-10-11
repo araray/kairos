@@ -176,4 +176,84 @@ TEST_F(AuditLogTest, PinUnpinRoundTrip) {
     auto r2 = reader.get_run_summary("run-rt");
     ASSERT_TRUE(r2.has_value());
     EXPECT_FALSE(r2->pinned);
+}  // close PinUnpinRoundTrip
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  §15.11 per-workflow retention
+// ═══════════════════════════════════════════════════════════════════════════
+
+TEST_F(AuditLogTest, WorkflowRetentionMaxRuns) {
+    // 5 runs for "chatty", retention keeps 2.
+    for (int i = 0; i < 5; ++i) {
+        SQLite::Statement q(*db_,
+            "INSERT INTO runs (run_id, target_type, target_id, "
+            "target_name, trigger_type, trigger_id, correlation_id, "
+            "status, start_ts) VALUES (?, 'workflow', 'w', 'chatty', "
+            "'schedule', 't', 'c', 'SUCCESS', ?)");
+        q.bind(1, "run-chatty-" + std::to_string(i));
+        // Spread over days, ascending.
+        q.bind(2, std::string("2026-01-0") +
+                    std::to_string(i + 1) + "T00:00:00Z");
+        q.exec();
+    }
+
+    DBWriter writer(*db_);
+    std::stop_source stop;
+    writer.start(stop.get_token());
+    writer.enqueue(PruneWorkflowRetention{
+        .target_name = "chatty", .max_runs = 2,
+        .max_age_days = 0, .keep_failures = true});
+    std::this_thread::sleep_for(std::chrono::milliseconds(300));
+    stop.request_stop();
+    writer.flush();
+
+    QueryReader reader(*db_);
+    // Newest two survive.
+    EXPECT_TRUE(reader.get_run_summary("run-chatty-4").has_value());
+    EXPECT_TRUE(reader.get_run_summary("run-chatty-3").has_value());
+    EXPECT_FALSE(reader.get_run_summary("run-chatty-2").has_value());
+    EXPECT_FALSE(reader.get_run_summary("run-chatty-0").has_value());
+}
+
+TEST_F(AuditLogTest, WorkflowRetentionKeepFailures) {
+    // One old SUCCESS and one old FAILURE for "guarded".
+    for (auto& [id, status] :
+         std::vector<std::pair<std::string, std::string>>{
+             {"run-g-ok", "SUCCESS"}, {"run-g-bad", "FAILURE"}}) {
+        SQLite::Statement q(*db_,
+            "INSERT INTO runs (run_id, target_type, target_id, "
+            "target_name, trigger_type, trigger_id, correlation_id, "
+            "status, start_ts) VALUES (?, 'workflow', 'w', 'guarded', "
+            "'schedule', 't', 'c', ?, '2020-01-01T00:00:00Z')");
+        q.bind(1, id);
+        q.bind(2, status);
+        q.exec();
+    }
+
+    DBWriter writer(*db_);
+    std::stop_source stop;
+    writer.start(stop.get_token());
+    // Age rule with keep_failures=true.
+    writer.enqueue(PruneWorkflowRetention{
+        .target_name = "guarded", .max_runs = 0,
+        .max_age_days = 30, .keep_failures = true});
+    std::this_thread::sleep_for(std::chrono::milliseconds(300));
+    stop.request_stop();
+    writer.flush();
+
+    QueryReader reader(*db_);
+    EXPECT_FALSE(reader.get_run_summary("run-g-ok").has_value());
+    EXPECT_TRUE(reader.get_run_summary("run-g-bad").has_value());
+
+    // And with keep_failures=false, the failure goes too.
+    DBWriter writer2(*db_);
+    std::stop_source stop2;
+    writer2.start(stop2.get_token());
+    writer2.enqueue(PruneWorkflowRetention{
+        .target_name = "guarded", .max_runs = 0,
+        .max_age_days = 30, .keep_failures = false});
+    std::this_thread::sleep_for(std::chrono::milliseconds(300));
+    stop2.request_stop();
+    writer2.flush();
+    EXPECT_FALSE(reader.get_run_summary("run-g-bad").has_value());
 }
