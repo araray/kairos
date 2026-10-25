@@ -3718,6 +3718,14 @@ int run(int argc, char** argv) {
         engine::ActiveRunTracker active_runs;
 
         engine::PipelineConfig pipeline_cfg;
+        if (int default_to = cfg->global.get<int>(
+                "kairos.runners.default_timeout_s", 3600);
+            default_to > 0) {
+            pipeline_cfg.default_step_timeout =
+                std::chrono::seconds{default_to};
+        } else {
+            pipeline_cfg.default_step_timeout = std::nullopt;
+        }
         engine::Pipeline pipeline(pipeline_cfg, engine::Pipeline::Dependencies{
             .clock = &clock,
             .trigger_bus = &trigger_bus,
@@ -4340,6 +4348,14 @@ int run(int argc, char** argv) {
         engine::ActiveRunTracker active_runs;
 
         engine::PipelineConfig pipeline_cfg;
+        if (int default_to = cfg->global.get<int>(
+                "kairos.runners.default_timeout_s", 3600);
+            default_to > 0) {
+            pipeline_cfg.default_step_timeout =
+                std::chrono::seconds{default_to};
+        } else {
+            pipeline_cfg.default_step_timeout = std::nullopt;
+        }
         engine::Pipeline pipeline(pipeline_cfg, engine::Pipeline::Dependencies{
             .clock = &clock,
             .trigger_bus = &trigger_bus,

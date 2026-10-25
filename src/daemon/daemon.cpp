@@ -616,6 +616,16 @@ int run_daemon(std::shared_ptr<const kairos::config::ConfigState> config) {
     }
 
     engine::PipelineConfig pipeline_cfg;
+    // kairos.runners.default_timeout_s bounds steps without an explicit
+    // timeout_seconds (0 disables the fallback).
+    if (int default_to = config->global.get<int>(
+            "kairos.runners.default_timeout_s", 3600);
+        default_to > 0) {
+        pipeline_cfg.default_step_timeout =
+            std::chrono::seconds{default_to};
+    } else {
+        pipeline_cfg.default_step_timeout = std::nullopt;
+    }
     engine::Pipeline pipeline(pipeline_cfg, engine::Pipeline::Dependencies{
         .clock = &clock,
         .trigger_bus = &trigger_bus,

@@ -32,6 +32,7 @@
 #include <functional>
 #include <map>
 #include <memory>
+#include <optional>
 #include <stop_token>
 #include <string>
 #include <thread>
@@ -148,6 +149,13 @@ struct ConditionDecision {
 struct PipelineConfig {
     /// Timeout for draining the trigger queue during shutdown.
     std::chrono::seconds drain_timeout{30};
+
+    /// Fallback timeout for steps with no explicit `timeout_seconds`
+    /// (kairos.runners.default_timeout_s). nullopt = no default
+    /// (a hung step blocks until killed externally — the pre-0.2.1
+    /// behavior that froze the engine for days).
+    std::optional<std::chrono::seconds> default_step_timeout{
+        std::chrono::seconds{3600}};
 
     /// KEL evaluation limits.
     kel::EvalLimits kel_limits;

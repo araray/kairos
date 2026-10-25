@@ -1183,3 +1183,57 @@ TEST_F(RunContextTest, QueryEnvVarsInjectedIntoSteps) {
     EXPECT_NE(logs.find("id=run-prev-0001"), std::string::npos)
         << "logs: " << logs;
 }
+
+// ── default step timeout (kairos.runners.default_timeout_s) ──────────────
+// Regression: the config key existed but was never applied — a hung step
+// (curl with no timeout) blocked the single pipeline thread for days.
+
+TEST_F(PipelineTest, DefaultStepTimeoutKillsHungProcess) {
+    // No explicit step timeout; pipeline default = 1s; process sleeps 30s.
+    pool_ = std::make_unique<exec::RunnerPool>(
+        exec::RunnerPoolConfig{.worker_count = 1, .queue_capacity = 8});
+    pool_->set_process_handle_factory([](const exec::ProcessSpec&) {
+        return exec::create_process_handle();
+    });
+    pool_->start(stop_source_.get_token());
+
+    StepDef step;
+    step.step_id = "stp-hang";
+    step.step_name = "hang";
+#ifdef _WIN32
+    step.command = "ping -n 30 127.0.0.1 > nul";
+#else
+    step.command = "sleep 30";
+#endif
+    JobDef job;
+    job.job_id = "job-hang";
+    job.job_name = "hang";
+    job.steps = {step};
+    DagNode node{.job_id = "job-hang", .job_name = "hang"};
+    auto wf = build_workflow_def("wfl-hang", "Hang", {job}, {node});
+
+    auto registry = std::make_shared<WorkflowRegistry>(
+        std::vector<WorkflowDef>{std::move(wf)},
+        std::vector<TimerEntry>{});
+    TriggerBus bus(64);
+    PipelineConfig cfg;
+    cfg.default_step_timeout = std::chrono::seconds{1};
+    auto t0 = std::chrono::steady_clock::now();
+    Pipeline pipeline(cfg, Pipeline::Dependencies{
+        .clock = &clock_,
+        .trigger_bus = &bus,
+        .runner_pool = pool_.get(),
+        .registry = registry,
+        .active_runs = &active_runs_,
+    });
+
+    auto status = pipeline.process_event(
+        make_manual_trigger("wfl-hang"), stop_source_.get_token());
+    auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(
+        std::chrono::steady_clock::now() - t0);
+
+    EXPECT_EQ(status, RunStatus::Failure);
+    // Killed at ~1s, not 30s.
+    EXPECT_LT(elapsed.count(), 10)
+        << "hung step not killed by the default timeout";
+}

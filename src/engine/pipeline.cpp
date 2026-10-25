@@ -998,7 +998,12 @@ exec::ProcessSpec Pipeline::build_process_spec(
     spec.use_shell = step.use_shell;
     if (!step.working_dir.empty()) spec.working_dir = step.working_dir;
     else if (!job.working_dir.empty()) spec.working_dir = job.working_dir;
-    spec.timeout = step.timeout;
+    // Step timeout: explicit `timeout_seconds` wins; otherwise the
+    // configured default (kairos.runners.default_timeout_s) bounds the
+    // step so a hung child cannot block the pipeline indefinitely.
+    spec.timeout = step.timeout.has_value()
+        ? step.timeout
+        : config_.default_step_timeout;
 
     // Build environment via the 7-layer EnvBuilder (§14.6).
     //
