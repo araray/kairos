@@ -15,8 +15,10 @@
 
 #include <chrono>
 #include <condition_variable>
+#include <cstdint>
 #include <mutex>
 #include <thread>
+#include <unordered_map>
 
 namespace kairos {
 
@@ -73,29 +75,40 @@ public:
         return std::chrono::steady_clock::now();
     }
 
+    /// Each wake() is observed exactly once by every thread that sleeps on
+    /// this clock: it ends the current sleep, or — when it lands while the
+    /// thread is between sleeps (e.g. right after it checked its reload
+    /// flag) — the thread's next sleep, so no wake is missed. Afterwards
+    /// the thread blocks normally again. (A sticky "woken" flag made every
+    /// later sleep return at once: after the first reload, every clock
+    /// user busy-looped.)
     bool sleep_until(steady_point target) override {
         std::unique_lock lock(mu_);
-        return !cv_.wait_until(lock, target, [this] { return woken_; });
+        auto& seen = seen_generation();
+        const bool reached = !cv_.wait_until(
+            lock, target, [this, &seen] { return generation_ != seen; });
+        seen = generation_;
+        return reached;
     }
 
     void wake() override {
         {
             std::lock_guard lock(mu_);
-            woken_ = true;
+            ++generation_;
         }
         cv_.notify_all();
     }
 
-    /// Reset the woken flag (call after handling a wake).
-    void reset_wake() {
-        std::lock_guard lock(mu_);
-        woken_ = false;
+private:
+    /// Last wake generation the calling thread observed on this clock.
+    std::uint64_t& seen_generation() {
+        thread_local std::unordered_map<const SystemClockSource*, std::uint64_t> seen;
+        return seen[this];
     }
 
-private:
     mutable std::mutex mu_;
     std::condition_variable cv_;
-    bool woken_ = false;
+    std::uint64_t generation_ = 0;
 };
 
 namespace testing {
