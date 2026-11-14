@@ -1,0 +1,33 @@
+# Kairos configuration for the Villa integration image (contract v1).
+#
+# Installed at /etc/kairos/kairos-villa.toml. Start with:
+#   kairos start --config /etc/kairos/kairos-villa.toml
+# Supply the API token through the environment, never in this file:
+#   KAIROS_HTTP_API__TOKEN=<token>
+# (every key maps to KAIROS_<SECTION>_<KEY>, underscores in key names
+# doubled — e.g. kairos.http.listen_port → KAIROS_HTTP_LISTEN__PORT).
+
+[kairos]
+data_dir = "/var/lib/kairos"
+db_path = "/var/lib/kairos/kairos.db"
+# Workflow definitions written by POST/PUT/DELETE /api/v1/workflows.
+workflows_dir = "/var/lib/kairos/workflows"
+watch_groups_dir = "/var/lib/kairos/watch_groups"
+# Villa M1 supports UTC only (cron evaluated in UTC).
+timezone = "UTC"
+# Villa drives every reload through the HTTP write API.
+auto_reload = false
+
+[kairos.logging]
+level = "info"
+format = "json"
+
+[kairos.runners]
+# Upper bound for steps without an explicit timeout_seconds.
+default_timeout_s = 3600
+
+[kairos.http]
+enabled = true
+listen_addr = "0.0.0.0"
+listen_port = 8420
+# api_token comes from KAIROS_HTTP_API__TOKEN.

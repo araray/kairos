@@ -846,3 +846,10 @@ kairos_discover_tests(test_stale_recovery
         LABELS "persist;recovery"
         TIMEOUT 30
 )
+
+# ── Villa integration contract v1 ─────────────────────────────────────────
+add_executable(test_villa_integration
+    unit/engine/villa_integration_test.cpp
+)
+target_link_libraries(test_villa_integration PRIVATE kairos_test_helpers)
+kairos_discover_tests(test_villa_integration)
