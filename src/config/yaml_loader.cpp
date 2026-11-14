@@ -11,10 +11,13 @@
 #include "kairos/config/yaml_loader.hpp"
 #include "kairos/core/id_generator.hpp"
 #include "kairos/engine/dag.hpp"
+#include "kairos/engine/villa_integration.hpp"
 
 #include <yaml-cpp/yaml.h>
 
 #include <algorithm>
+#include <cctype>
+#include <ctime>
 #include <fstream>
 #include <iomanip>
 #include <regex>
@@ -595,10 +598,65 @@ std::vector<TimerEntry> parse_triggers(
                     "' (expected ISO 8601: YYYY-MM-DDTHH:MM:SS)"});
                 continue;
             }
-            auto tt = std::mktime(&tm_val);
+            // Optional RFC 3339 tail: fractional seconds, then "Z" or
+            // "+HH:MM"/"-HH:MM". With an explicit zone the instant is
+            // absolute (timegm); without one the legacy behavior is kept
+            // (interpreted in the daemon's local time via mktime).
+            std::string tail;
+            std::getline(iss, tail);
+            int64_t frac_ms = 0;
+            size_t pos = 0;
+            if (pos < tail.size() && tail[pos] == '.') {
+                ++pos;
+                int digits = 0;
+                while (pos < tail.size() && std::isdigit(
+                           static_cast<unsigned char>(tail[pos]))) {
+                    if (digits < 3) frac_ms = frac_ms * 10 + (tail[pos] - '0');
+                    ++digits; ++pos;
+                }
+                for (int d = digits; d < 3; ++d) frac_ms *= 10;
+            }
+            bool has_zone = false;
+            int64_t offset_s = 0;
+            bool zone_ok = true;
+            if (pos < tail.size()) {
+                if ((tail[pos] == 'Z' || tail[pos] == 'z') &&
+                    pos + 1 == tail.size()) {
+                    has_zone = true;
+                } else if ((tail[pos] == '+' || tail[pos] == '-') &&
+                           tail.size() - pos == 6 && tail[pos + 3] == ':') {
+                    try {
+                        int hh = std::stoi(tail.substr(pos + 1, 2));
+                        int mm = std::stoi(tail.substr(pos + 4, 2));
+                        offset_s = (hh * 3600 + mm * 60) *
+                                   (tail[pos] == '-' ? -1 : 1);
+                        has_zone = true;
+                    } catch (...) { zone_ok = false; }
+                } else {
+                    zone_ok = false;
+                }
+            }
+            if (!zone_ok) {
+                errors.push_back({file, path,
+                    "Cannot parse date '" + date_str +
+                    "' (expected ISO 8601: YYYY-MM-DDTHH:MM:SS[.fff][Z|+HH:MM])"});
+                continue;
+            }
+            std::time_t tt;
+            if (has_zone) {
+#ifdef _WIN32
+                tt = _mkgmtime(&tm_val);
+#else
+                tt = timegm(&tm_val);
+#endif
+                tt -= offset_s;
+            } else {
+                tt = std::mktime(&tm_val);
+            }
 
             DateTrigger dt;
-            dt.fire_at = std::chrono::system_clock::from_time_t(tt);
+            dt.fire_at = std::chrono::system_clock::from_time_t(tt) +
+                         std::chrono::milliseconds(frac_ms);
             entry.spec = dt;
 
             entry.trigger_id = generate_content_id(
@@ -904,8 +962,23 @@ YamlLoadResult load_workflow_file(const fs::path& path) {
     }
 
     try {
-        YAML::Node root = YAML::LoadFile(path.string());
+        // Read the exact bytes once: they are both parsed and hashed so the
+        // Villa registry digest matches what was actually loaded.
+        std::string bytes;
+        {
+            std::ifstream in(path, std::ios::binary);
+            if (!in) {
+                result.errors.push_back({path.string(), "",
+                    "Cannot read file: " + path.string()});
+                return result;
+            }
+            std::ostringstream ss;
+            ss << in.rdbuf();
+            bytes = ss.str();
+        }
+        YAML::Node root = YAML::Load(bytes);
         auto r = parse_workflow_node(root, path.string());
+        auto source_hash = engine::villa::sha256_hex(bytes);
 
         // Merge into result.
         result.workflows = std::move(r.workflows);
@@ -916,6 +989,7 @@ YamlLoadResult load_workflow_file(const fs::path& path) {
         // Record provenance for the /yaml API endpoints (Roadmap §3.8.1).
         for (auto& wf : result.workflows) {
             wf.source_path = path.string();
+            wf.source_sha256 = source_hash;
         }
 
     } catch (const YAML::Exception& e) {

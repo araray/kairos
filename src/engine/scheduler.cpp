@@ -6,8 +6,13 @@
 
 #include "kairos/engine/scheduler.hpp"
 #include "kairos/core/id_generator.hpp"
+#include "kairos/engine/villa_integration.hpp"
 
 #include <spdlog/spdlog.h>
+
+#include <algorithm>
+#include <tuple>
+#include <unordered_map>
 
 namespace kairos::engine {
 
@@ -39,8 +44,8 @@ void Scheduler::stop() {
 void Scheduler::run(std::stop_token stop, TriggerSink sink) {
     spdlog::info("Scheduler starting");
 
-    // Phase 1: Build initial heap.
-    build_heap();
+    // Phase 1: Build initial heap (engine start → new timer epochs).
+    build_heap(/*initial=*/true);
     spdlog::info("Scheduler loaded {} triggers", heap_.size());
 
     // Phase 2: Resolve misfires.
@@ -61,8 +66,11 @@ void Scheduler::run(std::stop_token stop, TriggerSink sink) {
                     deps_.registry = std::move(pending_registry_);
                 }
             }
-            build_heap();
-            spdlog::info("Scheduler reloaded: {} triggers", heap_.size());
+            build_heap(/*initial=*/false);
+            spdlog::info("Scheduler reloaded: {} triggers (registry {})",
+                         heap_.size(),
+                         deps_.registry ? deps_.registry->registry_digest()
+                                        : std::string("-"));
             continue;
         }
 
@@ -82,14 +90,54 @@ void Scheduler::run(std::stop_token stop, TriggerSink sink) {
         if (wait_ms <= std::chrono::milliseconds::zero()) {
             // Timer fired!
             heap_.pop();
+            const auto scheduled_for =
+                villa::format_rfc3339_ms(top.next_fire_wall);
+
+            auto requeue = [this](TimerEntry& e) {
+                if (reschedule(e)) {
+                    heap_.push(std::move(e));
+                } else {
+                    consumed_.insert(e.continuity_key);
+                }
+                publish_snapshot();
+            };
 
             // Max-instances check.
             if (deps_.active_runs &&
                 !deps_.active_runs->can_fire(top.target_id, top.max_instances)) {
                 spdlog::warn("Skipping fire for '{}': max instances ({}) reached",
                              top.target_id, top.max_instances);
-                if (reschedule(top)) heap_.push(std::move(top));
+                record_occurrence(top, scheduled_for,
+                                  villa::kDispositionSkipped);
+                requeue(top);
                 continue;
+            }
+
+            // Villa integration v1: persist the occurrence BEFORE the
+            // trigger enters the execution queue. A persistence failure
+            // fails closed — the occurrence is not delivered.
+            std::string occurrence_id;
+            const std::string applied_digest = deps_.registry
+                ? deps_.registry->registry_digest()
+                : villa::registry_digest({});
+            if (deps_.occurrences) {
+                try {
+                    auto rec = deps_.occurrences->record(persist::NewOccurrence{
+                        .workflow_name = top.target_name,
+                        .schedule_id = top.schedule_id,
+                        .trigger_id = top.trigger_id,
+                        .registry_digest = applied_digest,
+                        .scheduled_for = scheduled_for,
+                        .disposition = std::string(villa::kDispositionEmitted),
+                    });
+                    occurrence_id = rec.occurrence_id;
+                } catch (const std::exception& e) {
+                    spdlog::error("Scheduler: cannot persist occurrence for "
+                                  "'{}' due {}: {} — not delivering",
+                                  top.target_name, scheduled_for, e.what());
+                    requeue(top);
+                    continue;
+                }
             }
 
             // Determine trigger type and expression strings.
@@ -110,17 +158,33 @@ void Scheduler::run(std::stop_token stop, TriggerSink sink) {
                     .trigger_type = type_str,
                     .expression = expr_str,
                     .is_misfire = false,
+                    .occurrence_id = occurrence_id,
+                    .scheduled_for = scheduled_for,
+                    .registry_digest = applied_digest,
                 });
 
             spdlog::debug("Scheduler firing trigger '{}' -> target '{}' ({})",
                           top.trigger_id, top.target_id, type_str);
-            sink(std::move(evt));
+            bool delivered = sink(std::move(evt));
+            if (!delivered && !occurrence_id.empty()) {
+                spdlog::warn("Scheduler: trigger bus rejected occurrence {} "
+                             "for '{}' — marking abandoned",
+                             occurrence_id, top.target_name);
+                try {
+                    deps_.occurrences->set_disposition(
+                        occurrence_id,
+                        std::string(villa::kDispositionAbandoned));
+                } catch (const std::exception& e) {
+                    spdlog::error("Scheduler: cannot mark occurrence {} "
+                                  "abandoned: {}", occurrence_id, e.what());
+                }
+            }
 
             // Persist fire time.
             persist_fire(top.trigger_id, now_wall);
 
             // Re-schedule.
-            if (reschedule(top)) heap_.push(std::move(top));
+            requeue(top);
         } else {
             // Sleep until next fire time.
             auto sleep_target = now_mono + wait_ms;
@@ -142,18 +206,185 @@ void Scheduler::request_reload(
     deps_.clock->wake();
 }
 
-void Scheduler::build_heap() {
-    heap_ = TimerHeap{};
-    if (!deps_.registry) return;
+void Scheduler::build_heap(bool initial) {
+    // ── Carry live timer state by continuity key (reload only) ───────
+    struct Carry {
+        SystemTimePoint wall;
+        SteadyTimePoint mono;
+        std::string epoch;
+    };
+    std::unordered_map<std::string, Carry> carry;
+    if (!initial) {
+        auto old = heap_;
+        while (!old.empty()) {
+            const auto& e = old.top();
+            if (!e.continuity_key.empty()) {
+                carry[e.continuity_key] =
+                    Carry{e.next_fire_wall, e.next_fire_mono, e.timer_epoch};
+            }
+            old.pop();
+        }
+    }
+    auto old_consumed = std::move(consumed_);
+    consumed_.clear();
+    if (initial) old_consumed.clear();
 
+    heap_ = TimerHeap{};
+    if (!deps_.registry) {
+        publish_snapshot();
+        return;
+    }
+
+    // Highest registered generation per Villa schedule. Lower generations
+    // of the same schedule are superseded: their timer state transfers to
+    // the newest generation (spec §7.2.3 item 7) instead of double-firing.
+    std::unordered_map<std::string, int64_t> max_gen;
+    for (const auto* wf : deps_.registry->workflows()) {
+        if (auto id = villa::parse_schedule_name(wf->workflow_name)) {
+            auto& g = max_gen[id->schedule_id];
+            g = std::max(g, id->generation);
+        }
+    }
+
+    std::unordered_map<std::string, int> ordinals;
+    size_t preserved = 0, fresh = 0;
     for (auto entry : deps_.registry->triggers()) {
         if (!entry.enabled) continue;
         if (auto* dt = std::get_if<DateTrigger>(&entry.spec)) {
             if (dt->is_exhausted()) continue;
         }
+
+        entry.trigger_digest = villa::trigger_digest(entry.spec);
+        if (auto id = villa::parse_schedule_name(entry.target_name)) {
+            entry.schedule_id = id->schedule_id;
+            entry.schedule_generation = id->generation;
+            if (id->generation < max_gen[id->schedule_id]) {
+                spdlog::debug("Scheduler: '{}' superseded by generation {}",
+                              entry.target_name, max_gen[id->schedule_id]);
+                continue;
+            }
+        }
+
+        // Continuity key: stable Villa schedule identity when available,
+        // otherwise the trigger id; always qualified by the trigger
+        // digest (and the cron timezone delta, which changes evaluation).
+        std::string base = entry.schedule_id.empty()
+            ? "T|" + entry.trigger_id
+            : "S|" + entry.schedule_id;
+        base += "|" + entry.trigger_digest;
+        if (auto* cron = std::get_if<CronTrigger>(&entry.spec)) {
+            base += "|tz" + std::to_string(cron->cron_tz_delta_s);
+        }
+        entry.continuity_key = base + "#" + std::to_string(ordinals[base]++);
+
+        if (old_consumed.count(entry.continuity_key)) {
+            consumed_.insert(entry.continuity_key);
+            continue;
+        }
+
+        if (auto it = carry.find(entry.continuity_key); it != carry.end()) {
+            entry.next_fire_wall = it->second.wall;
+            entry.next_fire_mono = it->second.mono;
+            entry.timer_epoch = it->second.epoch;
+            ++preserved;
+            heap_.push(std::move(entry));
+            continue;
+        }
+
+        // New timer epoch (engine start, changed trigger, or a timer that
+        // was absent and came back): initial semantics.
+        entry.timer_epoch = villa::random_id("te_");
         compute_next_fire(entry);
+
+        if (auto* dt = std::get_if<DateTrigger>(&entry.spec)) {
+            auto due = villa::format_rfc3339_ms(dt->fire_at);
+            if (deps_.occurrences) {
+                try {
+                    if (deps_.occurrences->exists_for(
+                            entry.target_name, entry.schedule_id, due)) {
+                        consumed_.insert(entry.continuity_key);
+                        continue;  // Already emitted/skipped once.
+                    }
+                } catch (const std::exception& e) {
+                    spdlog::warn("Scheduler: occurrence lookup failed: {}",
+                                 e.what());
+                }
+            }
+            auto now = deps_.clock->now();
+            // Skip-only misfire policy: a one-shot whose instant passed
+            // while the engine was down is skipped (recorded once). A
+            // freshly registered one-shot within the grace window still
+            // fires (covers registration/reload latency).
+            if (dt->fire_at < now &&
+                (initial || now - dt->fire_at > config_.misfire_grace)) {
+                record_occurrence(entry, due, villa::kDispositionSkipped);
+                consumed_.insert(entry.continuity_key);
+                continue;
+            }
+        }
+        ++fresh;
         heap_.push(std::move(entry));
     }
+    if (!initial) {
+        spdlog::debug("Scheduler: {} timer(s) preserved, {} new epoch(s)",
+                      preserved, fresh);
+    }
+    publish_snapshot();
+}
+
+void Scheduler::record_occurrence(const TimerEntry& entry,
+                                  const std::string& scheduled_for,
+                                  std::string_view disposition) {
+    if (!deps_.occurrences) return;
+    try {
+        deps_.occurrences->record(persist::NewOccurrence{
+            .workflow_name = entry.target_name,
+            .schedule_id = entry.schedule_id,
+            .trigger_id = entry.trigger_id,
+            .registry_digest = deps_.registry
+                ? deps_.registry->registry_digest()
+                : villa::registry_digest({}),
+            .scheduled_for = scheduled_for,
+            .disposition = std::string(disposition),
+        });
+    } catch (const std::exception& e) {
+        spdlog::error("Scheduler: cannot record {} occurrence for '{}': {}",
+                      disposition, entry.target_name, e.what());
+    }
+}
+
+void Scheduler::publish_snapshot() {
+    IntegrationSnapshot snap;
+    snap.applied = true;
+    snap.applied_digest = deps_.registry ? deps_.registry->registry_digest()
+                                         : villa::registry_digest({});
+    auto copy = heap_;
+    while (!copy.empty()) {
+        const auto& e = copy.top();
+        snap.timers.push_back(IntegrationTimer{
+            .workflow = e.target_name,
+            .trigger_id = e.trigger_id,
+            .trigger_type = trigger_spec_type_name(e.spec),
+            .schedule_id = e.schedule_id,
+            .schedule_generation = e.schedule_generation,
+            .trigger_digest = e.trigger_digest,
+            .timer_epoch = e.timer_epoch,
+            .next_due_at = villa::format_rfc3339_ms(e.next_fire_wall),
+        });
+        copy.pop();
+    }
+    std::sort(snap.timers.begin(), snap.timers.end(),
+        [](const IntegrationTimer& a, const IntegrationTimer& b) {
+            return std::tie(a.workflow, a.trigger_id) <
+                   std::tie(b.workflow, b.trigger_id);
+        });
+    std::lock_guard lock(snap_mu_);
+    snap_ = std::move(snap);
+}
+
+IntegrationSnapshot Scheduler::integration_snapshot() const {
+    std::lock_guard lock(snap_mu_);
+    return snap_;
 }
 
 void Scheduler::compute_next_fire(TimerEntry& entry) {
@@ -215,7 +446,22 @@ bool Scheduler::reschedule(TimerEntry& entry) {
                 std::chrono::duration_cast<std::chrono::steady_clock::duration>(wall_delta);
             return true;
         } else if constexpr (std::is_same_v<T, IntervalTrigger>) {
-            entry.next_fire_mono = t.next_fire_after(now_mono);
+            // Phase-preserving: next deadline = previous deadline +
+            // interval; slots already in the past are skipped (never
+            // replayed), so processing latency does not drift the phase.
+            if (t.interval <= std::chrono::milliseconds::zero()) {
+                entry.next_fire_mono = t.next_fire_after(now_mono);
+            } else if (entry.next_fire_mono == SteadyTimePoint{}) {
+                entry.next_fire_mono = t.next_fire_after(now_mono);
+            } else {
+                auto next = entry.next_fire_mono + t.interval;
+                if (next <= now_mono) {
+                    auto behind = now_mono - next;
+                    auto steps = behind / t.interval + 1;
+                    next += t.interval * steps;
+                }
+                entry.next_fire_mono = next;
+            }
             auto mono_delta = entry.next_fire_mono - now_mono;
             entry.next_fire_wall = now_wall +
                 std::chrono::duration_cast<std::chrono::system_clock::duration>(mono_delta);

@@ -309,6 +309,49 @@ CREATE INDEX IF NOT EXISTS idx_run_outputs_run
 -- all pre-existing rows).
 ALTER TABLE runs ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0;
         )SQL"
+    },
+    {
+        7,
+        "Villa integration v1 — durable scheduled occurrences",
+        R"SQL(
+-- One row per scheduled (timer) occurrence, written BEFORE the trigger
+-- enters the in-memory execution queue. seq is the monotonic report
+-- cursor (AUTOINCREMENT: never reused, even after pruning); rev is bumped
+-- on every insert/update so readers can follow disposition changes.
+CREATE TABLE IF NOT EXISTS scheduled_occurrences (
+    seq              INTEGER PRIMARY KEY AUTOINCREMENT,
+    occurrence_id    TEXT    NOT NULL UNIQUE,
+    workflow_name    TEXT    NOT NULL,
+    schedule_id      TEXT,
+    trigger_id       TEXT    NOT NULL,
+    registry_digest  TEXT    NOT NULL,
+    scheduled_for    TEXT    NOT NULL,
+    disposition      TEXT    NOT NULL,
+    engine_run_id    TEXT,
+    rev              INTEGER NOT NULL DEFAULT 0,
+    created_at       TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    updated_at       TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_sched_occ_created
+    ON scheduled_occurrences (created_at);
+CREATE INDEX IF NOT EXISTS idx_sched_occ_rev
+    ON scheduled_occurrences (rev);
+CREATE INDEX IF NOT EXISTS idx_sched_occ_workflow_due
+    ON scheduled_occurrences (workflow_name, scheduled_for);
+CREATE INDEX IF NOT EXISTS idx_sched_occ_schedule_due
+    ON scheduled_occurrences (schedule_id, scheduled_for);
+CREATE INDEX IF NOT EXISTS idx_sched_occ_pending
+    ON scheduled_occurrences (disposition, engine_run_id);
+
+-- Durable monotonic revision counter (survives pruning of all rows).
+CREATE TABLE IF NOT EXISTS scheduled_occurrence_counters (
+    name  TEXT    PRIMARY KEY,
+    value INTEGER NOT NULL
+);
+INSERT OR IGNORE INTO scheduled_occurrence_counters (name, value)
+    VALUES ('rev', 0);
+        )SQL"
     }
 };
 

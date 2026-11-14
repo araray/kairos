@@ -23,6 +23,7 @@
 #include "kairos/engine/pipeline.hpp"
 #include "kairos/engine/scheduler.hpp"
 #include "kairos/engine/trigger_event.hpp"
+#include "kairos/engine/villa_integration.hpp"
 #include "kairos/engine/workflow_registry.hpp"
 #include "kairos/exec/output_sink.hpp"
 #include "kairos/exec/process_handle.hpp"
@@ -36,6 +37,7 @@
 #include "kairos/persist/database.hpp"
 #include "kairos/persist/db_writer.hpp"
 #include "kairos/persist/migration.hpp"
+#include "kairos/persist/occurrence_store.hpp"
 #include "kairos/persist/query_reader.hpp"
 #include "kairos/persist/stale_recovery.hpp"
 #include "kairos/persist/tag_store.hpp"
@@ -237,6 +239,12 @@ static bool perform_config_reload(
         const std::shared_ptr<const engine::WorkflowRegistry>&)>&
         registry_notify = {})
 {
+    // Reloads can be requested concurrently (HTTP worker threads, MCP,
+    // SIGHUP, auto-reload). Serialize them so engines never receive an
+    // older registry after a newer one.
+    static std::mutex reload_serial_mu;
+    std::lock_guard reload_serial_lock(reload_serial_mu);
+
     log->info("Config reload: re-parsing {}", config_path.string());
 
     auto result = config::load_config(config_path);
@@ -360,6 +368,27 @@ int run_daemon(std::shared_ptr<const kairos::config::ConfigState> config) {
                       recovery.runs_recovered);
         }
     }
+
+    // ── Step 2.6: Villa integration v1 — durable occurrences ──────
+    // Skip-only misfire policy: occurrences persisted by a previous
+    // daemon that never started a run are marked `skipped` (they are
+    // never redelivered, so no new id is ever minted for them).
+    const std::string daemon_start_id = engine::villa::random_id("ds_");
+    std::unique_ptr<persist::OccurrenceStore> occurrence_store;
+    try {
+        occurrence_store =
+            std::make_unique<persist::OccurrenceStore>(config->db_path);
+        int skipped = occurrence_store->mark_unstarted_skipped();
+        if (skipped > 0) {
+            log->warn("Marked {} unstarted scheduled occurrence(s) skipped",
+                      skipped);
+        }
+        occurrence_store->prune(engine::villa::kOccurrenceRetention);
+    } catch (const std::exception& e) {
+        log->error("Failed to open occurrence store: {}", e.what());
+        return 1;
+    }
+    log->info("Daemon start id: {}", daemon_start_id);
 
     // ── Step 3: Log startup banner ─────────────────────────────────
     log->info("Kairos v{} starting", std::string(kairos::kVersion));
@@ -673,6 +702,7 @@ int run_daemon(std::shared_ptr<const kairos::config::ConfigState> config) {
             return exec::create_process_handle();
         },
         .secret_values = secret_values,
+        .occurrences = occurrence_store.get(),
 });
     pipeline.start(stop_token);
     log->info("Pipeline thread started");
@@ -684,6 +714,7 @@ int run_daemon(std::shared_ptr<const kairos::config::ConfigState> config) {
         .registry = registry,
         .active_runs = &active_runs,
         .db_writer = &db_writer,
+        .occurrences = occurrence_store.get(),
     });
 
     engine::TriggerSink sched_sink = [&trigger_bus](engine::TriggerEvent evt) {
@@ -965,6 +996,48 @@ int run_daemon(std::shared_ptr<const kairos::config::ConfigState> config) {
             bool ok = trigger_bus.push(std::move(evt),
                 std::chrono::milliseconds(5000));
             return ok ? run_id : std::string{};
+        };
+        // Villa integration contract v1 (status + occurrence report).
+        http_deps.occurrences = occurrence_store.get();
+        http_deps.villa_status = [&scheduler, &pipeline, &trigger_bus,
+                                  current_registry, daemon_start_id]()
+            -> nlohmann::json {
+            namespace villa = engine::villa;
+            auto reg = current_registry->load();
+            auto snap = scheduler.integration_snapshot();
+            auto pipeline_digest = pipeline.applied_registry_digest();
+            nlohmann::json timers = nlohmann::json::array();
+            for (const auto& t : snap.timers) {
+                timers.push_back({
+                    {"workflow", t.workflow},
+                    {"trigger_id", t.trigger_id},
+                    {"trigger_type", t.trigger_type},
+                    {"schedule_id", t.schedule_id.empty()
+                        ? nlohmann::json(nullptr)
+                        : nlohmann::json(t.schedule_id)},
+                    {"schedule_generation", t.schedule_generation < 0
+                        ? nlohmann::json(nullptr)
+                        : nlohmann::json(t.schedule_generation)},
+                    {"trigger_digest", t.trigger_digest},
+                    {"timer_epoch", t.timer_epoch},
+                    {"next_due_at", t.next_due_at},
+                });
+            }
+            nlohmann::json j;
+            j["contract_version"] = villa::kContractVersion;
+            j["baseline_commit"] = std::string(villa::kBaselineCommit);
+            j["daemon_start_id"] = daemon_start_id;
+            j["loaded_registry_digest"] = reg
+                ? reg->registry_digest() : villa::registry_digest({});
+            j["scheduler_applied_digest"] = snap.applied
+                ? nlohmann::json(snap.applied_digest)
+                : nlohmann::json(nullptr);
+            j["pipeline_applied_digest"] = pipeline_digest;
+            j["active_workflow_count"] = reg ? reg->workflow_count() : 0;
+            j["queue_depth"] = trigger_bus.size();
+            j["timer_continuity"] = std::string(villa::kTimerContinuity);
+            j["timers"] = std::move(timers);
+            return j;
         };
         http_deps.reload_config = [&config, &scheduler, &pipeline,
                                     &watch_engine, &log, &tag_store,

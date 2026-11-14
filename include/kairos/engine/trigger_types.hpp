@@ -142,6 +142,23 @@ struct TimerEntry {
     /// Grace period for misfire detection (default: 60 seconds).
     std::chrono::seconds misfire_grace{60};
 
+    // ── Villa integration v1: timer identity (set by the Scheduler) ──
+
+    /// SHA-256 of the canonical normalized trigger (type + timing only).
+    std::string trigger_digest;
+
+    /// Opaque epoch: stable while this timer's phase is preserved.
+    std::string timer_epoch;
+
+    /// Villa schedule id parsed from the workflow name ("" otherwise).
+    std::string schedule_id;
+
+    /// Villa schedule generation (-1 when not a Villa schedule).
+    int64_t schedule_generation = -1;
+
+    /// Continuity key used to match this timer across reloads.
+    std::string continuity_key;
+
     // ── Next fire time in both clock domains ────────────────────────
 
     /// Next wall-clock fire time (for cron/date triggers).

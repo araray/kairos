@@ -12,6 +12,7 @@
 
 #include "kairos/engine/dag.hpp"
 #include "kairos/engine/trigger_types.hpp"
+#include "kairos/engine/villa_integration.hpp"
 #include "kairos/watch/watch_group_def.hpp"
 
 #include <algorithm>
@@ -131,6 +132,10 @@ struct WorkflowDef {
     std::vector<std::string> tags;  ///< §6 Tags from YAML `tags:` array
     std::string source_path;     ///< YAML file loaded from ("" for inline).
                                   ///< Not part of the content ID hash.
+    /// Lowercase hex SHA-256 of the exact source bytes the definition was
+    /// parsed from (the file bytes served by GET /api/v1/workflows/{n}/yaml).
+    /// Empty for inline definitions → treated as SHA-256 of "".
+    std::string source_sha256;
     WorkflowNotifications notifications;  ///< §15.4 (not in content hash).
     WorkflowRetention retention;          ///< §15.11 (not in content hash).
 };
@@ -180,6 +185,21 @@ public:
             standalone_jobs_.emplace(id, std::move(sj));
             job_defs_[id] = &standalone_jobs_.at(id);
         }
+
+        // Villa integration v1: whole-registry digest, fixed at build.
+        std::vector<std::pair<std::string, std::string>> pairs;
+        pairs.reserve(workflow_defs_.size());
+        for (const auto& [id, wf] : workflow_defs_) {
+            pairs.emplace_back(wf.workflow_name,
+                wf.source_sha256.empty() ? villa::sha256_hex("")
+                                         : wf.source_sha256);
+        }
+        registry_digest_ = villa::registry_digest(std::move(pairs));
+    }
+
+    /// Villa integration v1 registry digest (see villa_integration.hpp).
+    [[nodiscard]] const std::string& registry_digest() const {
+        return registry_digest_;
     }
 
     // ── Workflow queries ─────────────────────────────────────────
@@ -336,6 +356,7 @@ private:
     std::unordered_map<std::string, const JobDef*> job_defs_;
     std::vector<TimerEntry> triggers_;
     std::vector<watch::WatchGroupDef> watch_groups_;
+    std::string registry_digest_;
 };
 
 }  // namespace kairos::engine
