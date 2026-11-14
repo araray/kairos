@@ -85,6 +85,14 @@ struct ScheduleIdentity {
 [[nodiscard]] std::string format_rfc3339_ms(
     std::chrono::system_clock::time_point tp);
 
+/// Tokenize a `use_shell: false` command line into argv WITHOUT a shell:
+/// split on ASCII whitespace; '...' groups literally; "..." groups with
+/// backslash escaping only \\ and \"; outside quotes a backslash escapes
+/// the next character. No expansion, globbing, redirection or pipes.
+/// @return nullopt on an unterminated quote or trailing backslash.
+[[nodiscard]] std::optional<std::vector<std::string>> split_command_args(
+    std::string_view command);
+
 /// Random opaque identifier "<prefix><32 lowercase hex>".
 [[nodiscard]] std::string random_id(std::string_view prefix);
 

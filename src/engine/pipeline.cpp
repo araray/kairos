@@ -1057,6 +1057,18 @@ exec::ProcessSpec Pipeline::build_process_spec(
     exec::ProcessSpec spec;
     spec.command_line = resolve_output_refs(step.command, job, ctx);
     spec.use_shell = step.use_shell;
+    // Non-shell execution needs an argv: tokenize the command line
+    // without a shell (see villa::split_command_args). The process layer
+    // uses execve, so argv[0] must be an absolute (or cwd-relative) path.
+    if (!spec.use_shell) {
+        if (auto argv = villa::split_command_args(spec.command_line)) {
+            spec.args = std::move(*argv);
+        } else {
+            spdlog::error("Run {}: step '{}' has an unterminated quote in "
+                          "its non-shell command", ctx.run_id, step.step_name);
+            spec.args.clear();  // → spawn fails ("Empty command", 202)
+        }
+    }
     if (!step.working_dir.empty()) spec.working_dir = step.working_dir;
     else if (!job.working_dir.empty()) spec.working_dir = job.working_dir;
     // Step timeout: explicit `timeout_seconds` wins; otherwise the

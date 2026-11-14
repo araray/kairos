@@ -3,9 +3,13 @@
 # Installed at /etc/kairos/kairos-villa.toml. Start with:
 #   kairos start --config /etc/kairos/kairos-villa.toml
 # Supply the API token through the environment, never in this file:
-#   KAIROS_HTTP_API__TOKEN=<token>
-# (every key maps to KAIROS_<SECTION>_<KEY>, underscores in key names
-# doubled — e.g. kairos.http.listen_port → KAIROS_HTTP_LISTEN__PORT).
+#   KAIROS_KAIROS_HTTP_API__TOKEN=<token>
+# The env prefix is "KAIROS" and keys are rooted at "kairos.", so the
+# prefix appears twice; underscores inside key names are doubled
+# (kairos.http.api_token → KAIROS_KAIROS_HTTP_API__TOKEN). The single-
+# prefix form shown in kairos.toml.example (KAIROS_HTTP_API__TOKEN) is
+# NOT picked up by the config loader. Alternatively mount a TOML file
+# with [kairos.http] api_token = "..." from a secret.
 
 [kairos]
 data_dir = "/var/lib/kairos"
@@ -30,4 +34,4 @@ default_timeout_s = 3600
 enabled = true
 listen_addr = "0.0.0.0"
 listen_port = 8420
-# api_token comes from KAIROS_HTTP_API__TOKEN.
+# api_token comes from KAIROS_KAIROS_HTTP_API__TOKEN.

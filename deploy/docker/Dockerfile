@@ -61,7 +61,7 @@ RUN mkdir -p /var/lib/kairos /var/log/kairos /etc/kairos \
 COPY deploy/kairos.toml.example /etc/kairos/kairos.toml
 # Villa integration (contract v1) config: HTTP on 0.0.0.0:8420, UTC,
 # auto_reload off, state under /var/lib/kairos. Token via env
-# KAIROS_HTTP_API__TOKEN.
+# KAIROS_KAIROS_HTTP_API__TOKEN.
 COPY deploy/docker/kairos-villa.toml /etc/kairos/kairos-villa.toml
 RUN mkdir -p /var/lib/kairos/workflows /var/lib/kairos/watch_groups \
     && chown -R kairos:kairos /var/lib/kairos

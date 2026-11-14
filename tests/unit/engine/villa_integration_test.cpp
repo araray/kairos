@@ -186,6 +186,23 @@ TEST(VillaDigest, DateTriggerAcceptsRfc3339Utc) {
               "2026-11-14T09:00:00.000Z");
 }
 
+TEST(VillaDigest, NonShellCommandTokenization) {
+    auto a = villa::split_command_args(
+        "/usr/local/bin/villa-kairos-dispatch --schedule "
+        "sch_0123456789abcdef0123456789abcdef --generation 3");
+    ASSERT_TRUE(a);
+    EXPECT_EQ(*a, (std::vector<std::string>{
+        "/usr/local/bin/villa-kairos-dispatch", "--schedule",
+        "sch_0123456789abcdef0123456789abcdef", "--generation", "3"}));
+    auto b = villa::split_command_args(R"(  /bin/x 'a b' "c \"d\"" e\ f $HOME;|  )");
+    ASSERT_TRUE(b);
+    EXPECT_EQ(*b, (std::vector<std::string>{
+        "/bin/x", "a b", "c \"d\"", "e f", "$HOME;|"}));
+    EXPECT_FALSE(villa::split_command_args("/bin/x 'open"));
+    EXPECT_FALSE(villa::split_command_args("/bin/x \"open"));
+    EXPECT_TRUE(villa::split_command_args("")->empty());
+}
+
 // ── Scheduler timer continuity ──────────────────────────────────────────
 
 class VillaSchedulerTest : public ::testing::Test {
@@ -497,12 +514,14 @@ TEST(VillaPipeline, ScheduledRunGetsTrustedOccurrenceEnv) {
 
     std::mutex mu;
     std::vector<std::unordered_map<std::string, std::string>> envs;
+    std::vector<std::vector<std::string>> argvs;
     exec::RunnerPool pool(exec::RunnerPoolConfig{.worker_count = 1,
                                                  .queue_capacity = 8});
     pool.set_process_handle_factory([&](const exec::ProcessSpec& spec) {
         {
             std::lock_guard lock(mu);
             envs.push_back(spec.environment);
+            argvs.push_back(spec.args);
         }
         auto p = std::make_unique<kairos::testing::FakeProcessHandle>();
         p->set_exit_code(0);
@@ -513,6 +532,10 @@ TEST(VillaPipeline, ScheduledRunGetsTrustedOccurrenceEnv) {
     auto wf = make_wf(sched_name(3), "G3");
     // A workflow trying to spoof the trusted namespace is ignored.
     wf.jobs[0].steps[0].env["VILLA_KAIROS_OCCURRENCE_ID"] = "spoofed";
+    wf.jobs[0].steps[0].use_shell = false;
+    wf.jobs[0].steps[0].command =
+        "/usr/local/bin/villa-kairos-dispatch --schedule " + kSid +
+        " --generation 3";
     wf.jobs[0].env["VILLA_KAIROS_CONFIG_HASH"] = "spoofed";
     auto reg = make_reg({wf}, {});
     TriggerBus bus(8);
@@ -548,6 +571,9 @@ TEST(VillaPipeline, ScheduledRunGetsTrustedOccurrenceEnv) {
 
     std::lock_guard lock(mu);
     ASSERT_EQ(envs.size(), 2u);
+    EXPECT_EQ(argvs[0], (std::vector<std::string>{
+        "/usr/local/bin/villa-kairos-dispatch", "--schedule", kSid,
+        "--generation", "3"}));
     auto& e = envs[0];
     EXPECT_EQ(e["VILLA_KAIROS_OCCURRENCE_ID"], rec.occurrence_id);
     EXPECT_EQ(e["VILLA_KAIROS_SCHEDULED_FOR"], "2026-11-14T09:00:00.000Z");

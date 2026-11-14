@@ -94,6 +94,47 @@ std::optional<ScheduleIdentity> parse_schedule_name(std::string_view name) {
     };
 }
 
+std::optional<std::vector<std::string>> split_command_args(
+    std::string_view cmd)
+{
+    std::vector<std::string> out;
+    std::string cur;
+    bool in_token = false;
+    for (size_t i = 0; i < cmd.size(); ++i) {
+        char c = cmd[i];
+        if (c == ' ' || c == '\t' || c == '\n' || c == '\r') {
+            if (in_token) { out.push_back(std::move(cur)); cur.clear(); }
+            in_token = false;
+            continue;
+        }
+        in_token = true;
+        if (c == '\'') {
+            auto end = cmd.find('\'', i + 1);
+            if (end == std::string_view::npos) return std::nullopt;
+            cur.append(cmd.substr(i + 1, end - i - 1));
+            i = end;
+        } else if (c == '"') {
+            size_t j = i + 1;
+            for (; j < cmd.size() && cmd[j] != '"'; ++j) {
+                if (cmd[j] == '\\' && j + 1 < cmd.size() &&
+                    (cmd[j + 1] == '"' || cmd[j + 1] == '\\')) {
+                    ++j;
+                }
+                cur.push_back(cmd[j]);
+            }
+            if (j >= cmd.size()) return std::nullopt;
+            i = j;
+        } else if (c == '\\') {
+            if (i + 1 >= cmd.size()) return std::nullopt;
+            cur.push_back(cmd[++i]);
+        } else {
+            cur.push_back(c);
+        }
+    }
+    if (in_token) out.push_back(std::move(cur));
+    return out;
+}
+
 std::string random_id(std::string_view prefix) {
     return std::string(prefix) + core::generate_correlation_id();
 }
