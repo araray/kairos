@@ -20,10 +20,12 @@ FROM ubuntu:24.04 AS builder
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
         build-essential \
+        ca-certificates \
         cmake \
         git \
         pkg-config \
         libsqlite3-dev \
+        libssl-dev \
         libsystemd-dev \
     && rm -rf /var/lib/apt/lists/*
 
