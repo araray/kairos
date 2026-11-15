@@ -6,6 +6,7 @@
 
 #include "kairos/engine/pipeline.hpp"
 #include "kairos/core/id_generator.hpp"
+#include "kairos/engine/villa_integration.hpp"
 #include "kairos/exec/output_sink.hpp"
 #include "kairos/exec/process_handle.hpp"
 #include "kairos/kel/errors.hpp"
@@ -32,6 +33,8 @@ Pipeline::Pipeline(PipelineConfig config, Dependencies deps)
     if (!deps_.clock) {
         throw std::invalid_argument("Pipeline requires a non-null ClockSource");
     }
+    applied_digest_ = deps_.registry ? deps_.registry->registry_digest()
+                                     : villa::registry_digest({});
     // §15.4: fire-and-forget notification worker (dies with stop()).
     notify_thread_ = std::jthread(
         [this](std::stop_token st) { notify_worker(st); });
@@ -182,14 +185,15 @@ void Pipeline::run(std::stop_token stop) {
     spdlog::info("Pipeline thread starting");
 
     while (!stop.stop_requested()) {
-        if (reload_requested_.exchange(false)) {
-            std::lock_guard lock(reload_mu_);
-            if (pending_registry_) deps_.registry = std::move(pending_registry_);
-            spdlog::info("Pipeline reloaded workflow registry");
-        }
+        apply_pending_reload();
 
         auto event_opt = deps_.trigger_bus->pop(std::chrono::milliseconds(500));
         if (!event_opt) continue;
+
+        // A reload requested while we were blocked in pop() must apply
+        // before resolving this event: the scheduler may already have
+        // emitted it against the replacement registry.
+        apply_pending_reload();
 
         if (event_opt->type == TriggerType::ConfigReload) {
             spdlog::info("Pipeline received config reload event");
@@ -202,21 +206,62 @@ void Pipeline::run(std::stop_token stop) {
     spdlog::info("Pipeline thread stopping");
 }
 
+void Pipeline::apply_pending_reload() {
+    if (!reload_requested_.exchange(false)) return;
+    std::shared_ptr<const WorkflowRegistry> next;
+    {
+        std::lock_guard lock(reload_mu_);
+        next = std::move(pending_registry_);
+    }
+    if (!next) return;
+    deps_.registry = std::move(next);
+    {
+        std::lock_guard lock(applied_mu_);
+        applied_digest_ = deps_.registry->registry_digest();
+    }
+    spdlog::info("Pipeline reloaded workflow registry ({})",
+                 deps_.registry->registry_digest());
+}
+
+std::string Pipeline::applied_registry_digest() const {
+    std::lock_guard lock(applied_mu_);
+    return applied_digest_;
+}
+
 RunStatus Pipeline::process_event(const TriggerEvent& event,
                                    std::stop_token stop)
 {
+    // Villa integration v1: occurrence identity of a scheduled trigger.
+    const auto* tick = std::get_if<ScheduleTickPayload>(&event.payload);
+    const bool has_occurrence = tick && !tick->occurrence_id.empty();
+    auto abandon_occurrence = [&](const char* why) {
+        if (!has_occurrence || !deps_.occurrences) return;
+        spdlog::warn("Pipeline: occurrence {} abandoned before start: {}",
+                     tick->occurrence_id, why);
+        try {
+            deps_.occurrences->set_disposition(
+                tick->occurrence_id,
+                std::string(villa::kDispositionAbandoned));
+        } catch (const std::exception& e) {
+            spdlog::error("Pipeline: cannot mark occurrence {} abandoned: {}",
+                          tick->occurrence_id, e.what());
+        }
+    };
+
     spdlog::info("Pipeline processing {} event for target '{}' (correlation={})",
                  trigger_type_to_string(event.type), event.target_id,
                  event.correlation_id);
 
     if (!deps_.registry) {
         spdlog::error("Pipeline: no workflow registry loaded");
+        abandon_occurrence("no registry");
         return RunStatus::Failure;
     }
 
     auto dag_opt = deps_.registry->resolve_dag(event.target_id, event.target_kind);
     if (!dag_opt) {
         spdlog::error("Pipeline: target '{}' not found in registry", event.target_id);
+        abandon_occurrence("target not in applied registry");
         return RunStatus::Failure;
     }
 
@@ -256,6 +301,22 @@ RunStatus Pipeline::process_event(const TriggerEvent& event,
             &event.payload)) {
         ctx.dry_run = manual->dry_run;
         if (ctx.dry_run) ctx.trigger_type = "dry-run";
+    }
+
+    if (has_occurrence) {
+        ctx.villa.occurrence_id = tick->occurrence_id;
+        ctx.villa.scheduled_for = tick->scheduled_for;
+        ctx.villa.config_hash = tick->registry_digest;
+        // Bind the engine run id before anything observable happens.
+        if (deps_.occurrences) {
+            try {
+                deps_.occurrences->attach_run(tick->occurrence_id, ctx.run_id);
+            } catch (const std::exception& e) {
+                spdlog::error("Pipeline: cannot bind run {} to occurrence "
+                              "{}: {}", ctx.run_id, tick->occurrence_id,
+                              e.what());
+            }
+        }
     }
 
     if (deps_.active_runs) deps_.active_runs->increment(event.target_id);
@@ -996,6 +1057,18 @@ exec::ProcessSpec Pipeline::build_process_spec(
     exec::ProcessSpec spec;
     spec.command_line = resolve_output_refs(step.command, job, ctx);
     spec.use_shell = step.use_shell;
+    // Non-shell execution needs an argv: tokenize the command line
+    // without a shell (see villa::split_command_args). The process layer
+    // uses execve, so argv[0] must be an absolute (or cwd-relative) path.
+    if (!spec.use_shell) {
+        if (auto argv = villa::split_command_args(spec.command_line)) {
+            spec.args = std::move(*argv);
+        } else {
+            spdlog::error("Run {}: step '{}' has an unterminated quote in "
+                          "its non-shell command", ctx.run_id, step.step_name);
+            spec.args.clear();  // → spawn fails ("Empty command", 202)
+        }
+    }
     if (!step.working_dir.empty()) spec.working_dir = step.working_dir;
     else if (!job.working_dir.empty()) spec.working_dir = job.working_dir;
     // Step timeout: explicit `timeout_seconds` wins; otherwise the
@@ -1058,6 +1131,27 @@ exec::ProcessSpec Pipeline::build_process_spec(
     }
 
     spec.environment = builder.build();
+
+    // Villa integration v1: VILLA_KAIROS_* is a trusted, reserved
+    // namespace. Strip anything inherited or declared by the workflow,
+    // then inject the scheduled occurrence identity (if any).
+    for (auto it = spec.environment.begin(); it != spec.environment.end();) {
+        if (std::string_view(it->first).substr(
+                0, villa::kReservedEnvPrefix.size()) ==
+            villa::kReservedEnvPrefix) {
+            it = spec.environment.erase(it);
+        } else {
+            ++it;
+        }
+    }
+    if (!ctx.villa.occurrence_id.empty()) {
+        spec.environment[std::string(villa::kEnvOccurrenceId)] =
+            ctx.villa.occurrence_id;
+        spec.environment[std::string(villa::kEnvScheduledFor)] =
+            ctx.villa.scheduled_for;
+        spec.environment[std::string(villa::kEnvConfigHash)] =
+            ctx.villa.config_hash;
+    }
 
     // §10.3: forward watch-event metadata as environment variables.
     if (!ctx.trigger_meta.watch_group.empty()) {

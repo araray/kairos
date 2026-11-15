@@ -30,6 +30,13 @@ struct ScheduleTickPayload {
     std::string trigger_type;    ///< "cron", "interval", or "date"
     std::string expression;      ///< Original schedule expression
     bool is_misfire = false;     ///< True if this is a catch-up fire
+    /// Villa integration v1: durable occurrence identity (empty when no
+    /// occurrence store is wired). Persisted before the event is queued.
+    std::string occurrence_id;
+    /// Original due instant, RFC 3339 UTC ms.
+    std::string scheduled_for;
+    /// Registry digest the scheduler had applied at emission.
+    std::string registry_digest;
 };
 
 /// Payload for native filesystem events (inotify, FSEvents, RDCW).

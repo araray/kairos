@@ -20,10 +20,12 @@ FROM ubuntu:24.04 AS builder
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
         build-essential \
+        ca-certificates \
         cmake \
         git \
         pkg-config \
         libsqlite3-dev \
+        libssl-dev \
         libsystemd-dev \
     && rm -rf /var/lib/apt/lists/*
 
@@ -59,6 +61,12 @@ RUN mkdir -p /var/lib/kairos /var/log/kairos /etc/kairos \
 
 # Default config.
 COPY deploy/kairos.toml.example /etc/kairos/kairos.toml
+# Villa integration (contract v1) config: HTTP on 0.0.0.0:8420, UTC,
+# auto_reload off, state under /var/lib/kairos. Token via env
+# KAIROS_KAIROS_HTTP_API__TOKEN.
+COPY deploy/docker/kairos-villa.toml /etc/kairos/kairos-villa.toml
+RUN mkdir -p /var/lib/kairos/workflows /var/lib/kairos/watch_groups \
+    && chown -R kairos:kairos /var/lib/kairos
 
 USER kairos
 WORKDIR /var/lib/kairos

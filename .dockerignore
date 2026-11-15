@@ -1,0 +1,6 @@
+# Keep the image build context small and reproducible.
+build/
+out/
+Testing/
+.cache/
+.git/

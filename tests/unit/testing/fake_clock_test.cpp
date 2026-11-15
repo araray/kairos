@@ -164,6 +164,35 @@ TEST(SystemClockSourceTest, WakeUnblocksSleepUntil) {
     EXPECT_TRUE(done.load());
 }
 
+// Regression: wake() used to leave a sticky flag, so every later sleep
+// returned immediately and all clock users busy-looped after one reload.
+TEST(SystemClockSourceTest, WakeIsNotStickyAfterItWasObserved) {
+    SystemClockSource clock;
+    clock.wake();
+    // The pending wake ends exactly one sleep (it is not lost)...
+    EXPECT_FALSE(clock.sleep_for(std::chrono::milliseconds(2000)));
+    // ...and the next sleep blocks for its full duration again.
+    auto t0 = std::chrono::steady_clock::now();
+    EXPECT_TRUE(clock.sleep_for(std::chrono::milliseconds(80)));
+    EXPECT_GE(std::chrono::steady_clock::now() - t0, std::chrono::milliseconds(75));
+}
+
+TEST(SystemClockSourceTest, EveryThreadObservesEachWakeOnce) {
+    SystemClockSource clock;
+    std::atomic<int> woken{0};
+    auto sleeper = [&] {
+        if (!clock.sleep_for(std::chrono::seconds(60))) woken.fetch_add(1);
+        // A second sleep must block again (bounded here at 80 ms).
+        EXPECT_TRUE(clock.sleep_for(std::chrono::milliseconds(80)));
+    };
+    std::thread a(sleeper), b(sleeper);
+    std::this_thread::sleep_for(std::chrono::milliseconds(30));
+    clock.wake();
+    a.join();
+    b.join();
+    EXPECT_EQ(woken.load(), 2);
+}
+
 // ── ClockSource polymorphism ────────────────────────────────────────────
 
 TEST(ClockSourceTest, PolymorphicUsage) {

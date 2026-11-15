@@ -23,6 +23,7 @@
 #include "kairos/exec/output_sink.hpp"
 #include "kairos/observability/metrics.hpp"
 #include "kairos/persist/db_writer.hpp"
+#include "kairos/persist/occurrence_store.hpp"
 #include "kairos/persist/query_reader.hpp"
 #include "kairos/persist/tag_store.hpp"
 
@@ -114,6 +115,13 @@ struct HttpDependencies {
     /// §15.5: full health snapshot (checks + status). Null → /health
     /// stays minimal (status + uptime only).
     std::function<nlohmann::json()> get_health;
+
+    /// Villa integration v1: GET /api/v1/integration/villa/status body.
+    /// Null → 501.
+    std::function<nlohmann::json()> villa_status;
+
+    /// Villa integration v1: occurrence report source. Null → 501.
+    persist::OccurrenceStore* occurrences = nullptr;
 };
 
 // ── HTTP Server ───────────────────────────────────────────────────────────

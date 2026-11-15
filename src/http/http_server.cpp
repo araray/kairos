@@ -1770,6 +1770,94 @@ struct HttpServer::Impl {
                 set_cors(res);
             });
 
+        // ── Villa integration contract v1 ────────────────────────
+        svr.Get("/api/v1/integration/villa/status",
+            [this](const httplib::Request& req, httplib::Response& res) {
+                if (!check_auth(req, res)) return;
+                if (!deps.villa_status) {
+                    res.status = 501;
+                    res.set_content(R"({"error":"Villa integration not configured"})",
+                                    "application/json");
+                    return;
+                }
+                res.set_content(deps.villa_status().dump(),
+                                "application/json");
+                set_cors(res);
+            });
+
+        svr.Get("/api/v1/integration/villa/occurrences",
+            [this](const httplib::Request& req, httplib::Response& res) {
+                if (!check_auth(req, res)) return;
+                if (!deps.occurrences) {
+                    res.status = 501;
+                    res.set_content(R"({"error":"Occurrence store not configured"})",
+                                    "application/json");
+                    return;
+                }
+                auto parse_nonneg = [&](const char* key, int64_t dflt,
+                                        int64_t& out) -> bool {
+                    if (!req.has_param(key)) { out = dflt; return true; }
+                    auto v = req.get_param_value(key);
+                    if (v.empty() || v.size() > 18) return false;
+                    for (char c : v) if (c < '0' || c > '9') return false;
+                    out = std::stoll(v);
+                    return true;
+                };
+                int64_t cursor = 0, limit = 100, changed_since = 0;
+                bool by_rev = req.has_param("changed_since");
+                if (!parse_nonneg("cursor", 0, cursor) ||
+                    !parse_nonneg("limit", 100, limit) ||
+                    !parse_nonneg("changed_since", 0, changed_since) ||
+                    limit < 1 || limit > 500 ||
+                    (by_rev && req.has_param("cursor"))) {
+                    res.status = 400;
+                    res.set_content(R"({"error":"cursor/changed_since must be non-negative integers (not both); 1 <= limit <= 500"})",
+                                    "application/json");
+                    return;
+                }
+                std::vector<persist::OccurrenceRecord> rows;
+                try {
+                    rows = by_rev
+                        ? deps.occurrences->list_after_rev(
+                              changed_since, static_cast<int>(limit))
+                        : deps.occurrences->list_after_seq(
+                              cursor, static_cast<int>(limit));
+                } catch (const std::exception& e) {
+                    res.status = 503;
+                    res.set_content(json{{"error", std::string(
+                        "occurrence store unavailable: ") + e.what()}}.dump(),
+                        "application/json");
+                    return;
+                }
+                json items = json::array();
+                for (const auto& r : rows) {
+                    items.push_back({
+                        {"seq", r.seq},
+                        {"rev", r.rev},
+                        {"occurrence_id", r.occurrence_id},
+                        {"workflow", r.workflow_name},
+                        {"scheduled_for", r.scheduled_for},
+                        {"registry_digest", r.registry_digest},
+                        {"disposition", r.disposition},
+                        {"engine_run_id", r.engine_run_id
+                            ? json(*r.engine_run_id) : json(nullptr)},
+                        {"created_at", r.created_at},
+                    });
+                }
+                json body;
+                body["items"] = std::move(items);
+                if (rows.empty()) {
+                    body["next_cursor"] = nullptr;
+                } else {
+                    body["next_cursor"] = by_rev ? rows.back().rev
+                                                 : rows.back().seq;
+                }
+                body["has_more"] =
+                    static_cast<int64_t>(rows.size()) == limit;
+                res.set_content(body.dump(), "application/json");
+                set_cors(res);
+            });
+
         // ── Jobs ──────────────────────────────────────────────────
         svr.Get("/api/v1/jobs",
             [this](const httplib::Request& req, httplib::Response& res) {

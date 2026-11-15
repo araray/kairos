@@ -23,6 +23,7 @@
 #include "kairos/exec/runner_pool.hpp"
 #include "kairos/kel/evaluator.hpp"
 #include "kairos/persist/db_writer.hpp"
+#include "kairos/persist/occurrence_store.hpp"
 #include "kairos/persist/query_reader.hpp"
 #include "kairos/persist/tag_store.hpp"
 #include "kairos/testing/fake_clock.hpp"
@@ -122,6 +123,14 @@ struct RunContext {
 
     /// Overall run status.
     RunStatus run_status = RunStatus::Evaluating;
+
+    /// Villa integration v1: trusted occurrence identity of a scheduled
+    /// run (empty for manual/watch runs). Injected as VILLA_KAIROS_*.
+    struct VillaOccurrence {
+        std::string occurrence_id;
+        std::string scheduled_for;
+        std::string config_hash;
+    } villa;
 };
 
 // ── Condition evaluation decision ───────────────────────────────────────
@@ -208,6 +217,10 @@ public:
         /// Pre-sorted secret values for output masking (§17.3).
         /// Populated from SecretStore::values(), sorted longest-first.
         std::vector<std::string> secret_values;
+
+        /// Villa integration v1: occurrence store (binds engine run ids
+        /// and marks undeliverable occurrences abandoned). May be null.
+        persist::OccurrenceStore* occurrences = nullptr;
     };
 
     explicit Pipeline(PipelineConfig config, Dependencies deps);
@@ -231,7 +244,14 @@ public:
     /// Stop the pipeline (joins thread if running).
     void stop();
 
+    /// Villa integration v1: digest of the registry the pipeline thread
+    /// has actually swapped in (not merely been asked to load).
+    [[nodiscard]] std::string applied_registry_digest() const;
+
 private:
+    /// Swap in a pending registry, if any (pipeline thread only).
+    void apply_pending_reload();
+
     /// ── §15.4 notification dispatcher ─────────────────────────────
     /// Fire-and-forget worker: the pipeline enqueues completed-run
     /// notifications and never blocks on delivery. Bounded queue;
@@ -330,6 +350,9 @@ private:
     std::atomic<bool> reload_requested_{false};
     std::shared_ptr<const WorkflowRegistry> pending_registry_;
     std::mutex reload_mu_;
+
+    mutable std::mutex applied_mu_;
+    std::string applied_digest_;
 
     // Thread.
     std::jthread thread_;

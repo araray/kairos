@@ -76,6 +76,7 @@ add_library(kairos_core STATIC
     src/persist/database.cpp
     src/persist/db_writer.cpp
     src/persist/query_reader.cpp
+    src/persist/occurrence_store.cpp
     src/observability/logging.cpp
     src/observability/json_formatter.cpp
     src/observability/metrics.cpp
@@ -87,6 +88,7 @@ add_library(kairos_core STATIC
     src/engine/scheduler.cpp
     src/engine/pipeline.cpp
     src/engine/cancel_registry.cpp
+    src/engine/villa_integration.cpp
     src/watch/sample.cpp
     src/watch/watch_engine.cpp
     src/watch/real_scanner.cpp
